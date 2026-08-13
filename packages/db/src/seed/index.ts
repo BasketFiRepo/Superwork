@@ -1,0 +1,689 @@
+import { adminSql } from '../client.js'
+import { withTenant, type TenantContext } from '../tenant.js'
+import { SEED_DOCUMENTS } from './documents.js'
+
+/**
+ * The demo organization (§18.2).
+ *
+ * Coherence is the whole point: the customer whose thread went quiet is the customer
+ * whose project is at risk, whose vendor has not confirmed a delivery, and whose
+ * contract amendment is in company memory. The dataset is generated from a causal
+ * narrative rather than random values, and every row carries `is_demo = true` so it can
+ * never leak into a real tenant's analytics.
+ */
+
+const DAY = 86_400_000
+const now = Date.now()
+const ago = (days: number) => new Date(now - days * DAY)
+const ahead = (days: number) => new Date(now + days * DAY)
+
+/** Deterministic PRNG so a reseed produces an identical org. */
+function makeRandom(seed: number) {
+  let state = seed >>> 0
+  return () => {
+    state = (state * 1_664_525 + 1_013_904_223) >>> 0
+    return state / 0x1_0000_0000
+  }
+}
+
+interface Person {
+  key: string
+  name: string
+  email: string
+  role: 'owner' | 'admin' | 'manager' | 'member' | 'viewer'
+  department: string
+  title: string
+}
+
+const PEOPLE: Person[] = [
+  { key: 'maya', name: 'Maya Ellison', email: 'maya@northwind.example', role: 'owner', department: 'Executive', title: 'Chief Operating Officer' },
+  { key: 'david', name: 'David Okafor', email: 'david@northwind.example', role: 'admin', department: 'Operations', title: 'Head of Operations' },
+  { key: 'sarah', name: 'Sarah Lindqvist', email: 'sarah@northwind.example', role: 'manager', department: 'Operations', title: 'Account Manager' },
+  { key: 'priya', name: 'Priya Raman', email: 'priya@northwind.example', role: 'member', department: 'Operations', title: 'Duty Planner' },
+  { key: 'tom', name: 'Tom Beckett', email: 'tom@northwind.example', role: 'member', department: 'Operations', title: 'Duty Planner' },
+  { key: 'lena', name: 'Lena Hartmann', email: 'lena@northwind.example', role: 'manager', department: 'Finance', title: 'Finance Director' },
+  { key: 'joe', name: 'Joe Adeyemi', email: 'joe@northwind.example', role: 'member', department: 'Finance', title: 'Accounts Assistant' },
+  { key: 'ruth', name: 'Ruth Kavanagh', email: 'ruth@northwind.example', role: 'manager', department: 'Commercial', title: 'Commercial Director' },
+  { key: 'sam', name: 'Sam Iyer', email: 'sam@northwind.example', role: 'member', department: 'Commercial', title: 'Business Development' },
+  { key: 'nina', name: 'Nina Costa', email: 'nina@northwind.example', role: 'member', department: 'Quality', title: 'Quality Lead' },
+  { key: 'omar', name: 'Omar Haddad', email: 'omar@northwind.example', role: 'member', department: 'Operations', title: 'Customs Coordinator' },
+  { key: 'ellie', name: 'Ellie Nakamura', email: 'ellie@northwind.example', role: 'viewer', department: 'Executive', title: 'Board Observer' },
+]
+
+interface CompanySeed {
+  key: string
+  name: string
+  type: 'customer' | 'vendor'
+  ownerKey: string
+  slaDays: number
+  domain: string
+  contact: { name: string; email: string; title: string }
+  renewsInDays?: number
+}
+
+const COMPANIES: CompanySeed[] = [
+  { key: 'halden', name: 'Halden Foods', type: 'customer', ownerKey: 'sarah', slaDays: 4, domain: 'haldenfoods.example', contact: { name: 'Ingrid Solberg', email: 'ingrid@haldenfoods.example', title: 'Supply Chain Manager' }, renewsInDays: 47 },
+  { key: 'trask', name: 'Trask Industrial', type: 'customer', ownerKey: 'sarah', slaDays: 4, domain: 'trask.example', contact: { name: 'Peter Nowak', email: 'peter@trask.example', title: 'Logistics Lead' } },
+  { key: 'belmont', name: 'Belmont Retail', type: 'customer', ownerKey: 'david', slaDays: 4, domain: 'belmontretail.example', contact: { name: 'Aisha Rahman', email: 'aisha@belmontretail.example', title: 'Head of Distribution' } },
+  { key: 'kestrel', name: 'Kestrel Pharma', type: 'customer', ownerKey: 'sarah', slaDays: 2, domain: 'kestrelpharma.example', contact: { name: 'Dr Elena Marsh', email: 'elena@kestrelpharma.example', title: 'Qualified Person' }, renewsInDays: 120 },
+  { key: 'acme', name: 'Acme Manufacturing', type: 'customer', ownerKey: 'sam', slaDays: 4, domain: 'acme-mfg.example', contact: { name: 'Ray Whitfield', email: 'ray@acme-mfg.example', title: 'Procurement Manager' } },
+  { key: 'orbis', name: 'Orbis Energy', type: 'customer', ownerKey: 'sam', slaDays: 5, domain: 'orbisenergy.example', contact: { name: 'Chloe Bennett', email: 'chloe@orbisenergy.example', title: 'Category Buyer' } },
+  { key: 'vantage', name: 'Vantage Chemicals', type: 'customer', ownerKey: 'ruth', slaDays: 4, domain: 'vantagechem.example', contact: { name: 'Marek Dvorak', email: 'marek@vantagechem.example', title: 'Site Logistics' } },
+  { key: 'meridian', name: 'Meridian Textiles', type: 'customer', ownerKey: 'sam', slaDays: 7, domain: 'meridiantextiles.example', contact: { name: 'Yuki Tanaka', email: 'yuki@meridiantextiles.example', title: 'Import Manager' } },
+  { key: 'coldstore', name: 'Coldstore Nordics', type: 'vendor', ownerKey: 'david', slaDays: 5, domain: 'coldstorenordics.example', contact: { name: 'Anders Vik', email: 'anders@coldstorenordics.example', title: 'Account Manager' } },
+  { key: 'portside', name: 'Portside Haulage', type: 'vendor', ownerKey: 'priya', slaDays: 5, domain: 'portsidehaulage.example', contact: { name: 'Gary Doyle', email: 'gary@portsidehaulage.example', title: 'Operations Manager' } },
+  { key: 'baltic', name: 'Baltic Ferry Lines', type: 'vendor', ownerKey: 'omar', slaDays: 5, domain: 'balticferry.example', contact: { name: 'Ilona Kask', email: 'ilona@balticferry.example', title: 'Schedule Coordinator' } },
+  { key: 'apex', name: 'Apex Customs Brokers', type: 'vendor', ownerKey: 'omar', slaDays: 5, domain: 'apexcustoms.example', contact: { name: 'Helen Bright', email: 'helen@apexcustoms.example', title: 'Broker' } },
+]
+
+/**
+ * Threads. `daysQuiet` beyond the account SLA makes a thread stale; `lastDirection`
+ * decides whether chasing is the right move or whether the thread is ambiguous.
+ */
+interface ThreadSeed {
+  companyKey: string
+  subject: string
+  daysQuiet: number
+  lastDirection: 'inbound' | 'outbound'
+  messages: { direction: 'inbound' | 'outbound'; daysAgo: number; body: string }[]
+}
+
+const THREADS: ThreadSeed[] = [
+  {
+    companyKey: 'halden',
+    subject: 'Incident 2026-014 — chilled excursion on IMM–BHX',
+    daysQuiet: 9,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 12, body: 'Ingrid — notifying you of a temperature excursion on last night’s Immingham–Birmingham movement. The unit recorded 7.4°C for 82 minutes. The consignment is quarantined at Birmingham pending your decision. Full logs attached.' },
+      { direction: 'inbound', daysAgo: 9, body: 'Thanks for the notification. Two questions before we decide: what was the pre-cool duration on that unit, and has this driver had an excursion before? We also need to understand whether the two-hour notice in the amendment was met. Our QA will not release the goods until we have both answers in writing.' },
+    ],
+  },
+  {
+    companyKey: 'belmont',
+    subject: 'Q1 volumes and the Glasgow lane',
+    daysQuiet: 7,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 15, body: 'Aisha — attaching our proposal for the Glasgow lane at the volumes you outlined. Happy to walk through it.' },
+      { direction: 'inbound', daysAgo: 7, body: 'This mostly works. The waiting-time surcharge is the sticking point — our Glasgow DC regularly holds vehicles for three hours. Can you look at that line again? If we can land it we would move the full Q1 volume across.' },
+    ],
+  },
+  {
+    companyKey: 'kestrel',
+    subject: 'Validation pack — outstanding 2025 audit finding',
+    daysQuiet: 11,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 20, body: 'Elena — confirming we have the mapping certificates refreshed for the three vehicles on your account.' },
+      { direction: 'inbound', daysAgo: 11, body: 'Certificates received, thank you. The open finding from the 2025 audit was about incomplete pre-cool logs rather than mapping. We need evidence that the pre-cool logging gap is closed before the May audit. Could you send the current process and a sample of recent logs?' },
+    ],
+  },
+  {
+    companyKey: 'acme',
+    subject: 'Invoice NW-20418 — disputed waiting time',
+    daysQuiet: 6,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 18, body: 'Ray — invoice NW-20418 attached covering the November movements.' },
+      { direction: 'inbound', daysAgo: 6, body: 'We are disputing three waiting-time lines on NW-20418. Our gate records show the vehicles were released inside the two free hours on all three occasions. Please review and reissue — we will settle the undisputed balance in the meantime.' },
+    ],
+  },
+  {
+    companyKey: 'trask',
+    subject: 'Customs classification for the new SKU range',
+    daysQuiet: 6,
+    lastDirection: 'outbound',
+    messages: [
+      { direction: 'inbound', daysAgo: 14, body: 'Can you confirm the commodity codes you are using for the new SKU range?' },
+      { direction: 'outbound', daysAgo: 6, body: 'Peter — confirmed with our broker: the codes are as listed in the attached schedule. Nothing further needed from your side unless the specification changes.' },
+    ],
+  },
+  {
+    companyKey: 'orbis',
+    subject: 'Rebate reconciliation Q4',
+    daysQuiet: 8,
+    lastDirection: 'outbound',
+    messages: [
+      { direction: 'inbound', daysAgo: 21, body: 'Please could you send the Q4 rebate calculation?' },
+      { direction: 'outbound', daysAgo: 8, body: 'Chloe — Q4 rebate calculation attached, credited against the January statement. Let me know if anything looks off.' },
+    ],
+  },
+  {
+    companyKey: 'coldstore',
+    subject: 'Unconfirmed delivery window — Gothenburg w/c 16th',
+    daysQuiet: 8,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 13, body: 'Anders — we still do not have a confirmed inbound window for the Halden volume week commencing the 16th. The agreement requires confirmation seven days out.' },
+      { direction: 'inbound', daysAgo: 8, body: 'Apologies for the delay, our team is mid-handover. I will confirm the window shortly.' },
+    ],
+  },
+  {
+    companyKey: 'vantage',
+    subject: 'ADR paperwork for the Rotterdam movements',
+    daysQuiet: 2,
+    lastDirection: 'inbound',
+    messages: [
+      { direction: 'outbound', daysAgo: 5, body: 'Marek — attaching the ADR documentation set for review.' },
+      { direction: 'inbound', daysAgo: 2, body: 'Received, reviewing this week. Nothing needed from you yet.' },
+    ],
+  },
+]
+
+interface ProjectSeed {
+  key: string
+  name: string
+  companyKey?: string
+  ownerKey: string
+  department: string
+  status: 'planning' | 'active' | 'on_hold'
+  targetInDays: number
+  milestones: { name: string; dueInDays: number; status: string }[]
+}
+
+const PROJECTS: ProjectSeed[] = [
+  {
+    key: 'halden-peak',
+    name: 'Halden peak season readiness',
+    companyKey: 'halden',
+    ownerKey: 'sarah',
+    department: 'Operations',
+    status: 'active',
+    targetInDays: 38,
+    milestones: [
+      { name: 'Cold-chain capacity confirmed', dueInDays: -6, status: 'open' },
+      { name: 'Excursion process retrained', dueInDays: 12, status: 'open' },
+      { name: 'Peak plan signed off by Halden', dueInDays: 34, status: 'open' },
+    ],
+  },
+  {
+    key: 'kestrel-audit',
+    name: 'Kestrel Pharma audit readiness',
+    companyKey: 'kestrel',
+    ownerKey: 'nina',
+    department: 'Quality',
+    status: 'active',
+    targetInDays: 84,
+    milestones: [
+      { name: 'Pre-cool logging gap closed', dueInDays: -3, status: 'open' },
+      { name: 'Evidence pack assembled', dueInDays: 40, status: 'open' },
+    ],
+  },
+  {
+    key: 'glasgow-lane',
+    name: 'Glasgow lane commercial proposal',
+    companyKey: 'belmont',
+    ownerKey: 'ruth',
+    department: 'Commercial',
+    status: 'active',
+    targetInDays: 21,
+    milestones: [{ name: 'Revised surcharge model', dueInDays: 7, status: 'open' }],
+  },
+  {
+    key: 'nordics-review',
+    name: 'Coldstore Nordics contract review',
+    companyKey: 'coldstore',
+    ownerKey: 'david',
+    department: 'Operations',
+    status: 'active',
+    targetInDays: 30,
+    milestones: [{ name: 'Service credit position agreed', dueInDays: -1, status: 'open' }],
+  },
+  {
+    key: 'customs-uplift',
+    name: 'Customs process uplift',
+    ownerKey: 'omar',
+    department: 'Operations',
+    status: 'planning',
+    targetInDays: 90,
+    milestones: [{ name: 'Broker consolidation decision', dueInDays: 25, status: 'open' }],
+  },
+  {
+    key: 'finance-close',
+    name: 'Q1 finance close automation',
+    ownerKey: 'lena',
+    department: 'Finance',
+    status: 'on_hold',
+    targetInDays: 60,
+    milestones: [{ name: 'Requirements agreed', dueInDays: 15, status: 'open' }],
+  },
+]
+
+const TASK_TEMPLATES: { project: string; title: string; assignee: string; dueInDays: number; status: string; priority: string }[] = [
+  { project: 'halden-peak', title: 'Get written pre-cool duration for unit R-4412', assignee: 'priya', dueInDays: -8, status: 'in_progress', priority: 'urgent' },
+  { project: 'halden-peak', title: 'Confirm Gothenburg inbound window with Coldstore', assignee: 'david', dueInDays: -5, status: 'waiting', priority: 'high' },
+  { project: 'halden-peak', title: 'Reply to Ingrid with excursion answers', assignee: 'sarah', dueInDays: -4, status: 'todo', priority: 'urgent' },
+  { project: 'halden-peak', title: 'Retrain Immingham drivers on alarm handling', assignee: 'tom', dueInDays: 11, status: 'todo', priority: 'high' },
+  { project: 'halden-peak', title: 'Draft peak season capacity plan', assignee: 'sarah', dueInDays: 25, status: 'todo', priority: 'medium' },
+  { project: 'kestrel-audit', title: 'Document the pre-cool logging change', assignee: 'nina', dueInDays: -3, status: 'in_progress', priority: 'high' },
+  { project: 'kestrel-audit', title: 'Pull sample pre-cool logs for January', assignee: 'priya', dueInDays: -1, status: 'todo', priority: 'high' },
+  { project: 'kestrel-audit', title: 'Book the May audit slot', assignee: 'nina', dueInDays: 30, status: 'todo', priority: 'low' },
+  { project: 'glasgow-lane', title: 'Rework waiting-time surcharge for Belmont', assignee: 'ruth', dueInDays: -2, status: 'todo', priority: 'high' },
+  { project: 'glasgow-lane', title: 'Model margin at 3h average wait', assignee: 'sam', dueInDays: 5, status: 'todo', priority: 'medium' },
+  { project: 'nordics-review', title: 'Calculate Q4 service credits owed', assignee: 'lena', dueInDays: -6, status: 'blocked', priority: 'high' },
+  { project: 'nordics-review', title: 'Agree escalation contact at Coldstore', assignee: 'david', dueInDays: 4, status: 'todo', priority: 'medium' },
+  { project: 'customs-uplift', title: 'Compare Apex against two alternative brokers', assignee: 'omar', dueInDays: 18, status: 'todo', priority: 'medium' },
+  { project: 'finance-close', title: 'Reissue invoice NW-20418 without disputed lines', assignee: 'joe', dueInDays: -3, status: 'todo', priority: 'high' },
+  { project: 'finance-close', title: 'Map the current close checklist', assignee: 'lena', dueInDays: 20, status: 'backlog', priority: 'low' },
+]
+
+export interface SeedResult {
+  organizationId: string
+  ownerUserId: string
+  login: { email: string; password: string }
+  counts: Record<string, number>
+}
+
+export async function seedDemoOrganization(): Promise<SeedResult> {
+  const sql = adminSql()
+  const random = makeRandom(20260813)
+
+  // Plan limits are global reference data.
+  const { DEFAULT_PLAN_LIMITS } = await import('@superwork/config')
+  for (const limits of Object.values(DEFAULT_PLAN_LIMITS)) {
+    await sql`
+      INSERT INTO plan_limits (tier, seats, agent_runs_per_month, ai_spend_cap_cents,
+        per_user_daily_spend_cap_cents, documents_indexed, storage_gb, workflow_runs_per_month, autopilot_allowed)
+      VALUES (${limits.tier}, ${limits.seats}, ${limits.agentRunsPerMonth}, ${limits.aiSpendCapCents},
+        ${limits.perUserDailySpendCapCents}, ${limits.documentsIndexed}, ${limits.storageGb},
+        ${limits.workflowRunsPerMonth}, ${limits.autopilotAllowed})
+      ON CONFLICT (tier) DO UPDATE SET seats = EXCLUDED.seats`
+  }
+
+  await sql`DELETE FROM organizations WHERE slug = 'northwind'`
+
+  const [org] = await sql<{ id: string }[]>`
+    INSERT INTO organizations (name, slug, industry, timezone, currency, plan_tier, profile, glossary, is_demo)
+    VALUES (
+      'Northwind Logistics', 'northwind', 'Freight forwarding and third-party logistics',
+      'Europe/London', 'GBP', 'business',
+      ${sql.json({
+        tone: 'Direct, warm, never breezy. Short sentences. No exclamation marks.',
+        workingHours: { start: '08:30', end: '17:30', days: [1, 2, 3, 4, 5] },
+        operatingSites: ['Felixstowe', 'Immingham', 'Dover', 'Manchester'],
+        painPoints: ['Cold-chain excursions notified late', 'Vendor confirmations chased by hand', 'Threads going quiet'],
+      })},
+      ${sql.json([
+        { term: 'IMM', meaning: 'Immingham port' },
+        { term: 'BHX', meaning: 'Birmingham depot' },
+        { term: 'reefer', meaning: 'temperature-controlled trailer' },
+        { term: 'excursion', meaning: 'temperature outside the agreed band' },
+        { term: 'MSA', meaning: 'master services agreement' },
+        { term: 'pre-cool', meaning: 'cooling a reefer unit to target temperature before loading' },
+      ])},
+      true
+    ) RETURNING id`
+  const organizationId = org!.id
+
+  // ---- Departments ---------------------------------------------------------
+  const departmentIds = new Map<string, string>()
+  for (const name of ['Executive', 'Operations', 'Finance', 'Commercial', 'Quality']) {
+    const [row] = await sql<{ id: string }[]>`
+      INSERT INTO departments (organization_id, name, path, depth, timezone, is_demo)
+      VALUES (${organizationId}, ${name}, ${name.toLowerCase()}, 0, 'Europe/London', true)
+      RETURNING id`
+    departmentIds.set(name, row!.id)
+  }
+
+  // ---- People --------------------------------------------------------------
+  const { hashPassword } = await import('@superwork/auth')
+  const passwordHash = await hashPassword('superwork')
+  const userIds = new Map<string, string>()
+
+  for (const person of PEOPLE) {
+    const [existing] = await sql<{ id: string }[]>`SELECT id FROM users WHERE lower(email) = lower(${person.email})`
+    const userId =
+      existing?.id ??
+      (
+        await sql<{ id: string }[]>`
+          INSERT INTO users (email, name, password_hash, timezone, locale, is_demo)
+          VALUES (${person.email}, ${person.name}, ${passwordHash}, 'Europe/London', 'en-GB', true)
+          RETURNING id`
+      )[0]!.id
+    userIds.set(person.key, userId)
+
+    await sql`
+      INSERT INTO memberships (organization_id, user_id, role, department_id, title, is_demo)
+      VALUES (${organizationId}, ${userId}, ${person.role}, ${departmentIds.get(person.department)!}, ${person.title}, true)`
+  }
+
+  const ownerUserId = userIds.get('maya')!
+
+  await sql`
+    INSERT INTO monitoring_policies (organization_id, jurisdiction_profile, created_by)
+    VALUES (${organizationId}, 'strict', ${ownerUserId})`
+  await sql`
+    INSERT INTO subscriptions (organization_id, tier, seats_purchased, ai_spend_cap_cents, created_by)
+    VALUES (${organizationId}, 'business', 25, 250000, ${ownerUserId})`
+
+  // Reporting lines, including one dotted line so matrix rollups are exercised.
+  const reports: [string, string, string][] = [
+    ['david', 'maya', 'functional'], ['sarah', 'david', 'functional'], ['priya', 'david', 'functional'],
+    ['tom', 'david', 'functional'], ['omar', 'david', 'functional'], ['lena', 'maya', 'functional'],
+    ['joe', 'lena', 'functional'], ['ruth', 'maya', 'functional'], ['sam', 'ruth', 'functional'],
+    ['nina', 'maya', 'functional'], ['nina', 'david', 'dotted'],
+  ]
+  for (const [person, manager, type] of reports) {
+    await sql`
+      INSERT INTO reporting_relationships (organization_id, person_id, manager_id, type, is_demo)
+      VALUES (${organizationId}, ${userIds.get(person)!}, ${userIds.get(manager)!}, ${type}, true)`
+  }
+
+  const counts: Record<string, number> = { people: PEOPLE.length, departments: departmentIds.size }
+
+  // Everything below runs through the tenant path, so the seed exercises RLS.
+  await withTenant({ organizationId, userId: ownerUserId, timezone: 'Europe/London' }, async (ctx) => {
+    const companyIds = await seedCompanies(ctx, userIds)
+    const projectIds = await seedProjects(ctx, userIds, departmentIds, companyIds)
+    counts['companies'] = companyIds.size
+    counts['projects'] = projectIds.size
+    counts['tasks'] = await seedTasks(ctx, userIds, projectIds, departmentIds, random)
+    counts['conversations'] = await seedThreads(ctx, userIds, companyIds)
+    counts['documents'] = await seedDocuments(ctx, companyIds, projectIds, userIds)
+    counts['agents'] = await seedAgents(ctx, userIds, departmentIds)
+    counts['policies'] = await seedApprovalPolicies(ctx)
+  })
+
+  return {
+    organizationId,
+    ownerUserId,
+    login: { email: 'maya@northwind.example', password: 'superwork' },
+    counts,
+  }
+}
+
+async function seedCompanies(ctx: TenantContext, userIds: Map<string, string>): Promise<Map<string, string>> {
+  const ids = new Map<string, string>()
+  for (const company of COMPANIES) {
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO companies (organization_id, name, type, domains, owner_id, reply_sla_days,
+                             contract_renews_on, health_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${company.name}, ${company.type}, ${[company.domain]},
+              ${userIds.get(company.ownerKey)!}, ${company.slaDays},
+              ${company.renewsInDays ? ahead(company.renewsInDays) : null},
+              ${company.key === 'halden' ? 'at_risk' : 'healthy'}, true, ${ctx.userId})
+      RETURNING id`
+    ids.set(company.key, row!.id)
+
+    await ctx.sql`
+      INSERT INTO contacts (organization_id, company_id, name, emails, title, owner_id,
+                            last_interaction_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${row!.id}, ${company.contact.name}, ${[company.contact.email]},
+              ${company.contact.title}, ${userIds.get(company.ownerKey)!}, ${ago(7)}, true, ${ctx.userId})`
+  }
+  return ids
+}
+
+async function seedProjects(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+  companyIds: Map<string, string>,
+): Promise<Map<string, string>> {
+  const ids = new Map<string, string>()
+  for (const project of PROJECTS) {
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO projects (organization_id, department_id, company_id, name, description, status,
+                            owner_id, starts_on, target_date, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${departmentIds.get(project.department)!},
+              ${project.companyKey ? companyIds.get(project.companyKey)! : null}, ${project.name},
+              ${null}, ${project.status}, ${userIds.get(project.ownerKey)!},
+              ${ago(60)}, ${ahead(project.targetInDays)}, true, ${ctx.userId})
+      RETURNING id`
+    ids.set(project.key, row!.id)
+
+    for (const milestone of project.milestones) {
+      await ctx.sql`
+        INSERT INTO milestones (organization_id, project_id, name, due_on, status, is_demo, created_by)
+        VALUES (${ctx.organizationId}, ${row!.id}, ${milestone.name}, ${ahead(milestone.dueInDays)},
+                ${milestone.status}, true, ${ctx.userId})`
+    }
+
+    await ctx.sql`
+      INSERT INTO project_members (organization_id, project_id, user_id, role, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${row!.id}, ${userIds.get(project.ownerKey)!}, 'owner', true, ${ctx.userId})`
+  }
+  return ids
+}
+
+async function seedTasks(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  projectIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+  random: () => number,
+): Promise<number> {
+  let count = 0
+
+  for (const template of TASK_TEMPLATES) {
+    await ctx.sql`
+      INSERT INTO tasks (organization_id, project_id, title, status, priority, assignee_id,
+                         due_at, waiting_on, blocked_reason, department_id, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${projectIds.get(template.project)!}, ${template.title},
+              ${template.status}::sw_task_status, ${template.priority}::sw_priority,
+              ${userIds.get(template.assignee)!}, ${ahead(template.dueInDays)},
+              ${template.status === 'waiting' ? 'Coldstore Nordics confirmation' : null},
+              ${template.status === 'blocked' ? 'Waiting on Q4 storage invoices from Coldstore' : null},
+              ${departmentIds.get('Operations')!}, true, ${ctx.userId})`
+    count += 1
+  }
+
+  // Background volume so list views, workload and health scores have realistic mass.
+  const verbs = ['Chase', 'Review', 'Confirm', 'Update', 'Prepare', 'Reconcile', 'Book', 'File', 'Check']
+  const objects = [
+    'the customs entry', 'the delivery note', 'the rate review', 'the driver debrief',
+    'the depot handover', 'the monthly statement', 'the temperature logs', 'the vehicle inspection',
+    'the demurrage claim', 'the pallet exchange record',
+  ]
+  const statuses = ['backlog', 'todo', 'in_progress', 'review', 'completed', 'completed']
+  const priorities = ['low', 'medium', 'medium', 'high']
+  const projectKeys = [...projectIds.keys()]
+  const personKeys = ['sarah', 'priya', 'tom', 'omar', 'joe', 'sam', 'nina', 'david']
+
+  for (let i = 0; i < 165; i++) {
+    const status = statuses[Math.floor(random() * statuses.length)]!
+    const dueOffset = Math.floor(random() * 60) - 25
+    await ctx.sql`
+      INSERT INTO tasks (organization_id, project_id, title, status, priority, assignee_id, due_at,
+                         completed_at, department_id, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${projectIds.get(projectKeys[Math.floor(random() * projectKeys.length)]!)!},
+              ${`${verbs[Math.floor(random() * verbs.length)]} ${objects[Math.floor(random() * objects.length)]} (#${1000 + i})`},
+              ${status}::sw_task_status, ${priorities[Math.floor(random() * priorities.length)]}::sw_priority,
+              ${userIds.get(personKeys[Math.floor(random() * personKeys.length)]!)!},
+              ${ahead(dueOffset)}, ${status === 'completed' ? ago(Math.floor(random() * 20)) : null},
+              ${departmentIds.get('Operations')!}, true, ${ctx.userId})`
+    count += 1
+  }
+  return count
+}
+
+async function seedThreads(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  companyIds: Map<string, string>,
+): Promise<number> {
+  let count = 0
+  for (const thread of THREADS) {
+    const company = COMPANIES.find((c) => c.key === thread.companyKey)!
+    const [conv] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO conversations (organization_id, channel, subject, company_id, owner_id, participants,
+                                 last_message_at, last_direction, status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'email', ${thread.subject}, ${companyIds.get(thread.companyKey)!},
+              ${userIds.get(company.ownerKey)!},
+              ${ctx.sql.json([{ name: company.contact.name, email: company.contact.email }])},
+              ${ago(thread.daysQuiet)}, ${thread.lastDirection}, 'open', true, ${ctx.userId})
+      RETURNING id`
+
+    for (const message of thread.messages) {
+      const outbound = message.direction === 'outbound'
+      await ctx.sql`
+        INSERT INTO messages (organization_id, conversation_id, direction, from_address, from_name,
+                              to_addresses, sent_at, body_text, trust_level, is_demo, created_by)
+        VALUES (${ctx.organizationId}, ${conv!.id}, ${message.direction},
+                ${outbound ? 'ops@northwind.example' : company.contact.email},
+                ${outbound ? 'Northwind Operations' : company.contact.name},
+                ${outbound ? [company.contact.email] : ['ops@northwind.example']},
+                ${ago(message.daysAgo)}, ${message.body},
+                ${outbound ? 'org_data' : 'untrusted_external'}, true, ${ctx.userId})`
+    }
+    count += 1
+  }
+  return count
+}
+
+async function seedDocuments(
+  ctx: TenantContext,
+  companyIds: Map<string, string>,
+  projectIds: Map<string, string>,
+  userIds: Map<string, string>,
+): Promise<number> {
+  const { ingestDocument } = await import('@superwork/core')
+
+  const [space] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO knowledge_spaces (organization_id, name, slug, description, is_demo, created_by)
+    VALUES (${ctx.organizationId}, 'Operations', 'operations', 'Procedures, policies and contracts', true, ${ctx.userId})
+    RETURNING id`
+
+  let count = 0
+  const versionByKey = new Map<string, string>()
+
+  for (const document of SEED_DOCUMENTS) {
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO documents (organization_id, space_id, company_id, title, doc_type, source,
+                             sensitivity, owner_id, index_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${space!.id},
+              ${document.companyKey ? companyIds.get(document.companyKey)! : null},
+              ${document.title}, ${document.docType}, ${document.untrusted ? 'integration' : 'upload'},
+              ${document.sensitivityHint ?? 'internal'}, ${userIds.get('david')!}, 'pending', true, ${ctx.userId})
+      RETURNING id`
+
+    const result = await ingestDocument(ctx, {
+      documentId: row!.id,
+      body: document.body,
+      title: document.title,
+      docType: document.docType,
+      companyId: document.companyKey ? companyIds.get(document.companyKey)! : null,
+      spaceId: space!.id,
+      ownerId: userIds.get('david')!,
+      sensitivityHint: document.sensitivityHint ?? 'internal',
+      untrusted: document.untrusted ?? false,
+    })
+    if (result.versionId) versionByKey.set(document.key, result.versionId)
+    count += 1
+  }
+
+  // The 2025 amendment supersedes the 2024 MSA — retrieval must prefer the amendment.
+  const v1 = versionByKey.get('msa-halden-v1')
+  const v2 = versionByKey.get('msa-halden-v2')
+  if (v1 && v2) {
+    await ctx.sql`UPDATE document_versions SET supersedes_version_id = ${v1} WHERE id = ${v2}`
+    await ctx.sql`UPDATE document_chunks SET is_superseded = true WHERE version_id = ${v1}`
+    const [oldDoc] = await ctx.sql<{ document_id: string }[]>`SELECT document_id FROM document_versions WHERE id = ${v1}`
+    const [newDoc] = await ctx.sql<{ document_id: string }[]>`SELECT document_id FROM document_versions WHERE id = ${v2}`
+    if (oldDoc && newDoc) {
+      await ctx.sql`
+        INSERT INTO links (organization_id, from_type, from_id, to_type, to_id, relation, created_by)
+        VALUES (${ctx.organizationId}, 'document', ${newDoc.document_id}, 'document', ${oldDoc.document_id},
+                'supersedes', ${ctx.userId})`
+    }
+  }
+
+  return count
+}
+
+async function seedAgents(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+): Promise<number> {
+  const agents = [
+    {
+      key: 'orchestrator',
+      name: 'Superwork',
+      purpose: 'Answers questions with citations and proposes plans for the operations team.',
+      owner: 'maya',
+      mode: 'execute',
+      status: 'active',
+    },
+    {
+      key: 'follow_up',
+      name: 'Operations Follow-Up',
+      purpose: 'Watches for customer threads past their reply SLA and drafts chasers for approval.',
+      owner: 'david',
+      mode: 'assist',
+      status: 'staged',
+    },
+    {
+      key: 'researcher',
+      name: 'Researcher',
+      purpose: 'Retrieves and cites company knowledge. Structurally incapable of writing.',
+      owner: 'maya',
+      mode: 'ask',
+      status: 'active',
+    },
+  ]
+
+  for (const agent of agents) {
+    await ctx.sql`
+      INSERT INTO agents (organization_id, key, name, purpose, owner_user_id, scope_department_id,
+                          mode, status, tool_grants, max_sensitivity, budget, escalation_user_id,
+                          is_subagent, published_by, published_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${agent.key}, ${agent.name}, ${agent.purpose},
+              ${userIds.get(agent.owner)!}, ${departmentIds.get('Operations')!},
+              ${agent.mode}::sw_agent_mode, ${agent.status}::sw_agent_status,
+              ${agent.key === 'researcher' ? ['search_knowledge@v1', 'query_aggregate@v1', 'read_document@v1'] : ['*']},
+              'confidential',
+              ${ctx.sql.json({ runsPerDay: 200, tokensPerDay: 2_000_000, spendPerMonthCents: 50_000, maxActionsPerDay: 100 })},
+              ${userIds.get('david')!}, ${agent.key !== 'orchestrator'},
+              ${userIds.get('maya')!}, ${ago(20)}, true, ${ctx.userId})`
+  }
+
+  // The organization-level ceiling the agent can never exceed.
+  const grants = [
+    { capability: 'read', tool: '*' },
+    { capability: 'draft', tool: 'draft_email' },
+    { capability: 'execute:low', tool: 'create_task' },
+    { capability: 'execute:low', tool: 'update_task' },
+    { capability: 'execute:low', tool: 'link_entities' },
+  ]
+  for (const grant of grants) {
+    await ctx.sql`
+      INSERT INTO agent_permissions (organization_id, department_id, capability, tool_pattern, effect,
+                                     max_sensitivity, granted_by, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${departmentIds.get('Operations')!}, ${grant.capability},
+              ${grant.tool}, 'allow', 'confidential', ${userIds.get('maya')!}, true, ${ctx.userId})`
+  }
+
+  return agents.length
+}
+
+async function seedApprovalPolicies(ctx: TenantContext): Promise<number> {
+  const policies = [
+    {
+      name: 'External communication requires approval',
+      description: 'Anything leaving the organization is drafted and held for a person.',
+      rule: { match: { tools: ['send_email@v1', 'share_document_externally@v1'] }, require: { approverRole: 'manager', slaHours: 4 }, effect: 'require' },
+      priority: 10,
+    },
+    {
+      name: 'Bulk changes require approval',
+      description: 'More than twenty writes in one run needs a person to look first.',
+      rule: { match: { minWrites: 20 }, require: { approverRole: 'manager', slaHours: 8 }, effect: 'require' },
+      priority: 20,
+    },
+    {
+      name: 'Autopilot may not take high-risk actions',
+      description: 'Irreversible or externally visible actions are never granted to Autopilot.',
+      rule: { match: { actorType: 'agent', mode: 'autopilot', minRisk: 'high' }, effect: 'deny' },
+      priority: 5,
+    },
+  ]
+  for (const policy of policies) {
+    await ctx.sql`
+      INSERT INTO approval_policies (organization_id, name, description, rule, priority, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${policy.name}, ${policy.description}, ${ctx.sql.json(policy.rule)},
+              ${policy.priority}, true, ${ctx.userId})`
+  }
+  return policies.length
+}

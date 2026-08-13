@@ -1,0 +1,93 @@
+import type { TenantContext } from '@superwork/db'
+import type { Role, Sensitivity } from '@superwork/db'
+import type { Actor, AgentActorFacet } from './policy.js'
+
+interface ActorRow {
+  user_id: string
+  name: string
+  role: Role
+  department_id: string | null
+  extra_permissions: string[]
+  team_ids: string[] | null
+}
+
+/** Loads the acting human. Requires a TenantContext — there is no un-scoped path. */
+export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promise<Actor> {
+  const rows = await ctx.sql<ActorRow[]>`
+    SELECT m.user_id,
+           u.name,
+           m.role,
+           m.department_id,
+           m.extra_permissions,
+           array_remove(array_agg(tm.team_id), NULL) AS team_ids
+    FROM memberships m
+    JOIN users u ON u.id = m.user_id
+    LEFT JOIN team_members tm ON tm.user_id = m.user_id AND tm.deleted_at IS NULL
+    WHERE m.user_id = ${userId}
+      AND m.organization_id = ${ctx.organizationId}
+      AND m.deleted_at IS NULL
+      AND m.status = 'active'
+    GROUP BY m.user_id, u.name, m.role, m.department_id, m.extra_permissions`
+
+  const row = rows[0]
+  if (!row) throw new Error('Not found.')
+
+  return {
+    type: 'user',
+    userId: row.user_id,
+    organizationId: ctx.organizationId,
+    role: row.role,
+    displayName: row.name,
+    departmentIds: row.department_id ? [row.department_id] : [],
+    teamIds: row.team_ids ?? [],
+    extraPermissions: row.extra_permissions ?? [],
+  }
+}
+
+export interface AgentFacetInput {
+  agentId: string
+  agentName: string
+  mode: AgentActorFacet['mode']
+  toolGrants: string[]
+  maxSensitivity: Sensitivity
+  capabilityDowngraded?: boolean
+}
+
+/**
+ * Wraps a human actor as an agent acting on their behalf. The agent can never exceed
+ * the human — that is enforced structurally by deriving from their Actor (§4.4).
+ */
+export async function asAgent(
+  ctx: TenantContext,
+  principal: Actor,
+  input: AgentFacetInput,
+): Promise<Actor> {
+  const grants = await ctx.sql<{ capability: string; tool_pattern: string; effect: string }[]>`
+    SELECT capability, tool_pattern, effect
+    FROM agent_permissions
+    WHERE organization_id = ${ctx.organizationId}
+      AND deleted_at IS NULL
+      AND (department_id IS NULL OR department_id = ANY(${principal.departmentIds}::uuid[]))`
+
+  const orgGrant = grants.filter((g) => g.effect === 'allow').map((g) => g.tool_pattern)
+
+  return {
+    ...principal,
+    type: 'agent',
+    agent: {
+      agentId: input.agentId,
+      agentName: input.agentName,
+      mode: input.mode,
+      orgGrant,
+      toolGrants: input.toolGrants,
+      maxSensitivity: input.maxSensitivity,
+      capabilityDowngraded: input.capabilityDowngraded ?? false,
+    },
+  }
+}
+
+export async function killSwitchEngaged(ctx: TenantContext): Promise<boolean> {
+  const rows = await ctx.sql<{ agent_kill_switch: boolean }[]>`
+    SELECT agent_kill_switch FROM organizations WHERE id = ${ctx.organizationId}`
+  return rows[0]?.agent_kill_switch ?? false
+}

@@ -1,0 +1,25 @@
+-- 0001 · rollback
+DROP TABLE IF EXISTS monitoring_policies CASCADE;
+DROP TABLE IF EXISTS feature_flag_overrides CASCADE;
+DROP TABLE IF EXISTS usage_records CASCADE;
+DROP TABLE IF EXISTS subscriptions CASCADE;
+DROP TABLE IF EXISTS plan_limits CASCADE;
+DROP TABLE IF EXISTS invitations CASCADE;
+DROP TABLE IF EXISTS sessions CASCADE;
+DROP TABLE IF EXISTS reporting_relationships CASCADE;
+DROP TABLE IF EXISTS team_members CASCADE;
+DROP TABLE IF EXISTS teams CASCADE;
+DROP TABLE IF EXISTS memberships CASCADE;
+DROP TABLE IF EXISTS departments CASCADE;
+DROP TABLE IF EXISTS organizations CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+DROP TYPE IF EXISTS sw_plan_tier;
+DROP TYPE IF EXISTS sw_runtime_mode;
+DROP TYPE IF EXISTS sw_sensitivity;
+DROP TYPE IF EXISTS sw_actor_type;
+DROP TYPE IF EXISTS sw_role;
+
+DROP FUNCTION IF EXISTS sw_attach_touch(regclass);
+DROP FUNCTION IF EXISTS sw_current_org();
+DROP FUNCTION IF EXISTS sw_touch_row();

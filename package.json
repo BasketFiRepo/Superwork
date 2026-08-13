@@ -1,0 +1,39 @@
+{
+  "name": "superwork",
+  "private": true,
+  "version": "0.1.0",
+  "description": "An agentic AI operating system for company work",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:migrate": "node --env-file=.env --import tsx packages/db/src/cli/migrate.ts up",
+    "db:rollback": "node --env-file=.env --import tsx packages/db/src/cli/migrate.ts down",
+    "db:reset": "node --env-file=.env --import tsx packages/db/src/cli/migrate.ts reset",
+    "db:seed": "node --env-file=.env --import tsx packages/db/src/cli/seed.ts",
+    "db:bootstrap": "pnpm db:reset && pnpm db:seed",
+    "dev": "pnpm --filter @superwork/web dev",
+    "build": "pnpm --filter @superwork/web build",
+    "worker": "node --env-file=.env --import tsx apps/worker/src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:isolation": "vitest run tests/isolation",
+    "test:permissions": "vitest run tests/permissions",
+    "eval": "node --env-file=.env --import tsx packages/agent/src/evals/cli.ts",
+    "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "zod": "^3.24.1"
+  },
+  "type": "module"
+}

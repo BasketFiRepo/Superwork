@@ -1,0 +1,13 @@
+-- 0002 · rollback
+DROP TABLE IF EXISTS saved_views CASCADE;
+DROP TABLE IF EXISTS task_watchers CASCADE;
+DROP TABLE IF EXISTS task_comments CASCADE;
+DROP TABLE IF EXISTS task_dependencies CASCADE;
+DROP TABLE IF EXISTS tasks CASCADE;
+DROP TABLE IF EXISTS milestones CASCADE;
+DROP TABLE IF EXISTS project_members CASCADE;
+DROP TABLE IF EXISTS projects CASCADE;
+
+DROP TYPE IF EXISTS sw_project_status;
+DROP TYPE IF EXISTS sw_priority;
+DROP TYPE IF EXISTS sw_task_status;

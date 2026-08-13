@@ -1,0 +1,17 @@
+-- 0003 · rollback
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_company_fk;
+
+DROP TABLE IF EXISTS follow_ups CASCADE;
+DROP TABLE IF EXISTS commitments CASCADE;
+DROP TABLE IF EXISTS email_sends CASCADE;
+DROP TABLE IF EXISTS email_drafts CASCADE;
+DROP TABLE IF EXISTS messages CASCADE;
+DROP TABLE IF EXISTS conversations CASCADE;
+DROP TABLE IF EXISTS notes CASCADE;
+DROP TABLE IF EXISTS contacts CASCADE;
+DROP TABLE IF EXISTS companies CASCADE;
+
+DROP TYPE IF EXISTS sw_commitment_status;
+DROP TYPE IF EXISTS sw_commitment_direction;
+DROP TYPE IF EXISTS sw_message_direction;
+DROP TYPE IF EXISTS sw_company_type;
