@@ -1,6 +1,6 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
 import { claimBatch, markDispatched, markFailed, writeActivity } from '@superwork/core'
-import { evict, runWatchers } from '@superwork/agent'
+import { evict, generateDueBriefings, runWatchers } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
 /**
@@ -16,6 +16,7 @@ import { emailProvider } from '@superwork/integrations'
 
 const POLL_MS = Number(process.env['WORKER_POLL_MS'] ?? 5000)
 const WATCHER_MS = Number(process.env['WORKER_WATCHER_MS'] ?? 15 * 60_000)
+const BRIEFING_MS = Number(process.env['WORKER_BRIEFING_MS'] ?? 30 * 60_000)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -99,6 +100,7 @@ async function dispatchEmail(
 async function main(): Promise<void> {
   console.log(`Superwork worker started · outbox every ${POLL_MS}ms · watchers every ${WATCHER_MS}ms`)
   let lastWatcherRun = 0
+  let lastBriefingRun = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -126,6 +128,25 @@ async function main(): Promise<void> {
           }
         } catch (error) {
           console.error(`[watchers] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+      }
+    }
+
+    // Briefings are generated per person at their own local hour, and the sweep is
+    // spread across the day rather than fired at one instant (§26.5).
+    if (Date.now() - lastBriefingRun > BRIEFING_MS) {
+      lastBriefingRun = Date.now()
+      for (const org of organizations) {
+        if (!org.ownerId) continue
+        try {
+          const result = await generateDueBriefings({
+            organizationId: org.id,
+            userId: org.ownerId,
+            timezone: org.timezone,
+          })
+          if (result.generated > 0) console.log(`[briefings] ${org.id}: generated ${result.generated}`)
+        } catch (error) {
+          console.error(`[briefings] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
       }
     }

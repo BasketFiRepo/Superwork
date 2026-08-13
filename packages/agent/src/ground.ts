@@ -25,11 +25,19 @@ export interface GroundResult {
   retrievalNote: string
 }
 
+const MEETING_TASKS = /\b(action items?|tasks? from (?:the )?meeting|from the meeting)\b/i
+
 export async function ground(
   ctx: TenantContext,
   actor: Actor,
   request: string,
-  options: { mode: string; canDraft: boolean; canExecuteLow: boolean; canExecuteHigh: boolean },
+  options: {
+    mode: string
+    canDraft: boolean
+    canExecuteLow: boolean
+    canExecuteHigh: boolean
+    uiContext?: Record<string, unknown>
+  },
 ): Promise<GroundResult> {
   const aggregates: Grounding['aggregates'] = {}
   const ran: AggregateQuery[] = []
@@ -88,6 +96,49 @@ export async function ground(
     }
   }
 
+  // Meeting action items only become tasks once their owner has confirmed them, so the
+  // planner is given the confirmed ones and nothing else (§29.1).
+  let meetingActionItems: Grounding['meetingActionItems'] = []
+  const meetingId = options.uiContext?.['meetingId']
+  if (typeof meetingId === 'string' && MEETING_TASKS.test(request)) {
+    meetingActionItems = await ctx.sql<NonNullable<Grounding['meetingActionItems']>>`
+      SELECT cm.id AS "commitmentId", cm.obligation, cm.owner_user_id AS "ownerUserId",
+             u.name AS "ownerName", cm.due_at AS "dueAt", cm.source_segment_id AS "segmentId",
+             m.title AS "meetingTitle", cm.status
+      FROM commitments cm
+      JOIN transcript_segments s ON s.id = cm.source_segment_id
+      JOIN transcripts t ON t.id = s.transcript_id
+      JOIN meetings m ON m.id = t.meeting_id
+      LEFT JOIN users u ON u.id = cm.owner_user_id
+      WHERE cm.organization_id = ${ctx.organizationId} AND cm.deleted_at IS NULL
+        AND m.id = ${meetingId}
+        AND cm.status = 'confirmed'
+        -- Provenance is the dedupe: a task already derived from that moment is not
+        -- proposed a second time.
+        AND NOT EXISTS (
+          SELECT 1 FROM links l
+          WHERE l.organization_id = cm.organization_id AND l.deleted_at IS NULL
+            AND l.from_type = 'task' AND l.to_type = 'transcript_segment'
+            AND l.to_id = cm.source_segment_id
+        )`
+  }
+
+  // Retrieved passages are scanned too. A meeting transcript with an outside attendee in
+  // the room is external content the moment it is ingested, and it reaches the context
+  // through the index rather than through the message table (§5.9.4).
+  for (const chunk of search.chunks) {
+    const findings = detectInjection(chunk.content)
+    if (findings.length === 0) continue
+    const label = `Passage from ${chunk.documentTitle}${chunk.anchor ? ` (${chunk.anchor})` : ''}`
+    untrusted.push({
+      sourceId: chunk.documentId,
+      label,
+      flagged: true,
+      patterns: findings.map((f) => f.pattern),
+    })
+    injectionFindings.push({ sourceId: chunk.documentId, label, patterns: findings.map((f) => f.pattern) })
+  }
+
   const [me] = await ctx.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${actor.userId}`
 
   const grounding: Grounding = {
@@ -112,6 +163,7 @@ export async function ground(
     })),
     noAnswer: search.noAnswer,
     untrusted,
+    meetingActionItems,
   }
 
   return {

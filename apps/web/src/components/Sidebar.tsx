@@ -18,7 +18,21 @@ interface NavItem {
   comingSoon?: string
 }
 
-export function Sidebar({ approvals, insights, flags }: { approvals: number; insights: number; flags: FlagSet }) {
+export function Sidebar({
+  approvals,
+  insights,
+  inbox,
+  pastSla,
+  commitments,
+  flags,
+}: {
+  approvals: number
+  insights: number
+  inbox: number
+  pastSla: number
+  commitments: number
+  flags: FlagSet
+}) {
   const pathname = usePathname()
 
   const groups: { title: string; items: NavItem[] }[] = [
@@ -26,6 +40,7 @@ export function Sidebar({ approvals, insights, flags }: { approvals: number; ins
       title: 'Work',
       items: [
         { href: '/', label: 'Today' },
+        { href: '/briefing', label: 'Briefing' },
         { href: '/tasks', label: 'Tasks' },
         { href: '/projects', label: 'Projects' },
       ],
@@ -33,8 +48,10 @@ export function Sidebar({ approvals, insights, flags }: { approvals: number; ins
     {
       title: 'Communicate',
       items: [
-        { href: '/inbox', label: 'Inbox', flag: 'inbox', comingSoon: 'Phase 2' },
-        { href: '/meetings', label: 'Meetings', flag: 'meetings', comingSoon: 'Phase 2' },
+        { href: '/inbox', label: 'Inbox', count: inbox, attention: pastSla > 0, flag: 'inbox' },
+        { href: '/meetings', label: 'Meetings', flag: 'meetings' },
+        { href: '/commitments', label: 'Commitments', count: commitments, flag: 'inbox' },
+        { href: '/companies', label: 'Companies', flag: 'crm' },
       ],
     },
     {

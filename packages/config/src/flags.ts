@@ -18,11 +18,11 @@ export const FEATURE_FLAGS = [
 
 export type FeatureFlag = (typeof FEATURE_FLAGS)[number]
 
-/** Phase 1 ships the closed loop. Later phases flip these on per organization. */
+/** Phase 2 ships the nervous system. Later phases flip the remainder on per organization. */
 export const DEFAULT_FLAGS: Record<FeatureFlag, boolean> = {
-  inbox: false,
-  meetings: false,
-  crm: false,
+  inbox: true,
+  meetings: true,
+  crm: true,
   workflows: true,
   insights: true,
   reports: false,

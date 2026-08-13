@@ -31,6 +31,17 @@ export interface Grounding {
   }[]
   noAnswer: boolean
   untrusted: { sourceId: string; label: string; flagged: boolean; patterns: string[] }[]
+  /** Confirmed action items from a meeting the user is looking at, awaiting task creation. */
+  meetingActionItems?: {
+    commitmentId: string
+    obligation: string
+    ownerUserId: string | null
+    ownerName: string | null
+    dueAt: string | Date | null
+    segmentId: string | null
+    meetingTitle: string
+    status: string
+  }[]
 }
 
 export interface PlanStepDraft {
@@ -141,6 +152,32 @@ export function planFor(request: string, g: Grounding): PlanDraft {
         entityType: 'conversation',
         entityId: str(row, 'conversation_id'),
       })),
+    }
+  }
+
+  // --- Turn confirmed meeting action items into tasks ------------------------
+  const actionItems = g.meetingActionItems ?? []
+  if (actionItems.length > 0) {
+    return {
+      intent: 'tasks_from_meeting',
+      answerOnly: false,
+      summary:
+        `${actionItems.length} action ${actionItems.length === 1 ? 'item has' : 'items have'} been confirmed by their owners in ` +
+        `"${actionItems[0]!.meetingTitle}". I will create one task each, linked back to the moment in the transcript ` +
+        `where it was agreed. Items nobody has confirmed are not included.`,
+      steps: actionItems.map((item) => ({
+        id: `mtg-${item.commitmentId.slice(0, 8)}`,
+        tool: 'create_task',
+        args: {
+          title: item.obligation.slice(0, 200),
+          assigneeId: item.ownerUserId,
+          priority: 'medium',
+          dueAt: item.dueAt ? new Date(item.dueAt).toISOString() : null,
+          ...(item.segmentId ? { derivedFrom: { type: 'transcript_segment', id: item.segmentId } } : {}),
+        },
+        intent: `${item.ownerName ?? 'Its owner'} confirmed this in "${item.meetingTitle}".`,
+      })),
+      needsAttention: [],
     }
   }
 
@@ -276,30 +313,84 @@ function bestSentence(content: string, headingPath: string, terms: Set<string>):
   const heading = headingPath.toLowerCase()
   let headingScore = 0
   for (const term of terms) if (heading.includes(term)) headingScore += 1
-  const cleaned = content
-    .split('\n')
-    .filter((line) => line.trim() && !line.trim().startsWith('#'))
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  const sentences = cleaned.split(/(?<=[.!?])\s+/).filter((s) => s.length > 25)
+  const passages = passagesOf(content)
   let best = { text: '', score: 0 }
 
-  for (const sentence of sentences) {
-    const lower = sentence.toLowerCase()
+  for (const passage of passages) {
+    const lower = passage.toLowerCase()
     let score = headingScore
     for (const term of terms) if (lower.includes(term)) score += 1
     // A sentence carrying a figure is usually the one that answers a "how much" question.
-    if (/[£$€]\s?[\d,]+|\b\d+\s?(?:days?|hours?|%)\b/.test(sentence)) score += 0.5
-    if (score > best.score) best = { text: trim(sentence), score }
+    if (/[£$€]\s?[\d,]+|\b\d+\s?(?:days?|hours?|%)\b/.test(passage)) score += 0.5
+    if (score > best.score) best = { text: trim(passage), score }
   }
 
-  return best.score > 0 ? best : { text: trim(sentences[0] ?? cleaned), score: 0 }
+  return best.score > 0 ? best : { text: trim(passages[0] ?? content.replace(/\s+/g, ' ').trim()), score: 0 }
 }
 
-function trim(sentence: string): string {
-  return sentence.length > 320 ? `${sentence.slice(0, 317)}…` : sentence
+const LIST_ITEM = /^\s*(?:\d+[.)]|[-*•])\s+/
+
+/**
+ * Splits a passage into answerable units. Prose splits into sentences, but an enumerated
+ * procedure stays whole and keeps the line that introduces it: "If an excursion exceeds
+ * the band maximum:" is not an answer, and "1. The driver notifies the duty planner" cut
+ * loose from its ladder is not one either.
+ */
+function passagesOf(content: string): string[] {
+  const lines = content.split('\n').filter((line) => !line.trim().startsWith('#'))
+  const passages: string[] = []
+  let prose: string[] = []
+  let list: string[] = []
+
+  const flushProse = () => {
+    if (prose.length === 0) return
+    const text = prose.join(' ').replace(/\s+/g, ' ').trim()
+    for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+      if (sentence.trim()) passages.push(sentence.trim())
+    }
+    prose = []
+  }
+
+  const flushList = () => {
+    if (list.length === 0) return
+    const previous = passages[passages.length - 1]
+    const leadIn = previous?.endsWith(':') ? passages.pop()! : ''
+    passages.push([leadIn, ...list].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim())
+    list = []
+  }
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      flushProse()
+      flushList()
+      continue
+    }
+    if (LIST_ITEM.test(line)) {
+      flushProse()
+      list.push(line.trim())
+      continue
+    }
+    if (list.length > 0) {
+      // An indented line is the wrapped remainder of the item above it.
+      if (/^\s{2,}/.test(line)) {
+        list[list.length - 1] = `${list[list.length - 1]} ${line.trim()}`
+        continue
+      }
+      flushList()
+    }
+    prose.push(line.trim())
+  }
+  flushProse()
+  flushList()
+
+  return passages.filter((passage) => passage.length > 25)
+}
+
+function trim(passage: string): string {
+  // A procedure is allowed to be longer than a sentence — truncating it at three steps
+  // would be worse than not answering.
+  const max = LIST_ITEM.test(passage) || /\s\d+[.)]\s/.test(passage) ? 700 : 320
+  return passage.length > max ? `${passage.slice(0, max - 3)}…` : passage
 }
 
 export function reportFor(

@@ -83,12 +83,19 @@ export const SUBAGENT_TOOLS: Record<string, string[]> = {
   researcher: [
     'search_knowledge', 'search_entities', 'get_entity', 'list_tasks', 'list_projects',
     'read_thread', 'read_document', 'query_aggregate', 'get_user_workload', 'cite',
+    'list_threads', 'get_transcript', 'list_meetings', 'list_decisions',
+    'summarize_relationship', 'list_commitments',
   ],
   task_agent: [
     'list_tasks', 'get_entity', 'create_task', 'update_task', 'assign_task', 'complete_task',
     'set_due_date', 'comment_on_task', 'link_entities', 'query_aggregate',
   ],
-  comms_agent: ['read_thread', 'draft_email', 'revise_draft', 'send_email', 'create_follow_up', 'search_entities'],
+  comms_agent: [
+    'read_thread', 'draft_email', 'revise_draft', 'send_email', 'create_follow_up', 'search_entities',
+    'list_threads', 'snooze_thread', 'archive_thread', 'track_waiting_for', 'propose_commitment',
+  ],
+  meeting_agent: ['get_transcript', 'list_meetings', 'list_decisions', 'propose_commitment', 'create_task', 'link_entities'],
+  crm_agent: ['summarize_relationship', 'list_commitments', 'log_interaction', 'search_entities', 'get_entity'],
   analyst: ['query_aggregate', 'list_tasks', 'list_projects', 'get_project_health'],
   watcher: ['query_aggregate', 'list_tasks', 'search_entities', 'create_insight'],
   critic: [],

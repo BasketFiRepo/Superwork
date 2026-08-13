@@ -2,6 +2,17 @@ import { estimateCostCents, resolveRoute } from '@superwork/config'
 import type { CompletionEvent, CompletionRequest, LLMProvider, ProviderCapabilities } from '../provider.js'
 import { estimateTokens, renderBlocks } from '../provider.js'
 import { answerFor, criticFor, planFor, reportFor, type Grounding } from './brain.js'
+import {
+  briefingNarrative,
+  extractCommitments,
+  narrate360,
+  summarizeMeeting,
+  triageFor,
+  type BriefingGrounding,
+  type CrmGrounding,
+  type MeetingGrounding,
+  type TriageInputPayload,
+} from './nervous-system.js'
 
 /**
  * The `mock` LLMProvider. Deterministic and seeded: the same request against the same
@@ -52,7 +63,29 @@ export class MockLLMProvider implements LLMProvider {
         value = criticFor((req.grounding?.['draft'] as never) ?? {})
         break
       case 'inbox.classify':
-        value = classify(req.userMessage)
+        value = req.grounding?.['conversation']
+          ? triageFor(req.grounding['conversation'] as TriageInputPayload)
+          : classify(req.userMessage)
+        break
+      case 'inbox.extract_commitments':
+        value = { commitments: extractCommitments(String(req.grounding?.['text'] ?? req.userMessage)) }
+        break
+      case 'meeting.summarize':
+        value = summarizeMeeting((req.grounding?.['meeting'] as MeetingGrounding) ?? { title: '', segments: [], participants: [] })
+        break
+      case 'crm.summary':
+        value = narrate360((req.grounding?.['account'] as CrmGrounding) ?? {
+          companyName: 'this account',
+          facts: [],
+          risks: [],
+          openThreads: 0,
+          weOwe: 0,
+          theyOwe: 0,
+          nextBestAction: null,
+        })
+        break
+      case 'briefing.narrative':
+        value = briefingNarrative(req.grounding?.['briefing'] as BriefingGrounding)
         break
       case 'email.draft':
         value = { body: draftBody(req.grounding ?? {}) }
@@ -65,7 +98,7 @@ export class MockLLMProvider implements LLMProvider {
     const tokensOut = estimateTokens(serialized)
 
     // Stream narrative output so the UI exercises real backpressure handling.
-    if (req.taskClass === 'agent.answer' || req.taskClass === 'agent.report') {
+    if (req.taskClass === 'agent.answer' || req.taskClass === 'agent.report' || req.taskClass === 'briefing.narrative') {
       const text = String((value as { text?: string }).text ?? '')
       for (const word of text.split(/(\s+)/)) {
         yield { type: 'text', delta: word }

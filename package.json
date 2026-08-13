@@ -21,7 +21,9 @@
     "test:isolation": "vitest run tests/isolation",
     "test:permissions": "vitest run tests/permissions",
     "eval": "node --env-file=.env --import tsx packages/agent/src/evals/cli.ts",
-    "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts"
+    "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts",
+    "loop:phase2": "node --env-file=.env --import tsx scripts/phase2-loop.ts",
+    "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

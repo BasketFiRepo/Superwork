@@ -153,6 +153,7 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
       canDraft: input.mode === 'execute' || input.mode === 'assist',
       canExecuteLow: input.mode === 'execute' || input.mode === 'autopilot',
       canExecuteHigh: false,
+      uiContext: input.uiContext ?? {},
     })
     await emitStep(ctx, runId, phase, {
       phase: 'ground',

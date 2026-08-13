@@ -9,13 +9,25 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const session = await requireSession()
 
   const counts = await withActor(session, async (ctx) => {
-    const [row] = await ctx.sql<{ approvals: number; insights: number }[]>`
+    const [row] = await ctx.sql<
+      { approvals: number; insights: number; inbox: number; pastSla: number; commitments: number }[]
+    >`
       SELECT
         (SELECT count(*)::int FROM approvals
           WHERE organization_id = ${ctx.organizationId} AND status = 'pending' AND deleted_at IS NULL) AS approvals,
         (SELECT count(*)::int FROM insights
-          WHERE organization_id = ${ctx.organizationId} AND status = 'new' AND deleted_at IS NULL) AS insights`
-    return row ?? { approvals: 0, insights: 0 }
+          WHERE organization_id = ${ctx.organizationId} AND status = 'new' AND deleted_at IS NULL) AS insights,
+        (SELECT count(*)::int FROM conversations
+          WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND archived_at IS NULL
+            AND (snoozed_until IS NULL OR snoozed_until <= now())) AS inbox,
+        (SELECT count(*)::int FROM conversations conv
+          LEFT JOIN companies c ON c.id = conv.company_id
+          WHERE conv.organization_id = ${ctx.organizationId} AND conv.deleted_at IS NULL
+            AND conv.archived_at IS NULL AND conv.last_direction = 'inbound'
+            AND conv.last_message_at < now() - make_interval(days => coalesce(c.reply_sla_days, 4))) AS "pastSla",
+        (SELECT count(*)::int FROM commitments
+          WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND status = 'proposed') AS commitments`
+    return row ?? { approvals: 0, insights: 0, inbox: 0, pastSla: 0, commitments: 0 }
   })
 
   return (
@@ -53,7 +65,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         </div>
       </header>
 
-      <Sidebar approvals={counts.approvals} insights={counts.insights} flags={session.flags} />
+      <Sidebar
+        approvals={counts.approvals}
+        insights={counts.insights}
+        inbox={counts.inbox}
+        pastSla={counts.pastSla}
+        commitments={counts.commitments}
+        flags={session.flags}
+      />
 
       <main className="main">
         <div className="main-inner">{children}</div>
