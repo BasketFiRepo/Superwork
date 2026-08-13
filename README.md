@@ -126,3 +126,12 @@ config. `AI_MODE`, `EMAIL_MODE`, `CALENDAR_MODE`, `STORAGE_MODE` and `BILLING_MO
 resolve to `mock | sandbox | live`, and the resolved mode is rendered in the interface
 wherever it affects what you should believe. `AUTOPILOT_ENABLED` is rejected while
 `AI_MODE=mock`.
+
+## Deployment
+
+The repository is a pnpm workspace and the deployable application is `apps/web`. On Vercel
+the project's **Root Directory** must be set to `apps/web`, which is where `next.config.mjs`
+and the `next` dependency live. Vercel then detects the Next.js preset on its own, installs
+from the workspace root because it sees `pnpm-workspace.yaml`, and reads the build output
+from `apps/web/.next`. Left at the repository root the build still succeeds, but the
+deployment fails looking for a static `public/` directory that this project does not have.
