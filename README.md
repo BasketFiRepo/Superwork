@@ -168,7 +168,11 @@ Nothing in the interface pretends to work.
 ## Configuration
 
 Every variable is validated at boot with Zod and the process refuses to start on a bad
-config. `AI_MODE`, `EMAIL_MODE`, `CALENDAR_MODE`, `STORAGE_MODE` and `BILLING_MODE` each
+config. `vercel.json` points the platform at the workspace build (`pnpm --filter
+@superwork/web build` → `apps/web/.next`); a hosted deployment still needs `DATABASE_URL`
+pointing at a PostgreSQL 16 instance with `pgvector` and `pg_trgm`, `SESSION_SECRET`, and
+the migrations applied — the app boots against an empty database but every screen is a
+sign-in wall until `pnpm db:seed` or a real organization exists. `AI_MODE`, `EMAIL_MODE`, `CALENDAR_MODE`, `STORAGE_MODE` and `BILLING_MODE` each
 resolve to `mock | sandbox | live`, and the resolved mode is rendered in the interface
 wherever it affects what you should believe. `AUTOPILOT_ENABLED` is rejected while
 `AI_MODE=mock`.
