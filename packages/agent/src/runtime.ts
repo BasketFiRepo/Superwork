@@ -5,7 +5,9 @@ import { asAgent, can, killSwitchEngaged, loadActor, type Actor } from '@superwo
 import {
   BudgetError,
   checkSpendLimits,
+  claimNextRun,
   createApproval,
+  enqueueRun,
   personaForKey,
   record as recordUsageRecord,
   writeActivity,
@@ -80,7 +82,7 @@ export async function startRun(session: RunSession, input: StartRunInput): Promi
     if (!spend.allow) throw new BudgetError(spend.reason)
 
     const budget = newBudget()
-    return insertRun(ctx, {
+    const id = await insertRun(ctx, {
       principalUserId: actor.userId,
       agentId: await resolveAgentId(ctx, input.agentKey ?? 'orchestrator'),
       mode: input.mode,
@@ -96,19 +98,104 @@ export async function startRun(session: RunSession, input: StartRunInput): Promi
       aiMode: env().AI_MODE,
       isDemo: org?.is_demo ?? false,
     })
+
+    // The department is resolved once, here: a membership change later must not silently
+    // re-class work that is already waiting.
+    await enqueueRun(ctx, {
+      runId: id,
+      departmentId: actor.departmentIds[0] ?? null,
+      queueClass: input.queueClass ?? 'interactive',
+    })
+    return id
   })
 
   publish(runId, { type: 'run.started', runId, traceId })
-  // Detached on purpose: the user may navigate away and the run continues (§5.8).
-  void drive({ ...session, traceId }, runId, input).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error)
-    publish(runId, { type: 'run.failed', failureClass: 'model', message })
-    await withTenant({ ...session, traceId }, (ctx) =>
-      setRunStatus(ctx, runId, 'failed', { failureClass: 'model', failureDetail: message }),
-    ).catch(() => {})
-  })
+  // The run is queued, not started. The fair-share scheduler decides which department
+  // goes next; when nothing else is waiting, that is this run, immediately (§26.6).
+  pendingInputs.set(runId, input)
+  void pump(session)
 
   return { runId, traceId }
+}
+
+/**
+ * The drain loop (§26.6).
+ *
+ * Runs are claimed through the fair-share scheduler rather than started where they were
+ * created, so a department that queues two hundred jobs at 09:00 cannot push everybody
+ * else behind them. When nothing else is waiting the claim is immediate, so an
+ * interactive run still starts in milliseconds.
+ *
+ * `pendingInputs` carries the parts of a request that are not columns — a proposed
+ * persona, the plan-only flag — for runs enqueued by this process. A run claimed after a
+ * restart is reconstructed from its row, which is why those two fields belong to
+ * simulations only.
+ */
+const pendingInputs = new Map<string, StartRunInput>()
+let inFlight = 0
+
+export function inFlightRuns(): number {
+  return inFlight
+}
+
+export async function pump(session: RunSession, worker = `web-${process.pid}`): Promise<number> {
+  let started = 0
+  const ceiling = env().AGENT_MAX_CONCURRENT
+
+  while (inFlight < ceiling) {
+    const claimed = await withTenant(session, (ctx) => claimNextRun(ctx, worker)).catch(() => null)
+    if (!claimed) break
+
+    const stored = pendingInputs.get(claimed.runId)
+    pendingInputs.delete(claimed.runId)
+    const input = stored ?? (await withTenant(session, (ctx) => inputFromRow(ctx, claimed.runId)))
+    if (!input) continue
+
+    const traceId = randomUUID()
+    inFlight += 1
+    started += 1
+    // Detached on purpose: the user may navigate away and the run continues (§5.8).
+    void drive({ ...session, traceId }, claimed.runId, input)
+      .catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        publish(claimed.runId, { type: 'run.failed', failureClass: 'model', message })
+        await withTenant({ ...session, traceId }, (ctx) =>
+          setRunStatus(ctx, claimed.runId, 'failed', { failureClass: 'model', failureDetail: message }),
+        ).catch(() => {})
+      })
+      .finally(() => {
+        inFlight -= 1
+        // A finished run frees a slot; the next department in line takes it.
+        void pump(session, worker).catch(() => {})
+      })
+  }
+
+  return started
+}
+
+/** Rebuilds a request from the row, for runs this process did not enqueue. */
+async function inputFromRow(ctx: TenantContext, runId: string): Promise<StartRunInput | null> {
+  const [row] = await ctx.sql<
+    {
+      request: string
+      mode: StartRunInput['mode']
+      trigger: StartRunInput['trigger']
+      ui_context: Record<string, unknown>
+      agent_key: string | null
+    }[]
+  >`
+    SELECT r.request, r.mode, r.trigger, r.ui_context, a.key AS agent_key
+    FROM agent_runs r
+    LEFT JOIN agents a ON a.id = r.agent_id
+    WHERE r.organization_id = ${ctx.organizationId} AND r.id = ${runId}`
+  if (!row) return null
+  return {
+    request: row.request,
+    mode: row.mode,
+    trigger: row.trigger,
+    uiContext: row.ui_context,
+    ...(row.agent_key ? { agentKey: row.agent_key } : {}),
+  }
 }
 
 async function drive(session: RunSession & { traceId: string }, runId: string, input: StartRunInput): Promise<void> {

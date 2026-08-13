@@ -98,6 +98,11 @@ export interface StartRunInput {
   planOnly?: boolean
   /** Runs against a persona that is not (yet) the published one. */
   persona?: RunPersona
+  /**
+   * Which queue this belongs in. Interactive work is scheduled ahead of background and
+   * bulk work of the same weight (§26.6).
+   */
+  queueClass?: 'interactive' | 'background' | 'bulk'
 }
 
 /** What the runtime enforces about an agent, whether stored or proposed. */

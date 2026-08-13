@@ -18,6 +18,12 @@ export interface Actor {
   teamIds: string[]
   /** Explicit grants layered on top of the role baseline. */
   extraPermissions: string[]
+  /**
+   * Relation tuples this actor holds, as `relation:object_type:object_id` (§4.6). Loaded
+   * once with the actor so a permission check stays synchronous and in-memory — the
+   * §26.9 budget for a check is 10 ms, and a query per check would not make it.
+   */
+  relations?: ReadonlySet<string>
   /** Present when the actor is an agent acting on behalf of `userId`. */
   agent?: AgentActorFacet
 }
@@ -122,9 +128,37 @@ function checkHumanPermissions(actor: Actor, resourceType: string, verb: string,
   }
 
   if (best === null) {
+    // Roles say what a kind of person may do. A relation tuple says what *this* person may
+    // do with *this* thing — which is how sharing works without changing anybody's role.
+    const granted = relationGrant(actor, resourceType, verb, resource)
+    if (granted) return ALLOW(granted)
     return DENY(explainMissing(actor, resourceType, verb, resource))
   }
   return ALLOW(`Allowed by ${actor.role} role (${resourceType}:${verb}:${best}).`)
+}
+
+/** The weakest relation that satisfies a verb. Ordered, so `owner` satisfies everything. */
+const RELATION_FOR_VERB: Record<string, string[]> = {
+  read: ['viewer', 'editor', 'approver', 'owner'],
+  create: ['editor', 'owner'],
+  update: ['editor', 'owner'],
+  complete: ['editor', 'owner'],
+  share_external: ['owner'],
+  delete: ['owner'],
+  decide: ['approver', 'owner'],
+  approve: ['approver', 'owner'],
+}
+
+function relationGrant(actor: Actor, resourceType: string, verb: string, resource: Resource): string | null {
+  if (!actor.relations || actor.relations.size === 0 || !resource.id) return null
+  const accepted = RELATION_FOR_VERB[verb]
+  if (!accepted) return null
+  for (const relation of accepted) {
+    if (actor.relations.has(`${relation}:${resourceType}:${resource.id}`)) {
+      return `Allowed because this ${resourceType.replace(/_/g, ' ')} is shared with you as ${relation}.`
+    }
+  }
+  return null
 }
 
 function scopeSatisfied(scope: PermissionScope, actor: Actor, resource: Resource): boolean {

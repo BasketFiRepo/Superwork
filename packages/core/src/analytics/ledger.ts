@@ -160,17 +160,22 @@ export async function ledgerReport(
   const includeNoDepartment = visible.some((d) => d.id === null)
 
   // `department` is resolved once, from the membership of the human the run acted for.
+  // Columns are listed rather than `r.*`: the run now carries its own `department_id`,
+  // recorded when it was queued, and selecting both it and the membership's would leave
+  // the name ambiguous. The run's own value wins — it is what the scheduler used.
   const scope = sql`
     WITH scoped AS (
-      SELECT r.*, m.department_id
+      SELECT r.id, r.agent_id, r.mode, r.status, r.plan, r.cost_cents, r.tokens_in, r.tokens_out,
+             r.contains_untrusted_content, r.capability_downgraded, r.undone_at,
+             coalesce(r.department_id, m.department_id) AS department_id
       FROM agent_runs r
       LEFT JOIN memberships m
         ON m.user_id = r.principal_user_id AND m.organization_id = r.organization_id AND m.deleted_at IS NULL
       WHERE r.organization_id = ${org} AND r.deleted_at IS NULL
         AND r.created_at >= ${period.from} AND r.created_at < ${period.to}
         AND (
-          m.department_id = ANY(${visibleIds}::uuid[])
-          ${includeNoDepartment ? sql`OR m.department_id IS NULL` : sql``}
+          coalesce(r.department_id, m.department_id) = ANY(${visibleIds}::uuid[])
+          ${includeNoDepartment ? sql`OR coalesce(r.department_id, m.department_id) IS NULL` : sql``}
         )
     )`
 
@@ -480,7 +485,7 @@ export async function ledgerRuns(
       ON m.user_id = r.principal_user_id AND m.organization_id = r.organization_id AND m.deleted_at IS NULL
     WHERE r.organization_id = ${ctx.organizationId} AND r.deleted_at IS NULL
       AND r.created_at >= ${input.period.from} AND r.created_at < ${input.period.to}
-      AND m.department_id IS NOT DISTINCT FROM ${input.departmentId}
+      AND coalesce(r.department_id, m.department_id) IS NOT DISTINCT FROM ${input.departmentId}
     ORDER BY r.created_at DESC
     LIMIT ${Math.min(input.limit ?? 50, 200)}`
 }

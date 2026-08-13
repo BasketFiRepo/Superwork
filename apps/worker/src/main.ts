@@ -1,5 +1,5 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
-import { claimBatch, markDispatched, markFailed, writeActivity } from '@superwork/core'
+import { claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runWatchers } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
@@ -18,6 +18,7 @@ const POLL_MS = Number(process.env['WORKER_POLL_MS'] ?? 5000)
 const WATCHER_MS = Number(process.env['WORKER_WATCHER_MS'] ?? 15 * 60_000)
 const BRIEFING_MS = Number(process.env['WORKER_BRIEFING_MS'] ?? 30 * 60_000)
 const DIGEST_MS = Number(process.env['WORKER_DIGEST_MS'] ?? 60 * 60_000)
+const NUDGE_MS = Number(process.env['WORKER_NUDGE_MS'] ?? 5 * 60_000)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
   let lastWatcherRun = 0
   let lastBriefingRun = 0
   let lastDigestRun = 0
+  let lastNudgeRun = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -149,6 +151,28 @@ async function main(): Promise<void> {
           if (result.generated > 0) console.log(`[briefings] ${org.id}: generated ${result.generated}`)
         } catch (error) {
           console.error(`[briefings] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+      }
+    }
+
+    // The nudge ladder: what is due, inside each person's shared daily budget (§29.2).
+    if (Date.now() - lastNudgeRun > NUDGE_MS) {
+      lastNudgeRun = Date.now()
+      for (const org of organizations) {
+        if (!org.ownerId) continue
+        try {
+          const outcome = await withTenant(
+            { organizationId: org.id, userId: org.ownerId, timezone: org.timezone },
+            (ctx) => deliverDueNudges(ctx),
+          )
+          if (outcome.delivered || outcome.heldByBudget || outcome.cancelled) {
+            console.log(
+              `[nudges] ${org.id}: ${outcome.delivered} delivered, ${outcome.heldByBudget} held by the daily budget, ` +
+                `${outcome.cancelled} cancelled because the work was already done`,
+            )
+          }
+        } catch (error) {
+          console.error(`[nudges] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
       }
     }

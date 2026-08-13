@@ -32,15 +32,33 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
   const row = rows[0]
   if (!row) throw new Error('Not found.')
 
+  const departmentIds = row.department_id ? [row.department_id] : []
+  const teamIds = row.team_ids ?? []
+
+  // Relation tuples are loaded with the actor, once, so `can()` stays synchronous. The
+  // cap is deliberate: an actor holding thousands of individual grants is a modelling
+  // problem, and silently loading them all would make every request pay for it (§4.6).
+  const tuples = await ctx.sql<{ relation: string; object_type: string; object_id: string }[]>`
+    SELECT relation, object_type, object_id FROM relation_tuples
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+      AND (
+        (subject_type = 'user' AND subject_id = ${userId})
+        OR (subject_type = 'team' AND subject_id = ANY(${teamIds}::uuid[]))
+        OR (subject_type = 'department' AND subject_id = ANY(${departmentIds}::uuid[]))
+      )
+    LIMIT 1000`
+
   return {
     type: 'user',
     userId: row.user_id,
     organizationId: ctx.organizationId,
     role: row.role,
     displayName: row.name,
-    departmentIds: row.department_id ? [row.department_id] : [],
-    teamIds: row.team_ids ?? [],
+    departmentIds,
+    teamIds,
     extraPermissions: row.extra_permissions ?? [],
+    relations: new Set(tuples.map((tuple) => `${tuple.relation}:${tuple.object_type}:${tuple.object_id}`)),
   }
 }
 

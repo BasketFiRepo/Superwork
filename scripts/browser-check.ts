@@ -192,6 +192,24 @@ try {
   await page.waitForSelector('[data-testid="issue-key"]', { timeout: 15_000 })
   ok('The API screen offers to issue a key', (await page.locator('[data-testid="issue-key"]').count()) === 1)
 
+  // ---- Agent queue --------------------------------------------------------
+  await page.goto(`${BASE}/settings/queue`)
+  await page.waitForSelector('[data-testid="quotas"]', { timeout: 15_000 })
+  const quotaRows = await page.locator('[data-testid="quota-row"]').count()
+  ok('The queue screen lists every department', quotaRows > 0, `${quotaRows} departments`)
+  const health = await page.locator('[data-testid="queue-health"]').innerText()
+  ok('It measures the wait against the budget', /p95/i.test(health) && /2000 ms/.test(health))
+
+  // ---- Jurisdiction review ------------------------------------------------
+  await page.goto(`${BASE}/settings/compliance`)
+  await page.waitForSelector('[data-testid="review"]', { timeout: 15_000 })
+  const findings = await page.locator('[data-testid="finding"]').count()
+  ok('The works-council review answers every question', findings >= 10, `${findings} findings`)
+  const reviewText = await page.locator('[data-testid="review"]').innerText()
+  ok('Each answer carries evidence', /constraint/i.test(reviewText))
+  ok('It names the profile it reviewed against', /works council/i.test(reviewText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/compliance.png`, fullPage: true })
+
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {
   failures += 1

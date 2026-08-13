@@ -8,9 +8,9 @@ context → an action was proposed → a human approved it → it was executed �
 verified → everyone can see what occurred and why.
 
 This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
-(the nervous system: inbox, meetings, CRM and the daily briefing) and Phase 3 (scale,
-trust and depth) of the build specification, end to end, **with zero external
-credentials**.
+(the nervous system: inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust
+and depth) and Phase 4 (enterprise scale) of the build specification, end to end, **with
+zero external credentials**.
 
 ---
 
@@ -32,12 +32,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 482 assertions: units, isolation, permissions, briefing, injection, ledger, studio
+pnpm test              # 503 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
+pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
+pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks Inbox, Meetings, CRM and the Briefing in a real browser
 ```
 
@@ -67,6 +69,14 @@ from the interface exactly what the AI read, proposed, executed and cost last mo
 department; an agent can be created, permissioned, simulated and published through change
 control without an engineer; and every employee can open one screen showing what is held
 about them and what was reported to whom.
+
+Phase 4 adds three again. `pnpm loop:phase4` proves two of them — a bulk job of 120 runs
+does not delay a department that queues four, and the works-council review answers ten
+questions with evidence from this tenant's own rows. The third is measured rather than
+asserted: `pnpm loadtest` builds a synthetic tenant, times the operations §26.9 states
+budgets for, and prints the scale it actually reached beside the scale the target assumes.
+At 5,000 users and 120,000 tasks every budget is met with the scoped list view served by an
+index-only scan — evidence about query shape, and explicitly not a 100,000-user result.
 
 ## Layout
 
@@ -192,15 +202,47 @@ rather than pretending data moved.
 **Usage and cost** (`/settings/billing`) — spend by unit, by task class and by department,
 against the plan's caps, plus API call volume.
 
+## Phase 4 — enterprise scale
+
+**Fair-share scheduling** (`/settings/queue`) — runs are claimed through deficit weighted
+round-robin held in the database, not started where they were created. A department that
+queues two hundred jobs at nine o'clock gets its share of the workers and no more;
+interactive work is scheduled ahead of bulk at equal weight; a department at its concurrency
+cap is skipped rather than blocking. Weights, caps and the wait each department is actually
+getting are on one screen. See ADR 0010.
+
+**Jurisdiction profiles and the works-council review** (`/settings/compliance`) — a legal
+entity starts on the strictest profile; loosening it needs a justification and a named
+approver and is recorded. The review answers ten questions with live queries against this
+tenant — most of them backed by a schema property rather than a runtime check, so the answer
+cannot be massaged. It fails until a consultation is recorded, which is what makes the
+passing version mean anything. See ADR 0011.
+
+**The nudge ladder with a shared budget** — the ladder opens at the rung that fits now
+rather than the one the calendar suggests, one action closes it, finishing the work cancels
+it everywhere, and the daily budget belongs to the *person* and is shared across every
+agent. Where the profile forbids manager escalation, that rung does not exist. Delivery goes
+through chat where the capability is connected and degrades to in-app when it is not.
+
+**Relation tuples** — sharing one project with a colleague is a tuple, not a role change.
+Tuples are loaded once with the actor so a permission check stays synchronous and under the
+10 ms budget, and you can only share what you could already do yourself.
+
+**Placement** — a tenant's shard and tier are a row, and the resolver refuses to record a
+move to a shard that has no connection configured rather than pretending a `dedicated` tier
+already isolates something. This build runs one shard and says so.
+
 ## What is deliberately not true yet
 
 Controls for unbuilt features render disabled with the phase named — never as live-looking
 no-ops. The workflow engine's tables, versioning and simulation gate exist but
 natural-language authoring does not; approve-with-edits is stubbed with an explanation;
-admin-authored HTTP tools need a reviewed host allowlist and a sandbox, so the control says
-Phase 4 and there is no table pretending otherwise. Every provider ships as a simulated
-implementation — connecting one says so on the row. Nothing in the interface pretends to
-work.
+admin-authored HTTP tools still need a reviewed host allowlist and a sandbox, and this build
+has no outbound network, so the control stays disabled rather than failing in front of you.
+Every provider ships as a simulated implementation — connecting one says so on the row. The
+scale budgets are measured at the scale this machine can build, and the harness prints that
+scale next to the target rather than rounding the difference away. Nothing in the interface
+pretends to work.
 
 ## Safety properties this implementation actually holds
 
