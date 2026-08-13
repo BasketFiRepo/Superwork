@@ -167,7 +167,133 @@ export const knowledgeGapWatcher: Watcher = {
   },
 }
 
-export const WATCHERS: Watcher[] = [staleThreadWatcher, overdueWatcher, approvalAgingWatcher, knowledgeGapWatcher]
+/**
+ * Commitment tracker (§9.1). Only *confirmed* commitments are chased — a detection the
+ * owner never accepted is not a promise. Before surfacing anything it reports the load
+ * the owner is carrying, so the item reads as a fact about work rather than about a
+ * person (§29.3).
+ */
+export const commitmentTrackerWatcher: Watcher = {
+  key: 'commitment_tracker',
+  title: 'Confirmed commitments past their date',
+  cadence: '0 9 * * 1-5',
+  async detect(ctx) {
+    const rows = await ctx.sql<
+      {
+        id: string
+        obligation: string
+        owner_name: string | null
+        owner_id: string | null
+        company_name: string | null
+        days_late: number
+        open_tasks: number
+        blocked_tasks: number
+        team_median: number
+      }[]
+    >`
+      WITH load AS (
+        SELECT assignee_id,
+               count(*) FILTER (WHERE status NOT IN ('completed','cancelled'))::int AS open_tasks,
+               count(*) FILTER (WHERE status = 'blocked')::int AS blocked_tasks
+        FROM tasks
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        GROUP BY assignee_id
+      )
+      SELECT cm.id, cm.obligation, u.name AS owner_name, cm.owner_user_id AS owner_id,
+             co.name AS company_name,
+             EXTRACT(DAY FROM (now() - cm.due_at))::int AS days_late,
+             coalesce(l.open_tasks, 0) AS open_tasks,
+             coalesce(l.blocked_tasks, 0) AS blocked_tasks,
+             (SELECT coalesce(percentile_cont(0.5) WITHIN GROUP (ORDER BY open_tasks), 0)::int FROM load) AS team_median
+      FROM commitments cm
+      LEFT JOIN users u ON u.id = cm.owner_user_id
+      LEFT JOIN companies co ON co.id = cm.company_id
+      LEFT JOIN load l ON l.assignee_id = cm.owner_user_id
+      WHERE cm.organization_id = ${ctx.organizationId} AND cm.deleted_at IS NULL
+        AND cm.status = 'confirmed'
+        AND cm.due_at IS NOT NULL AND cm.due_at < now()
+      ORDER BY cm.due_at
+      LIMIT 20`
+
+    if (rows.length === 0) return []
+
+    return [
+      {
+        watcher: 'commitment_tracker',
+        type: 'commitment_past_due',
+        severity: rows.some((r) => r.days_late > 7) ? 'high' : 'medium',
+        title: `${rows.length} confirmed ${rows.length === 1 ? 'commitment is' : 'commitments are'} past their date`,
+        body: rows
+          .map(
+            (r) =>
+              `${r.obligation.slice(0, 100)} — ${r.days_late} days late${r.owner_name ? ` (${r.owner_name})` : ''}` +
+              (r.open_tasks > r.team_median * 1.5
+                ? `. They are carrying ${(r.open_tasks / Math.max(1, r.team_median)).toFixed(1)}× the team median load`
+                : '') +
+              (r.blocked_tasks > 0 ? `, with ${r.blocked_tasks} blocked items` : ''),
+          )
+          .join('\n'),
+        dedupeKey: `commitment_tracker:${rows.map((r) => r.id).sort().join(',')}`,
+        evidence: rows.map((r) => ({
+          claim: `"${r.obligation.slice(0, 120)}" was confirmed by ${r.owner_name ?? 'its owner'} and is ${r.days_late} days past its date.`,
+          sourceType: 'commitment',
+          sourceId: r.id,
+        })),
+        entities: rows.map((r) => ({ type: 'commitment', id: r.id, label: r.obligation.slice(0, 60) })),
+        recommendedActions: [{ label: 'Open the ledger', tool: 'navigate', args: { route: '/commitments' } }],
+      },
+    ]
+  },
+}
+
+/** Silent customer (§9.1): an active account with no interaction inside its cadence. */
+export const silentCustomerWatcher: Watcher = {
+  key: 'silent_customer',
+  title: 'Accounts that have gone quiet',
+  cadence: '0 9 * * 1',
+  async detect(ctx) {
+    const rows = await ctx.sql<{ id: string; name: string; days: number; owner: string | null; cadence: number }[]>`
+      SELECT c.id, c.name, c.check_in_days AS cadence, u.name AS owner,
+             EXTRACT(DAY FROM (now() - c.last_interaction_at))::int AS days
+      FROM companies c
+      LEFT JOIN users u ON u.id = c.owner_id
+      WHERE c.organization_id = ${ctx.organizationId} AND c.deleted_at IS NULL
+        AND c.type IN ('customer', 'prospect')
+        AND c.last_interaction_at IS NOT NULL
+        AND c.last_interaction_at < now() - make_interval(days => c.check_in_days)
+      ORDER BY c.last_interaction_at
+      LIMIT 10`
+
+    if (rows.length === 0) return []
+
+    return [
+      {
+        watcher: 'silent_customer',
+        type: 'account_gone_quiet',
+        severity: 'low',
+        title: `${rows.length} ${rows.length === 1 ? 'account has' : 'accounts have'} gone quiet`,
+        body: rows.map((r) => `${r.name} — ${r.days} days since any interaction (cadence ${r.cadence} days)`).join('\n'),
+        dedupeKey: `silent_customer:${rows.map((r) => r.id).sort().join(',')}`,
+        evidence: rows.map((r) => ({
+          claim: `${r.name} has had no recorded interaction for ${r.days} days against a ${r.cadence}-day check-in cadence.`,
+          sourceType: 'company',
+          sourceId: r.id,
+        })),
+        entities: rows.map((r) => ({ type: 'company', id: r.id, label: r.name })),
+        recommendedActions: [{ label: 'Open companies', tool: 'navigate', args: { route: '/companies' } }],
+      },
+    ]
+  },
+}
+
+export const WATCHERS: Watcher[] = [
+  staleThreadWatcher,
+  overdueWatcher,
+  approvalAgingWatcher,
+  knowledgeGapWatcher,
+  commitmentTrackerWatcher,
+  silentCustomerWatcher,
+]
 
 export interface WatcherRunResult {
   created: number

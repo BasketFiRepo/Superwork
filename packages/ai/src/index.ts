@@ -7,6 +7,20 @@ export * from './provider.js'
 export * from './context.js'
 export * from './prompts.js'
 export type { Grounding, PlanDraft, AnswerDraft, CriticVerdict } from './mock/brain.js'
+export {
+  triageFor,
+  extractCommitments,
+  resolveDueHint,
+  summarizeMeeting,
+  narrate360,
+  briefingNarrative,
+  type TriageResult,
+  type DetectedCommitment,
+  type MeetingSummary,
+  type MeetingGrounding,
+  type BriefingGrounding,
+  type CrmGrounding,
+} from './mock/nervous-system.js'
 export { MockLLMProvider } from './mock/provider.js'
 export { AnthropicProvider } from './anthropic/provider.js'
 

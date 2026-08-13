@@ -21,13 +21,17 @@
     "test:isolation": "vitest run tests/isolation",
     "test:permissions": "vitest run tests/permissions",
     "eval": "node --env-file=.env --import tsx packages/agent/src/evals/cli.ts",
-    "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts"
+    "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts",
+    "loop:phase2": "node --env-file=.env --import tsx scripts/phase2-loop.ts",
+    "loop:phase3": "node --env-file=.env --import tsx scripts/phase3-loop.ts",
+    "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts"
   },
   "devDependencies": {
     "next": "^15.1.3",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "next": "^15.1.3",
     "playwright": "^1.62.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

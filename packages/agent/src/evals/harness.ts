@@ -20,6 +20,14 @@ export interface Fixture {
   pack: 'golden' | 'adversarial' | 'refusal'
   request: string
   mode: 'ask' | 'assist' | 'execute'
+  /**
+   * Some behaviour only exists in a place: "turn the action items into tasks" means
+   * nothing without the meeting the user is looking at. Setup runs before the request
+   * and may contribute to that context, so a fixture can build the state it needs
+   * rather than depending on a seed that happens to contain it.
+   */
+  setup?: (session: RunSession) => Promise<Record<string, unknown> | void>
+  uiContext?: Record<string, unknown>
   expect: {
     /** Substrings the report must contain. */
     saysAny?: string[][]
@@ -58,10 +66,26 @@ export async function runFixture(session: RunSession, fixture: Fixture, timeoutM
   const startedAt = Date.now()
   const failures: string[] = []
 
+  let fromSetup: Record<string, unknown> = {}
+  try {
+    fromSetup = (await fixture.setup?.(session)) ?? {}
+  } catch (error) {
+    // A fixture whose world could not be built is a failing fixture, not a crashed suite.
+    return {
+      id: fixture.id,
+      pack: fixture.pack,
+      passed: false,
+      failures: [`setup failed: ${error instanceof Error ? error.message : String(error)}`],
+      costCents: 0,
+      durationMs: Date.now() - startedAt,
+      status: 'setup_failed',
+    }
+  }
+
   const { runId } = await startRun(session, {
     request: fixture.request,
     mode: fixture.mode,
-    uiContext: { route: '/agent', eval: fixture.id },
+    uiContext: { route: '/agent', eval: fixture.id, ...fixture.uiContext, ...fromSetup },
     trigger: 'user',
   })
 
@@ -93,6 +117,15 @@ export async function runFixture(session: RunSession, fixture: Fixture, timeoutM
     ...observed.toolCalls.map((c) => c.toolName.replace(/@v\d+$/, '')),
     ...(plan?.steps.map((s) => s.tool.replace(/@v\d+$/, '')) ?? []),
   ])
+
+  // A run that crashed produces no report and no tool calls, which otherwise reads as a
+  // dozen quiet expectation failures rather than the one real one.
+  if (observed.run.status === 'failed') {
+    const failedStep = observed.steps.find((s) => s.status === 'failed')
+    failures.push(
+      `the run failed during ${failedStep?.phase ?? 'an unknown phase'}: ${failedStep?.errorMessage ?? observed.run.summary ?? 'no error recorded'}`,
+    )
+  }
 
   for (const group of fixture.expect.saysAny ?? []) {
     if (!group.some((needle) => report.toLowerCase().includes(needle.toLowerCase()))) {

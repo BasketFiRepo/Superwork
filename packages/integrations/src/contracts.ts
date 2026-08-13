@@ -98,3 +98,56 @@ export interface MockBehaviour {
   rateLimited?: boolean
   tokenExpired?: boolean
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 capabilities (§13.1, §22)
+// ---------------------------------------------------------------------------
+
+export interface FinanceInvoice {
+  externalId: string
+  reference: string
+  /** The counterparty as the finance system knows it — matched to a company by domain. */
+  accountName: string
+  amountCents: number
+  currency: string
+  issuedAt: Date
+  dueAt: Date
+  paidAt: Date | null
+  status: 'draft' | 'open' | 'paid' | 'overdue' | 'disputed'
+}
+
+export interface FinanceProvider extends Provider {
+  /** Read-only in v1: Superwork never writes to the ledger of record. */
+  invoices(input: { accountName?: string; since?: Date; limit?: number }): Promise<FinanceInvoice[]>
+  balance(accountName: string): Promise<{ outstandingCents: number; overdueCents: number; currency: string }>
+}
+
+export interface CrmAccount {
+  externalId: string
+  name: string
+  domains: string[]
+  owner: string | null
+  stage: string | null
+  updatedAt: Date
+}
+
+export interface CrmProvider extends Provider {
+  accounts(cursor: string | null): Promise<{ accounts: CrmAccount[]; cursor: string | null }>
+  /** What a sync *would* change, so an admin approves an import rather than discovering it. */
+  previewImport(accounts: CrmAccount[]): Promise<{ create: string[]; update: string[]; conflict: string[] }>
+}
+
+export interface DirectoryUser {
+  externalId: string
+  email: string
+  displayName: string
+  department: string | null
+  active: boolean
+}
+
+export interface IdentityProvider extends Provider {
+  /** SCIM-shaped: the directory is the source of truth, Superwork mirrors it. */
+  users(cursor: string | null): Promise<{ users: DirectoryUser[]; cursor: string | null }>
+  /** Verifies an assertion without trusting anything the browser supplied. */
+  verifyAssertion(assertion: string): Promise<{ email: string; externalId: string } | null>
+}

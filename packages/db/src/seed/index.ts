@@ -1,6 +1,7 @@
 import { adminSql } from '../client.js'
 import { withTenant, asJson, type TenantContext } from '../tenant.js'
 import { SEED_DOCUMENTS } from './documents.js'
+import { SEED_MEETINGS } from './meetings.js'
 
 /**
  * The demo organization (§18.2).
@@ -405,6 +406,11 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['documents'] = await seedDocuments(ctx, companyIds, projectIds, userIds)
     counts['agents'] = await seedAgents(ctx, userIds, departmentIds)
     counts['policies'] = await seedApprovalPolicies(ctx)
+    counts['meetings'] = await seedMeetings(ctx, userIds, companyIds, projectIds)
+    counts['preferences'] = await seedPreferences(ctx, userIds)
+    counts['mergeCandidates'] = await seedDuplicateContact(ctx, companyIds, userIds)
+    const { refreshCompanyInteractionTimes } = await import('@superwork/core')
+    await refreshCompanyInteractionTimes(ctx)
   })
 
   return {
@@ -708,4 +714,126 @@ async function seedApprovalPolicies(ctx: TenantContext): Promise<number> {
               ${policy.priority}, true, ${ctx.userId})`
   }
   return policies.length
+}
+
+/**
+ * Meetings, transcripts and the recurring operations series. The series exists so the
+ * meeting agent has a real "this has been deferred three times" to report (§12.5).
+ */
+async function seedMeetings(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  companyIds: Map<string, string>,
+  projectIds: Map<string, string>,
+): Promise<number> {
+  const { attachTranscript } = await import('@superwork/core')
+  const { loadActor } = await import('@superwork/auth')
+  const actor = await loadActor(ctx)
+
+  const seriesIds = new Map<string, string>()
+  let count = 0
+
+  for (const meeting of SEED_MEETINGS) {
+    if (meeting.seriesKey && !seriesIds.has(meeting.seriesKey)) {
+      const [row] = await ctx.sql<{ id: string }[]>`SELECT gen_random_uuid() AS id`
+      seriesIds.set(meeting.seriesKey, row!.id)
+    }
+
+    const startsAt = new Date(now - meeting.daysAgo * DAY)
+    startsAt.setUTCHours(9, 30, 0, 0)
+    const endsAt = new Date(startsAt.getTime() + meeting.durationMinutes * 60_000)
+
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO meetings (
+        organization_id, title, agenda, project_id, company_id, organizer_id,
+        starts_at, ends_at, timezone, status, series_id, series_ordinal,
+        recording_consent_mode, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${meeting.title}, ${ctx.sql.json(asJson(meeting.agenda))},
+        ${meeting.projectKey ? projectIds.get(meeting.projectKey)! : null},
+        ${meeting.companyKey ? companyIds.get(meeting.companyKey)! : null},
+        ${userIds.get(meeting.organizerKey)!}, ${startsAt}, ${endsAt}, 'Europe/London',
+        ${meeting.daysAgo > 0 ? 'completed' : 'scheduled'},
+        ${meeting.seriesKey ? seriesIds.get(meeting.seriesKey)! : null},
+        ${meeting.seriesOrdinal ?? null},
+        ${meeting.externalParticipants?.length ? 'all_parties' : 'one_party'}, true, ${ctx.userId}
+      ) RETURNING id`
+    const meetingId = row!.id
+    count += 1
+
+    for (const key of meeting.participantKeys) {
+      const [person] = await ctx.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${userIds.get(key)!}`
+      await ctx.sql`
+        INSERT INTO meeting_participants (
+          organization_id, meeting_id, user_id, display_name, role, attended, consented_at, is_demo, created_by
+        ) VALUES (
+          ${ctx.organizationId}, ${meetingId}, ${userIds.get(key)!}, ${person!.name},
+          ${key === meeting.organizerKey ? 'organizer' : 'attendee'},
+          ${meeting.daysAgo > 0}, ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
+        )`
+    }
+    for (const external of meeting.externalParticipants ?? []) {
+      const [contact] = await ctx.sql<{ id: string }[]>`
+        SELECT id FROM contacts
+        WHERE organization_id = ${ctx.organizationId} AND company_id = ${companyIds.get(external.companyKey)!}
+        LIMIT 1`
+      await ctx.sql`
+        INSERT INTO meeting_participants (
+          organization_id, meeting_id, contact_id, display_name, role, attended, consented_at, is_demo, created_by
+        ) VALUES (
+          ${ctx.organizationId}, ${meetingId}, ${contact?.id ?? null}, ${external.name}, 'external',
+          ${meeting.daysAgo > 0}, ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
+        )`
+    }
+
+    if (meeting.segments) {
+      await attachTranscript(ctx, actor, {
+        meetingId,
+        source: 'seed',
+        segments: meeting.segments.map((segment) => ({
+          speaker: segment.speaker,
+          speakerUserId: segment.personKey ? userIds.get(segment.personKey)! : null,
+          startsAtSeconds: segment.startsAtSeconds,
+          endsAtSeconds: segment.startsAtSeconds + 20,
+          text: segment.text,
+        })),
+      })
+    }
+  }
+
+  return count
+}
+
+async function seedPreferences(ctx: TenantContext, userIds: Map<string, string>): Promise<number> {
+  let count = 0
+  for (const userId of userIds.values()) {
+    await ctx.sql`
+      INSERT INTO notification_preferences (organization_id, user_id, briefing_hour, end_of_day_hour, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${userId}, 8, 17, true, ${ctx.userId})
+      ON CONFLICT DO NOTHING`
+    count += 1
+  }
+  return count
+}
+
+/**
+ * A realistic duplicate: the same person captured twice with a slightly different name
+ * and a second address, which is exactly how contact lists actually rot.
+ */
+async function seedDuplicateContact(
+  ctx: TenantContext,
+  companyIds: Map<string, string>,
+  userIds: Map<string, string>,
+): Promise<number> {
+  const { detectDuplicateContacts } = await import('@superwork/core')
+  const { loadActor } = await import('@superwork/auth')
+
+  await ctx.sql`
+    INSERT INTO contacts (organization_id, company_id, name, emails, title, owner_id, last_interaction_at, is_demo, created_by)
+    VALUES (${ctx.organizationId}, ${companyIds.get('halden')!}, 'Ingrid Solberg-Haugen',
+            ${['ingrid.solberg@haldenfoods.example', 'ingrid@haldenfoods.example']},
+            'Supply Chain Manager', ${userIds.get('sarah')!}, ${ago(30)}, true, ${ctx.userId})`
+
+  const actor = await loadActor(ctx)
+  return detectDuplicateContacts(ctx, actor)
 }
