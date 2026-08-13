@@ -219,7 +219,10 @@ describe('the generated briefing', () => {
     // The basis line carries the generation time, which is itself a computed fact.
     for (const match of briefing.facts.basis.matchAll(/\d+/g)) allowed.add(Number(match[0]))
 
-    const stated = [...briefing.narrative.matchAll(/\b\d+\b/g)].map((m) => Number(m[0]))
+    // Quoted text is a subject or a title copied verbatim from a row; the rule is that the
+    // model may not state a *figure* the database did not produce.
+    const scannable = briefing.narrative.replace(/"[^"]*"/g, '""')
+    const stated = [...scannable.matchAll(/\b\d+\b/g)].map((m) => Number(m[0]))
     const invented = stated.filter((n) => !allowed.has(n))
 
     expect(invented, `narrative: ${briefing.narrative}`).toEqual([])

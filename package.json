@@ -23,6 +23,7 @@
     "eval": "node --env-file=.env --import tsx packages/agent/src/evals/cli.ts",
     "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts",
     "loop:phase2": "node --env-file=.env --import tsx scripts/phase2-loop.ts",
+    "loop:phase3": "node --env-file=.env --import tsx scripts/phase3-loop.ts",
     "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts"
   },
   "devDependencies": {

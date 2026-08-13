@@ -7,9 +7,10 @@ completed operational loop: something happened → it was noticed → it was und
 context → an action was proposed → a human approved it → it was executed → the result was
 verified → everyone can see what occurred and why.
 
-This repository implements Phase 0 (foundations), Phase 1 (one closed loop) and Phase 2
-(the nervous system: inbox, meetings, CRM and the daily briefing) of the build
-specification, end to end, **with zero external credentials**.
+This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
+(the nervous system: inbox, meetings, CRM and the daily briefing) and Phase 3 (scale,
+trust and depth) of the build specification, end to end, **with zero external
+credentials**.
 
 ---
 
@@ -31,11 +32,12 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 452 assertions: units, tenant isolation, permissions, briefing, injection
+pnpm test              # 482 assertions: units, isolation, permissions, briefing, injection, ledger, studio
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
+pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm check:browser     # walks Inbox, Meetings, CRM and the Briefing in a real browser
 ```
 
@@ -59,6 +61,12 @@ and the injection adversarial pack passes at 100%. Both are tests —
 against an independent count, and then asserts that **no number in the generated prose is
 absent from the computed facts**; `pnpm eval` fails the run if a single adversarial
 fixture regresses.
+
+Phase 3 adds three more, and `pnpm loop:phase3` drives all of them: an admin can answer
+from the interface exactly what the AI read, proposed, executed and cost last month per
+department; an agent can be created, permissioned, simulated and published through change
+control without an engineer; and every employee can open one screen showing what is held
+about them and what was reported to whom.
 
 ## Layout
 
@@ -140,12 +148,59 @@ timezone; the model writes only the sentences between them. One recommended acti
 chosen deterministically (blocking others → approvals → stale threads → overdue → due
 today), and the basis line states the time the figures were computed.
 
+## Phase 3 — scale, trust and depth
+
+**AI ledger** (`/analytics`) — what the assistant read (citations), proposed (plan steps),
+executed (tool calls) and cost (usage records) for a month you choose, by department, with
+the runs behind every figure one click away. It groups by department and by agent and by
+nothing else: ranking colleagues by AI usage is the report §29.5 prohibits, so the query
+cannot produce it. See ADR 0008.
+
+**What is known about you** (`/me`) — self-service and self-only. What is held about you,
+who can see each category, every disclosure ever made about you and to whom, what is never
+collected at all, and a download of the lot. Downloading is itself recorded, so the page
+gains a row the moment you use it. Nobody — including an owner — can open it for somebody
+else.
+
+**Agent studio** (`/settings/agents`) — a persona is data: an owner, a purpose, named tool
+grants, a mode ceiling, a clearance and autopilot caps, all enforced by the gate. Create →
+permission → **simulate** → publish. Simulating runs the real grounding, planner and gate
+under the proposed configuration and stops before acting; publishing needs a second person,
+a justification and a version row you can roll back to. Widening changes are labelled as
+widening. See ADR 0007's sibling, ADR 0009, for how the same rule applies to keys.
+
+**Autopilot caps and digests** — unattended work is bounded by a daily action cap and a
+weekly spend cap, counted in SQL against what actually happened. Hitting one pauses the
+agent and routes the plan to a person rather than dropping it. Each agent owes its owner a
+weekly digest, and everyone named in a digest gets a disclosure at the same moment.
+
+**Integrations** (`/settings/integrations`) — capabilities, not vendors: email, calendar,
+storage, chat, finance, CRM and identity, each with what degrades without it, a real health
+check against the resolved provider, and a `Simulated` badge where that is what it is.
+
+**Public API and MCP** (`/settings/api`) — keys act as a named person, hold scopes, are
+rate limited from the request log, and appear in the audit trail. `/api/mcp` speaks MCP
+over the same tool registry the agent uses, restricted to read-tier tools. `POST
+/api/v1/runs` is capped at `assist`: an API caller can have work proposed, never executed
+unattended.
+
+**Identity and residency** (`/settings/identity`) — SSO and SCIM against a simulated
+directory, previewed before it is applied, deactivating rather than deleting. Residency is
+a property of the organization and refuses a region the tenant is not provisioned for
+rather than pretending data moved.
+
+**Usage and cost** (`/settings/billing`) — spend by unit, by task class and by department,
+against the plan's caps, plus API call volume.
+
 ## What is deliberately not true yet
 
 Controls for unbuilt features render disabled with the phase named — never as live-looking
 no-ops. The workflow engine's tables, versioning and simulation gate exist but
-natural-language authoring does not; approve-with-edits is stubbed with an explanation.
-Nothing in the interface pretends to work.
+natural-language authoring does not; approve-with-edits is stubbed with an explanation;
+admin-authored HTTP tools need a reviewed host allowlist and a sandbox, so the control says
+Phase 4 and there is no table pretending otherwise. Every provider ships as a simulated
+implementation — connecting one says so on the row. Nothing in the interface pretends to
+work.
 
 ## Safety properties this implementation actually holds
 
@@ -162,6 +217,11 @@ Nothing in the interface pretends to work.
 - **Prohibited monitoring is unstorable.** Productivity scoring, covert monitoring,
   keystroke or screen capture, reading private DMs, and automated employment decisions are
   refused by a `CHECK` constraint. There is no admin setting that turns them on.
+- **An API key is a person, not a service account.** Every key has a principal, every call
+  authorizes through the same `can()` as the UI, and MCP exposes read-tier tools only.
+- **Nothing about a person moves without a row.** Digests, reports and exports write a
+  disclosure the subject sees at the same moment the recipient does — enforced by a `CHECK`
+  that makes an invisible disclosure unstorable.
 - **The kill switch is real.** It halts every run in the organization, marks in-flight runs
   `aborted_by_admin`, and is two clicks from any screen for an admin.
 

@@ -91,4 +91,26 @@ export interface StartRunInput {
   trigger?: 'user' | 'schedule' | 'event' | 'workflow' | 'watcher'
   agentKey?: string
   dryRun?: boolean
+  /**
+   * Stops after the gate: the plan is produced and evaluated, nothing is executed and no
+   * approval is raised. This is what "simulate" means in the studio (§27.3).
+   */
+  planOnly?: boolean
+  /** Runs against a persona that is not (yet) the published one. */
+  persona?: RunPersona
+}
+
+/** What the runtime enforces about an agent, whether stored or proposed. */
+export interface RunPersona {
+  agentId: string | null
+  key: string
+  name: string
+  purpose: string
+  mode: StartRunInput['mode']
+  status: string
+  toolGrants: string[]
+  maxSensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
+  /** Hard ceilings on unattended work (§27.6). */
+  autopilotDailyActionCap: number
+  autopilotWeeklyCostCapCents: number
 }

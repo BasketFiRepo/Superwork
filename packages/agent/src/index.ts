@@ -13,6 +13,19 @@ export {
   markBriefingRead,
   type BriefingView,
 } from './briefing.js'
+export { simulateAgent, type SimulateInput } from './studio.js'
+export { generateDigest, generateDueDigests } from './digest.js'
+export {
+  checkAutopilotCaps,
+  digestFacts,
+  digestNarrative,
+  listDigests,
+  pauseForCap,
+  saveDigest,
+  type CapVerdict,
+  type DigestFacts,
+  type DigestView,
+} from './autopilot.js'
 export {
   triageInbox,
   summarizeMeetingRun,

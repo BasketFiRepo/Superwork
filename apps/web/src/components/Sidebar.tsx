@@ -67,12 +67,24 @@ export function Sidebar({
         { href: '/approvals', label: 'Approvals', count: approvals, attention: approvals > 0 },
         { href: '/insights', label: 'Insights', count: insights },
         { href: '/workflows', label: 'Workflows', flag: 'workflows' },
+        { href: '/analytics', label: 'AI ledger' },
         { href: '/activity', label: 'Activity' },
       ],
     },
     {
+      title: 'You',
+      items: [{ href: '/me', label: 'What is known about you' }],
+    },
+    {
       title: 'Admin',
-      items: [{ href: '/settings/ai-governance', label: 'AI governance' }],
+      items: [
+        { href: '/settings/agents', label: 'Agents' },
+        { href: '/settings/integrations', label: 'Integrations' },
+        { href: '/settings/api', label: 'API and MCP' },
+        { href: '/settings/identity', label: 'Identity' },
+        { href: '/settings/billing', label: 'Usage and cost' },
+        { href: '/settings/ai-governance', label: 'AI governance' },
+      ],
     },
   ]
 

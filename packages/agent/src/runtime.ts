@@ -6,6 +6,7 @@ import {
   BudgetError,
   checkSpendLimits,
   createApproval,
+  personaForKey,
   record as recordUsageRecord,
   writeActivity,
   writeAudit,
@@ -14,10 +15,20 @@ import {
 } from '@superwork/core'
 import { completeWithFallback, loadPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
 import { getTool, hashArgs, redactInput, visibleTools, type ToolContext } from '@superwork/tools'
-import { PlanSchema, type GateOutcome, type GatedStep, type Plan, type RunEvent, type RunReport, type StartRunInput } from './types.js'
+import {
+  PlanSchema,
+  type GateOutcome,
+  type GatedStep,
+  type Plan,
+  type RunEvent,
+  type RunPersona,
+  type RunReport,
+  type StartRunInput,
+} from './types.js'
 import { assertBudget, newBudget, recordUsage, registerCall, type BudgetState } from './budget.js'
 import { ground } from './ground.js'
 import { gatePlan } from './gate.js'
+import { checkAutopilotCaps, pauseForCap } from './autopilot.js'
 import { publish } from './bus.js'
 import {
   addUsage,
@@ -117,8 +128,30 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     const killSwitch = await killSwitchEngaged(ctx)
     const [org] = await ctx.sql<{ name: string; industry: string | null }[]>`
       SELECT name, industry FROM organizations WHERE id = ${ctx.organizationId}`
-    return { actor, killSwitch, orgName: org?.name ?? 'this organization', industry: org?.industry ?? 'operations' }
+    const persona = input.persona ?? (await resolvePersona(ctx, input.agentKey ?? 'orchestrator'))
+    return {
+      actor,
+      killSwitch,
+      persona,
+      orgName: org?.name ?? 'this organization',
+      industry: org?.industry ?? 'operations',
+    }
   })
+
+  if (intake.persona.status === 'paused' || intake.persona.status === 'retired') {
+    await withTenant(session, (ctx) =>
+      setRunStatus(ctx, runId, 'failed', {
+        failureClass: 'policy',
+        failureDetail: `${intake.persona.name} is ${intake.persona.status}.`,
+      }),
+    )
+    publish(runId, {
+      type: 'run.failed',
+      failureClass: 'policy',
+      message: `${intake.persona.name} is ${intake.persona.status} and will not run until somebody turns it back on.`,
+    })
+    return
+  }
 
   if (intake.killSwitch) {
     await withTenant(session, (ctx) =>
@@ -135,13 +168,18 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     return
   }
 
+  // The persona is data: an agent's grants, clearance and mode ceiling are columns the
+  // studio writes and the gate enforces, so "structurally incapable of writing" is a
+  // property of the row rather than a sentence in a prompt (§27.2).
+  const persona = intake.persona
+  const effectiveMode = narrowerMode(input.mode, persona.mode)
   const agentActor = await withTenant(session, (ctx) =>
     asAgent(ctx, intake.actor, {
       agentId: runId,
-      agentName: 'Superwork',
-      mode: input.mode,
-      toolGrants: ['*'],
-      maxSensitivity: 'confidential',
+      agentName: persona.name,
+      mode: effectiveMode,
+      toolGrants: persona.toolGrants,
+      maxSensitivity: persona.maxSensitivity,
     }),
   )
 
@@ -149,9 +187,9 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
   const grounded = await withTenant(session, async (ctx) => {
     const started = Date.now()
     const result = await ground(ctx, agentActor, input.request, {
-      mode: input.mode,
-      canDraft: input.mode === 'execute' || input.mode === 'assist',
-      canExecuteLow: input.mode === 'execute' || input.mode === 'autopilot',
+      mode: effectiveMode,
+      canDraft: effectiveMode === 'execute' || effectiveMode === 'assist',
+      canExecuteLow: effectiveMode === 'execute' || effectiveMode === 'autopilot',
       canExecuteHigh: false,
       uiContext: input.uiContext ?? {},
     })
@@ -272,14 +310,77 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
 
   publish(runId, { type: 'plan.ready', plan, gate })
 
+  // ---- Plan-only path -------------------------------------------------------
+  // A simulation stops here. It has read the same data, produced the same plan and been
+  // through the same gate; the only difference is that nothing happens next (§27.3).
+  if (input.planOnly) {
+    const simulatedReport: RunReport = {
+      narrative:
+        `Simulation only. ${plan.summary} ` +
+        `${gate.steps.filter((s) => s.allowed).length} of ${plan.steps.length} steps passed the gate` +
+        `${gate.requiresApproval ? ' and would have waited for approval' : ''}. Nothing was executed.`,
+      outcome: { created: 0, updated: 0, drafted: 0, sent: 0, skipped: [], failed: [] },
+      citations: [],
+      needsAttention: plan.needsAttention ?? [],
+      undoable: false,
+      degraded: planResponse.degraded,
+      simulated: true,
+      injectionWarnings: grounded.injectionFindings,
+    }
+    await withTenant(session, async (ctx) => {
+      await emitStep(ctx, runId, phase, {
+        phase: 'report',
+        label: `Simulated — ${gate.steps.filter((s) => s.allowed).length} steps would run, nothing was executed`,
+        status: 'succeeded',
+        detail: { simulated: true },
+      })
+      await saveReport(ctx, runId, simulatedReport)
+      await setRunStatus(ctx, runId, 'succeeded')
+    })
+    publish(runId, { type: 'run.completed', status: 'succeeded', report: simulatedReport, costCents: 0 })
+    return
+  }
+
   // ---- Answer-only path -----------------------------------------------------
   if (plan.answerOnly || gate.steps.filter((s) => s.allowed && s.riskTier !== 'read').length === 0) {
     await answerAndFinish(session, runId, phase, budget, system, assembly.blocks, input, grounded, plan, planResponse.degraded)
     return
   }
 
+  // ---- Autopilot caps -------------------------------------------------------
+  // Unattended execution is bounded by numbers a person set, checked against what
+  // actually happened rather than against a counter in memory (§27.6).
+  let capReason: string | null = null
+  if (effectiveMode === 'autopilot' && !gate.requiresApproval) {
+    const plannedActions = gate.steps.filter((s) => s.allowed && s.riskTier !== 'read').length
+    const verdict = await withTenant(session, async (ctx) => {
+      const outcome = await checkAutopilotCaps(ctx, {
+        agentId: persona.agentId,
+        dailyCap: persona.autopilotDailyActionCap,
+        weeklyCapCents: persona.autopilotWeeklyCostCapCents,
+        plannedActions,
+      })
+      await emitStep(ctx, runId, phase, {
+        phase: 'gate',
+        label: outcome.allow ? `Within its caps — ${outcome.reason}` : `Cap reached — ${outcome.reason}`,
+        status: 'succeeded',
+        detail: { actionsToday: outcome.actionsToday, dailyCap: outcome.dailyCap },
+      })
+      if (!outcome.allow && persona.agentId) {
+        await pauseForCap(ctx, {
+          agentId: persona.agentId,
+          agentName: persona.name,
+          reason: outcome.reason,
+          until: new Date(Date.now() + 86_400_000),
+        })
+      }
+      return outcome
+    })
+    if (!verdict.allow) capReason = verdict.reason
+  }
+
   // ---- Approval gate --------------------------------------------------------
-  if (gate.requiresApproval) {
+  if (gate.requiresApproval || capReason) {
     const approvalId = await withTenant(session, async (ctx) => {
       const preview: PreviewLine[] = gate.steps.filter((s) => s.allowed).flatMap((s) => s.preview)
       const evidence = buildEvidence(grounded)
@@ -291,9 +392,11 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
         preview,
         evidence,
         requestedByLabel: 'Superwork',
-        policyReason: downgraded
-          ? 'This run read untrusted external content, so every change is held for a person to approve.'
-          : 'Changes proposed by an agent are held for approval before execution.',
+        policyReason: capReason
+          ? `${persona.name} reached a cap you set, so this is waiting for you instead of running unattended. ${capReason}`
+          : downgraded
+            ? 'This run read untrusted external content, so every change is held for a person to approve.'
+            : 'Changes proposed by an agent are held for approval before execution.',
       })
       await setRunStatus(ctx, runId, 'awaiting_approval')
       await emitStep(ctx, runId, phase, {
@@ -880,6 +983,45 @@ async function persistCitations(
   }
 
   return citations
+}
+
+const MODE_RANK: Record<StartRunInput['mode'], number> = { ask: 0, assist: 1, execute: 2, autopilot: 3 }
+
+/** The narrower of what was asked for and what the persona is allowed to be. */
+function narrowerMode(requested: StartRunInput['mode'], ceiling: StartRunInput['mode']): StartRunInput['mode'] {
+  return MODE_RANK[requested] <= MODE_RANK[ceiling] ? requested : ceiling
+}
+
+async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPersona> {
+  const persona = await personaForKey(ctx, key)
+  if (persona) {
+    return {
+      agentId: persona.agentId,
+      key: persona.key,
+      name: persona.name,
+      purpose: persona.purpose,
+      mode: persona.mode,
+      status: persona.status,
+      toolGrants: persona.toolGrants,
+      maxSensitivity: persona.maxSensitivity,
+      autopilotDailyActionCap: persona.autopilotDailyActionCap,
+      autopilotWeeklyCostCapCents: persona.autopilotWeeklyCostCapCents,
+    }
+  }
+  // No row: the ad-hoc assistant, which is what a person gets when they type into the
+  // rail. It is bounded by the human it acts for, and by nothing else.
+  return {
+    agentId: null,
+    key,
+    name: 'Superwork',
+    purpose: 'Answers questions and proposes plans for the person who asked.',
+    mode: 'execute',
+    status: 'active',
+    toolGrants: ['*'],
+    maxSensitivity: 'confidential',
+    autopilotDailyActionCap: 10,
+    autopilotWeeklyCostCapCents: 500,
+  }
 }
 
 async function resolveAgentId(ctx: TenantContext, key: string): Promise<string | null> {

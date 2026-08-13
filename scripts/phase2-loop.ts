@@ -23,6 +23,13 @@ import {
 import { generateBriefing, narrateAccount, summarizeMeetingRun, triageInbox } from '@superwork/agent'
 import { demoSession } from '@superwork/agent/evals/harness'
 
+/**
+ * Numbers inside quotation marks are verbatim database content — a thread subject, an
+ * approval title — not figures the model produced. Scanning them would fail the check for
+ * a customer whose subject line happens to mention a year.
+ */
+const withoutQuotedText = (narrative: string): string => narrative.replace(/"[^"]*"/g, '""')
+
 const ok = (label: string, condition: boolean, detail = '') => {
   console.log(`  ${condition ? '✓' : '✗'} ${label}${detail ? ` — ${detail}` : ''}`)
   if (!condition) process.exitCode = 1
@@ -105,14 +112,22 @@ try {
   const briefing = await generateBriefing(session, session.userId, { force: true })
   console.log(`  ${briefing.narrative}\n`)
 
+  // The same allowance the accuracy test uses: every figure the prose may state has to
+  // exist in the facts the database produced.
   const allowed = new Set<number>([
     ...Object.values(briefing.facts.counts).map(Number),
     ...briefing.citations.map((c) => c.count),
     ...(briefing.facts.basis.match(/\d+/g) ?? []).map(Number),
-    ...briefing.facts.staleThreads.map((t) => t.daysWaiting),
-    ...briefing.facts.dueToday.map((_, index) => index + 1),
+    ...briefing.facts.staleThreads.map((thread) => thread.daysWaiting),
+    ...briefing.facts.overdue.map((task) => task.daysOverdue),
+    ...briefing.facts.approvals.map((approval) => Math.round(approval.hoursWaiting)),
+    ...briefing.facts.blockingOthers.map((item) => item.waitingCount),
+    ...briefing.facts.meetings.flatMap((meeting) => [
+      meeting.minutes,
+      ...meeting.localTime.split(':').map(Number),
+    ]),
   ])
-  const stated = [...briefing.narrative.matchAll(/\b\d+\b/g)].map((m) => Number(m[0]))
+  const stated = [...withoutQuotedText(briefing.narrative).matchAll(/\b\d+\b/g)].map((m) => Number(m[0]))
   const invented = stated.filter((n) => !allowed.has(n))
   ok('Every number in the prose came from the database', invented.length === 0, invented.join(', '))
   ok('The briefing states the basis of its figures', /as of/i.test(briefing.narrative))

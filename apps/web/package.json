@@ -19,6 +19,7 @@
     "@superwork/ai": "workspace:*",
     "@superwork/tools": "workspace:*",
     "@superwork/agent": "workspace:*",
+    "@superwork/integrations": "workspace:*",
     "@superwork/ui": "workspace:*"
   }
 }

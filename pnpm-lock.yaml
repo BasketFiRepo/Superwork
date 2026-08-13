@@ -57,6 +57,9 @@ importers:
       '@superwork/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@superwork/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       '@superwork/tools':
         specifier: workspace:*
         version: link:../../packages/tools
@@ -99,7 +102,11 @@ importers:
 
   packages/config: {}
 
-  packages/core: {}
+  packages/core:
+    dependencies:
+      '@superwork/integrations':
+        specifier: workspace:*
+        version: link:../integrations
 
   packages/db: {}
 

@@ -33,6 +33,12 @@
       "@superwork/agent": [
         "../../packages/agent/src/index.ts"
       ],
+      "@superwork/agent/*": [
+        "../../packages/agent/src/*.ts"
+      ],
+      "@superwork/integrations": [
+        "../../packages/integrations/src/index.ts"
+      ],
       "@superwork/ui/*": [
         "../../packages/ui/src/*"
       ]

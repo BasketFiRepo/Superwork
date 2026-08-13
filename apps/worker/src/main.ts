@@ -1,6 +1,6 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
 import { claimBatch, markDispatched, markFailed, writeActivity } from '@superwork/core'
-import { evict, generateDueBriefings, runWatchers } from '@superwork/agent'
+import { evict, generateDueBriefings, generateDueDigests, runWatchers } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
 /**
@@ -17,6 +17,7 @@ import { emailProvider } from '@superwork/integrations'
 const POLL_MS = Number(process.env['WORKER_POLL_MS'] ?? 5000)
 const WATCHER_MS = Number(process.env['WORKER_WATCHER_MS'] ?? 15 * 60_000)
 const BRIEFING_MS = Number(process.env['WORKER_BRIEFING_MS'] ?? 30 * 60_000)
+const DIGEST_MS = Number(process.env['WORKER_DIGEST_MS'] ?? 60 * 60_000)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -101,6 +102,7 @@ async function main(): Promise<void> {
   console.log(`Superwork worker started · outbox every ${POLL_MS}ms · watchers every ${WATCHER_MS}ms`)
   let lastWatcherRun = 0
   let lastBriefingRun = 0
+  let lastDigestRun = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -148,6 +150,17 @@ async function main(): Promise<void> {
         } catch (error) {
           console.error(`[briefings] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
+      }
+    }
+
+    // Weekly digests: every agent owes its owner an account of what it did (§27.6).
+    if (Date.now() - lastDigestRun > DIGEST_MS) {
+      lastDigestRun = Date.now()
+      try {
+        const written = await generateDueDigests()
+        if (written > 0) console.log(`[digests] wrote ${written}`)
+      } catch (error) {
+        console.error('[digests] failed:', error instanceof Error ? error.message : error)
       }
     }
 

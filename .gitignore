@@ -7,3 +7,4 @@ dist/
 coverage/
 .env.local
 ui-check.mjs
+*.tsbuildinfo

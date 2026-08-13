@@ -1,9 +1,10 @@
 /**
- * Browser check for the Phase 2 surfaces (§24).
+ * Browser check for the Phase 2 and Phase 3 surfaces (§24).
  *
- * Signs in as the demo owner and walks Inbox, Meetings, CRM and the Briefing, asserting
- * that each screen renders real rows rather than an empty shell, that keyboard triage
- * works, and that nothing threw in the console on the way.
+ * Signs in as the demo owner and walks Inbox, Meetings, CRM, the Briefing, the AI ledger,
+ * the personal record, the agent studio and the API screen — asserting that each renders
+ * real rows rather than an empty shell, that keyboard triage works, and that nothing threw
+ * in the console on the way.
  *
  * Run against a started app:  BASE_URL=http://localhost:3000 node --import tsx scripts/browser-check.ts
  */
@@ -35,7 +36,7 @@ page.on('response', (response) => {
 })
 
 try {
-  console.log('\nSuperwork — Phase 2 browser check\n')
+  console.log('\nSuperwork — browser check\n')
 
   await page.goto(`${BASE}/login`)
   await page.fill('input[name="email"]', 'maya@northwind.example')
@@ -127,6 +128,69 @@ try {
   ok('The briefing states the basis of its figures', /as of/i.test(briefing))
   ok('The briefing recommends one action', (await page.locator('[data-testid="briefing-action"]').count()) > 0)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/briefing.png`, fullPage: true })
+
+  // ---- AI ledger ----------------------------------------------------------
+  await page.goto(`${BASE}/analytics`)
+  await page.waitForSelector('[data-testid="ledger-totals"]', { timeout: 20_000 })
+  const totals = await page.locator('[data-testid="ledger-totals"]').innerText()
+  // Labels are upper-cased by the stylesheet, and innerText reflects that.
+  ok('The ledger renders totals', /runs/i.test(totals) && /cost/i.test(totals))
+  ok('It states the basis of its figures', /agent runs, citations, tool calls/i.test(totals))
+  const departments = await page.locator('[data-testid="ledger-department"]').count()
+  ok('It breaks down by department', departments > 0, `${departments} departments`)
+  ok(
+    'Every figure opens the runs behind it',
+    (await page.locator('[data-testid="ledger-drilldown"]').count()) > 0,
+  )
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/ledger.png`, fullPage: true })
+
+  // ---- Personal record ----------------------------------------------------
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="tracked"]', { timeout: 15_000 })
+  const trackedRows = await page.locator('[data-testid="tracked-row"]').count()
+  ok('The personal record lists what is held', trackedRows > 0, `${trackedRows} categories`)
+  ok('It lists disclosures', (await page.locator('[data-testid="disclosures"]').count()) === 1)
+  const never = await page.locator('[data-testid="never-collected"]').innerText()
+  ok('It states what is never collected', /productivity score/i.test(never) && /keystrokes/i.test(never))
+
+  const disclosuresBefore = await page.locator('[data-testid="disclosure-row"]').count()
+  await page.locator('[data-testid="export-record"]').click()
+  await page.waitForTimeout(2000)
+  await page.reload()
+  await page.waitForSelector('[data-testid="tracked"]', { timeout: 15_000 })
+  const disclosuresAfter = await page.locator('[data-testid="disclosure-row"]').count()
+  ok(
+    'Downloading your own record is itself recorded',
+    disclosuresAfter > disclosuresBefore,
+    `${disclosuresBefore} → ${disclosuresAfter}`,
+  )
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/me.png`, fullPage: true })
+
+  // ---- Agent studio -------------------------------------------------------
+  await page.goto(`${BASE}/settings/agents`)
+  await page.waitForSelector('[data-testid="agent-row"]', { timeout: 15_000 })
+  const agents = await page.locator('[data-testid="agent-row"]').count()
+  ok('The studio lists personas', agents > 0, `${agents} agents`)
+  await page.locator('[data-testid="agent-row"] a').first().click()
+  await page.waitForSelector('[data-testid="agent-config"]', { timeout: 15_000 })
+  ok('A persona opens with its configuration', (await page.locator('[data-testid="agent-config"]').count()) === 1)
+  ok('It shows its history', (await page.locator('[data-testid="agent-history"]').count()) === 1)
+  ok('It shows what it reported to its owner', (await page.locator('[data-testid="digests"]').count()) === 1)
+  await page.locator('[data-testid="simulate"]').click()
+  await page.waitForSelector('[data-testid="simulation"]', { timeout: 60_000 })
+  const simulation = await page.locator('[data-testid="simulation"]').innerText()
+  ok('Simulating says plainly that nothing was executed', /Nothing was executed/i.test(simulation))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/studio.png`, fullPage: true })
+
+  // ---- Integrations and API ----------------------------------------------
+  await page.goto(`${BASE}/settings/integrations`)
+  await page.waitForSelector('[data-testid="connection-row"]', { timeout: 15_000 })
+  const capabilities = await page.locator('[data-testid="connection-row"]').count()
+  ok('Integrations lists capabilities, not vendors', capabilities >= 5, `${capabilities} capabilities`)
+
+  await page.goto(`${BASE}/settings/api`)
+  await page.waitForSelector('[data-testid="issue-key"]', { timeout: 15_000 })
+  ok('The API screen offers to issue a key', (await page.locator('[data-testid="issue-key"]').count()) === 1)
 
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {
