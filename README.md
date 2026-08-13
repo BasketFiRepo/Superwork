@@ -229,7 +229,9 @@ work.
 
 Every variable is validated at boot with Zod and the process refuses to start on a bad
 config. `vercel.json` points the platform at the workspace build (`pnpm --filter
-@superwork/web build` → `apps/web/.next`); a hosted deployment still needs `DATABASE_URL`
+@superwork/web build` → `apps/web/.next`), and `next` is a root devDependency so the
+framework detector finds it when the project's Root Directory is the repository root —
+set Root Directory to `apps/web` instead and neither is needed; a hosted deployment still needs `DATABASE_URL`
 pointing at a PostgreSQL 16 instance with `pgvector` and `pg_trgm`, `SESSION_SECRET`, and
 the migrations applied — the app boots against an empty database but every screen is a
 sign-in wall until `pnpm db:seed` or a real organization exists. `AI_MODE`, `EMAIL_MODE`, `CALENDAR_MODE`, `STORAGE_MODE` and `BILLING_MODE` each
