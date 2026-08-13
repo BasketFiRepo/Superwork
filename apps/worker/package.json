@@ -1,0 +1,13 @@
+{
+  "name": "@superwork/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@superwork/config": "workspace:*",
+    "@superwork/db": "workspace:*",
+    "@superwork/core": "workspace:*",
+    "@superwork/agent": "workspace:*",
+    "@superwork/integrations": "workspace:*"
+  }
+}

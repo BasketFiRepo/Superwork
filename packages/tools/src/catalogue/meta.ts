@@ -1,3 +1,4 @@
+import { asJson } from '@superwork/db'
 import { z } from 'zod'
 import { link } from '@superwork/core'
 import { register, type ToolContext } from '../registry.js'
@@ -87,16 +88,17 @@ export const cite = register({
   redactions: [],
   async execute(input, ctx: ToolContext) {
     const sql = ctx.tenantDb.sql
-    const [{ next_ordinal }] = await sql<{ next_ordinal: number }[]>`
+    const [ordinalRow] = await sql<{ next_ordinal: number }[]>`
       SELECT coalesce(max(ordinal), -1) + 1 AS next_ordinal FROM citations
       WHERE organization_id = ${ctx.organizationId} AND run_id = ${ctx.agentRunId}`
+    const nextOrdinal = ordinalRow?.next_ordinal ?? 0
     const [row] = await sql<{ id: string }[]>`
       INSERT INTO citations (organization_id, run_id, claim, source_type, source_id, document_id, anchor, snippet, ordinal, created_by)
       VALUES (${ctx.organizationId}, ${ctx.agentRunId}, ${input.claim}, ${input.sourceType},
               ${isUuid(input.sourceId) ? input.sourceId : null}, ${input.documentId ?? null},
-              ${input.anchor ?? null}, ${input.snippet ?? null}, ${next_ordinal!}, ${ctx.principalUserId})
+              ${input.anchor ?? null}, ${input.snippet ?? null}, ${nextOrdinal}, ${ctx.principalUserId})
       RETURNING id`
-    return { ok: true as const, value: { id: row!.id, ordinal: next_ordinal! } }
+    return { ok: true as const, value: { id: row!.id, ordinal: nextOrdinal } }
   },
 })
 
@@ -172,8 +174,8 @@ export const createInsight = register({
         recommended_actions, dedupe_key, assigned_to, agent_run_id, created_by
       ) VALUES (
         ${ctx.organizationId}, ${input.watcher}, ${input.type}, ${input.severity}, ${input.title},
-        ${input.body}, ${sql.json(input.evidence)}, ${sql.json(input.entities)},
-        ${sql.json(input.recommendedActions)}, ${input.dedupeKey}, ${input.assignedTo ?? null},
+        ${input.body}, ${sql.json(asJson(input.evidence))}, ${sql.json(asJson(input.entities))},
+        ${sql.json(asJson(input.recommendedActions))}, ${input.dedupeKey}, ${input.assignedTo ?? null},
         ${ctx.agentRunId}, ${ctx.principalUserId}
       )
       ON CONFLICT (organization_id, dedupe_key) WHERE deleted_at IS NULL DO NOTHING

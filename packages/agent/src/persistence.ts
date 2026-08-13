@@ -1,4 +1,4 @@
-import type { StepStatus, TenantContext } from '@superwork/db'
+import { asJson, type StepStatus, type TenantContext } from '@superwork/db'
 import type { GateOutcome, Plan, RunReport } from './types.js'
 
 /** Durable-run persistence helpers. Every phase writes before it proceeds (§5.3). */
@@ -23,8 +23,8 @@ export async function insertRun(
       ui_context, timezone, budget, ai_mode, trace_id, is_demo, created_by
     ) VALUES (
       ${ctx.organizationId}, ${input.agentId}, ${input.principalUserId}, ${input.mode}, 'queued',
-      ${input.trigger}, ${input.request}, ${ctx.sql.json(input.uiContext)}, ${ctx.timezone},
-      ${ctx.sql.json(input.budget)}, ${input.aiMode}, ${ctx.traceId}, ${input.isDemo}, ${ctx.userId}
+      ${input.trigger}, ${input.request}, ${ctx.sql.json(asJson(input.uiContext))}, ${ctx.timezone},
+      ${ctx.sql.json(asJson(input.budget))}, ${input.aiMode}, ${ctx.traceId}, ${input.isDemo}, ${ctx.userId}
     ) RETURNING id`
   return row!.id
 }
@@ -49,13 +49,13 @@ export async function setRunStatus(
 
 export async function savePlan(ctx: TenantContext, runId: string, plan: Plan, gate: GateOutcome): Promise<void> {
   await ctx.sql`
-    UPDATE agent_runs SET plan = ${ctx.sql.json({ plan, gate: stripPreviewFunctions(gate) })}
+    UPDATE agent_runs SET plan = ${ctx.sql.json(asJson({ plan, gate: stripPreviewFunctions(gate) }))}
     WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
 }
 
 export async function saveReport(ctx: TenantContext, runId: string, report: RunReport): Promise<void> {
   await ctx.sql`
-    UPDATE agent_runs SET report = ${ctx.sql.json(report)}, summary = ${report.narrative}
+    UPDATE agent_runs SET report = ${ctx.sql.json(asJson(report))}, summary = ${report.narrative}
     WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
 }
 
@@ -69,7 +69,7 @@ export async function markUntrusted(
     UPDATE agent_runs SET
       contains_untrusted_content = true,
       capability_downgraded = ${downgraded},
-      injection_flags = ${ctx.sql.json(flags)}
+      injection_flags = ${ctx.sql.json(asJson(flags))}
     WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
 }
 
@@ -95,7 +95,7 @@ export async function recordStep(ctx: TenantContext, runId: string, step: StepRe
     ) VALUES (
       ${ctx.organizationId}, ${runId}, ${step.ordinal}, ${step.phase}, ${step.label},
       ${step.status}, ${step.toolName ?? null}, ${step.riskTier ?? null}::sw_risk_tier,
-      ${step.subagent ?? null}, ${ctx.sql.json(step.detail ?? {})}, ${step.errorClass ?? null},
+      ${step.subagent ?? null}, ${ctx.sql.json(asJson(step.detail ?? {}))}, ${step.errorClass ?? null},
       ${step.errorMessage ?? null}, ${step.durationMs ?? null}, now(),
       ${step.status === 'running' || step.status === 'queued' ? null : new Date()}, ${ctx.userId}
     )
@@ -133,7 +133,7 @@ export async function recordToolCall(
       error_code, error_message, idempotency_key, args_hash, duration_ms, created_by
     ) VALUES (
       ${ctx.organizationId}, ${runId}, ${input.stepId}, ${input.toolName}, ${input.riskTier}::sw_risk_tier,
-      ${ctx.sql.json(input.input)}, ${ctx.sql.json(input.output ?? null)}, ${input.ok},
+      ${ctx.sql.json(asJson(input.input))}, ${ctx.sql.json(asJson(input.output ?? null))}, ${input.ok},
       ${input.errorCode ?? null}, ${input.errorMessage ?? null}, ${input.idempotencyKey},
       ${input.argsHash}, ${input.durationMs}, ${ctx.userId}
     )
@@ -176,7 +176,7 @@ export async function recordUndo(
       entity_type, entity_id, description, expires_at, created_by
     ) VALUES (
       ${ctx.organizationId}, ${runId}, ${input.toolCallId}, ${input.ordinal}, ${input.forwardTool},
-      ${input.inverseTool}, ${ctx.sql.json(input.inverseInput)}, ${input.entityType}, ${input.entityId},
+      ${input.inverseTool}, ${ctx.sql.json(asJson(input.inverseInput))}, ${input.entityType}, ${input.entityId},
       ${input.description}, now() + interval '30 days', ${ctx.userId}
     )`
 }

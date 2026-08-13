@@ -1,0 +1,100 @@
+/**
+ * Provider interfaces (§13.1).
+ *
+ * Interfaces are capability-shaped, not vendor-shaped. The application programs against
+ * these; a missing integration degrades a feature, it never breaks the app.
+ */
+
+export type RuntimeMode = 'mock' | 'sandbox' | 'live'
+
+export interface ProviderHealth {
+  ok: boolean
+  lastSuccessfulSyncAt: Date | null
+  errorRate: number
+  tokenExpiresAt: Date | null
+  message: string
+}
+
+export interface Provider {
+  readonly name: string
+  readonly mode: RuntimeMode
+  /** What this provider can actually do — features check this, never the vendor name. */
+  readonly capabilities: Record<string, boolean>
+  healthCheck(): Promise<ProviderHealth>
+}
+
+// ---------------------------------------------------------------------------
+
+export interface OutboundEmail {
+  to: string[]
+  cc?: string[]
+  subject: string
+  body: string
+  /** Threading: replying keeps the conversation intact on the provider side. */
+  inReplyToExternalId?: string | null
+  /** Idempotency: the same key must never produce two sends. */
+  idempotencyKey: string
+}
+
+export interface SendReceipt {
+  providerMessageId: string
+  sentAt: Date
+  /** Set when the provider accepted the message but has not dispatched it yet. */
+  queued: boolean
+}
+
+export interface EmailProvider extends Provider {
+  send(email: OutboundEmail): Promise<SendReceipt>
+  /** Recall inside the send-delay window (§5.7). Returns false once dispatched. */
+  recall(providerMessageId: string): Promise<boolean>
+  sync(cursor: string | null): Promise<{ messages: InboundMessage[]; cursor: string | null }>
+}
+
+export interface InboundMessage {
+  externalId: string
+  threadExternalId: string
+  from: { name: string | null; address: string }
+  to: string[]
+  subject: string
+  body: string
+  sentAt: Date
+}
+
+// ---------------------------------------------------------------------------
+
+export interface CalendarProvider extends Provider {
+  availability(userIds: string[], from: Date, to: Date): Promise<{ userId: string; busy: { from: Date; to: Date }[] }[]>
+  createEvent(input: {
+    title: string
+    from: Date
+    to: Date
+    attendees: string[]
+    description?: string
+    idempotencyKey: string
+  }): Promise<{ externalId: string }>
+}
+
+export interface StorageProvider extends Provider {
+  put(key: string, body: Buffer, contentType: string): Promise<{ key: string; bytes: number }>
+  get(key: string): Promise<Buffer>
+  /** Signed, time-limited, never a public bucket. */
+  signedUrl(key: string, expiresInSeconds: number): Promise<string>
+  remove(key: string): Promise<void>
+}
+
+export interface ChatProvider extends Provider {
+  /** Identity mapping is resolved by SSO subject or verified email, never display name. */
+  resolveUser(email: string): Promise<{ chatUserId: string } | null>
+  postDirectMessage(chatUserId: string, text: string, actions?: { id: string; label: string }[]): Promise<{ ts: string }>
+  postToChannel(channelId: string, text: string): Promise<{ ts: string }>
+}
+
+// ---------------------------------------------------------------------------
+
+/** Injectable behaviours so §5.6 failure handling is tested honestly, not assumed. */
+export interface MockBehaviour {
+  latencyMs?: number
+  failureRate?: number
+  rateLimited?: boolean
+  tokenExpired?: boolean
+}

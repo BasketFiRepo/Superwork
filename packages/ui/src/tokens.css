@@ -1,0 +1,137 @@
+/*
+ * Soft Paper — the Superwork design system (§16).
+ *
+ * The rule that defines this system: separation comes from space and 1px hairlines,
+ * never from shadow. Colour is reserved for meaning — if a surface is coloured,
+ * something is true about its state.
+ */
+
+:root {
+  /* Canvas & surfaces — warm-neutral whites, never pure #FFF on the page background */
+  --canvas: #fbfbfa;
+  --surface: #ffffff;
+  --surface-sunken: #f6f6f4;
+  --surface-hover: #f4f4f2;
+  --surface-selected: #eff3f2;
+
+  /* Lines — the primary structural device */
+  --hairline: #e9e9e5;
+  --hairline-strong: #dcdcd7;
+  --focus-ring: #0e6e63;
+
+  /* Ink */
+  --ink: #16181d;
+  --ink-secondary: #5a6068;
+  --ink-muted: #8a9099;
+  --ink-disabled: #b4b8bd;
+  --ink-inverse: #ffffff;
+
+  /* Accent — a single restrained deep teal. This is "the system / the agent". */
+  --accent: #0e6e63;
+  --accent-hover: #0b5a51;
+  --accent-soft: #eaf2f0;
+  --accent-line: #b9d4cf;
+
+  /* Functional — state only, never decoration */
+  --attention: #b4761f;
+  --attention-soft: #fbf4e9;
+  --critical: #b4342c;
+  --critical-soft: #fbeeed;
+  --positive: #2f6b4f;
+  --positive-soft: #edf4f0;
+  --neutral-chip: #f1f1ef;
+
+  /* Priority scale — deliberately desaturated so a dense list doesn't shout */
+  --p-urgent: #b4342c;
+  --p-high: #b4761f;
+  --p-med: #5a6068;
+  --p-low: #8a9099;
+
+  /* Spacing scale — use it; no arbitrary values */
+  --s-1: 2px;  --s-2: 4px;  --s-3: 6px;  --s-4: 8px;
+  --s-5: 12px; --s-6: 16px; --s-7: 20px; --s-8: 24px;
+  --s-9: 32px; --s-10: 40px; --s-11: 56px; --s-12: 72px;
+
+  /* Radius */
+  --r-chip: 4px; --r-card: 8px; --r-modal: 12px; --r-pill: 999px;
+
+  /* Elevation — exactly three levels; 95% of the UI is flat */
+  --e-raised: 0 1px 2px rgba(20, 22, 26, 0.04), 0 0 0 1px var(--hairline);
+  --e-overlay: 0 8px 32px rgba(20, 22, 26, 0.1), 0 0 0 1px var(--hairline);
+
+  /* Density — operations users pick compact within a week */
+  --row-height: 32px;
+
+  /* Motion */
+  --t-micro: 120ms; --t-standard: 180ms; --t-overlay: 240ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --font-ui: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
+}
+
+:root[data-density='comfortable'] { --row-height: 44px; }
+
+:root[data-theme='dark'] {
+  --canvas: #0f1113;
+  --surface: #16181b;
+  --surface-sunken: #1b1e22;
+  --surface-hover: #1f2226;
+  --surface-selected: #172624;
+  --hairline: #24272b;
+  --hairline-strong: #31353a;
+  --ink: #edede a;
+  --ink: #ededea;
+  --ink-secondary: #a2a8b0;
+  --ink-muted: #7b828b;
+  --ink-disabled: #545a61;
+  --ink-inverse: #0f1113;
+  --accent: #2f9488;
+  --accent-hover: #3aa89b;
+  --accent-soft: #142624;
+  --accent-line: #2c4d49;
+  --attention: #d59a4a;
+  --attention-soft: #2a2114;
+  --critical: #d9615a;
+  --critical-soft: #2b1817;
+  --positive: #55a37c;
+  --positive-soft: #16241d;
+  --neutral-chip: #22252a;
+  --focus-ring: #2f9488;
+  --e-raised: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--hairline);
+  --e-overlay: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--hairline);
+}
+
+/* ------------------------------------------------------------------ reset */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular numerals are non-negotiable in operations software (§16.2). */
+table, .metric, .mono, time, .num { font-variant-numeric: tabular-nums; }
+
+a { color: inherit; text-decoration: none; }
+button, input, textarea, select { font: inherit; color: inherit; }
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--r-chip);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

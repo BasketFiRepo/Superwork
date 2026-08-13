@@ -41,7 +41,8 @@ export async function ground(
   if (APPROVAL.test(request)) wanted.push('approvals_pending')
   if (COST.test(request)) wanted.push('agent_cost_month_to_date')
   if (/\bworkload|capacity|load\b/i.test(request)) wanted.push('workload_by_assignee')
-  if (wanted.length === 0) wanted.push('tasks_overdue')
+  // No speculative aggregate: pulling an unrelated count into context is how an answer
+  // ends up opening with a number nobody asked for.
 
   for (const query of [...new Set(wanted)]) {
     const result = await runAggregate(ctx, actor, query, { limit: 25 })

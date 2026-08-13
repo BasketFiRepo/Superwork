@@ -1,0 +1,52 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@superwork/config": [
+        "../../packages/config/src/index.ts"
+      ],
+      "@superwork/db": [
+        "../../packages/db/src/index.ts"
+      ],
+      "@superwork/core": [
+        "../../packages/core/src/index.ts"
+      ],
+      "@superwork/auth": [
+        "../../packages/auth/src/index.ts"
+      ],
+      "@superwork/ai": [
+        "../../packages/ai/src/index.ts"
+      ],
+      "@superwork/tools": [
+        "../../packages/tools/src/index.ts"
+      ],
+      "@superwork/agent": [
+        "../../packages/agent/src/index.ts"
+      ],
+      "@superwork/ui/*": [
+        "../../packages/ui/src/*"
+      ]
+    },
+    "allowJs": true,
+    "incremental": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

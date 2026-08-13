@@ -29,7 +29,7 @@ export class MockLLMProvider implements LLMProvider {
     const rendered = `${req.system}\n${renderBlocks(req.blocks)}\n${req.userMessage}`
     const tokensIn = estimateTokens(rendered)
 
-    const grounding = (req.grounding ?? {}) as Grounding
+    const grounding = (req.grounding ?? {}) as unknown as Grounding
     let value: unknown
 
     switch (req.taskClass) {
@@ -40,7 +40,13 @@ export class MockLLMProvider implements LLMProvider {
         value = answerFor(req.userMessage, grounding)
         break
       case 'agent.report':
-        value = { text: reportFor((req.grounding?.['outcome'] as never) ?? emptyOutcome()) }
+        value = {
+          text: reportFor(
+            (req.grounding?.['outcome'] as never) ?? emptyOutcome(),
+            (req.grounding?.['needsAttention'] as never) ?? [],
+            (req.grounding?.['injectionWarnings'] as never) ?? [],
+          ),
+        }
         break
       case 'agent.critic':
         value = criticFor((req.grounding?.['draft'] as never) ?? {})

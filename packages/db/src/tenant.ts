@@ -63,3 +63,14 @@ export function childContext(ctx: TenantContext, overrides: Partial<TenantContex
     ...(overrides.timezone ? { timezone: overrides.timezone } : {}),
   }
 }
+
+/**
+ * postgres.js types `sql.json()` against its own recursive JSONValue. Domain objects are
+ * structurally JSON but do not satisfy that type, so this is the single, explicit place
+ * where that widening happens — rather than a cast scattered through every call site.
+ */
+type JsonParameter = Parameters<Sql['json']>[0]
+
+export function asJson<T>(value: T): JsonParameter {
+  return value as JsonParameter
+}

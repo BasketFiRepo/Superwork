@@ -207,7 +207,7 @@ export const searchEntities = register({
         SELECT id, name, type FROM companies
         WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND name ILIKE ${pattern}
         ORDER BY similarity(name, ${input.name}) DESC LIMIT 5`
-      matches.push(...rows.map((r) => ({ type: 'company', id: r.id, label: r.name, hint: r.type })))
+      matches.push(...rows.map((r: { id: string; name: string; type: string }) => ({ type: 'company', id: r.id, label: r.name, hint: r.type })))
     }
     if (types.includes('contact')) {
       const rows = await sql<{ id: string; name: string; title: string | null }[]>`
@@ -231,7 +231,7 @@ export const searchEntities = register({
         message: `Nothing in this organization matches "${input.name}".`,
       }
     }
-    if (matches.length > 1 && matches.filter((m) => m.type === matches[0]!.type).length > 1) {
+    if (matches.length > 1 && matches.filter((m: { type: string }) => m.type === matches[0]!.type).length > 1) {
       return {
         ok: false as const,
         code: 'ENTITY_AMBIGUOUS',

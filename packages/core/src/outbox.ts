@@ -1,4 +1,4 @@
-import type { TenantContext } from '@superwork/db'
+import { asJson, type TenantContext } from '@superwork/db'
 
 /**
  * Transactional outbox (§2.4). Intent is written in the same transaction as the state
@@ -16,7 +16,7 @@ export interface OutboxMessage {
 export async function enqueue(ctx: TenantContext, message: OutboxMessage): Promise<void> {
   await ctx.sql`
     INSERT INTO outbox (organization_id, topic, payload, idempotency_key, next_attempt_at, trace_id, created_by)
-    VALUES (${ctx.organizationId}, ${message.topic}, ${ctx.sql.json(message.payload)},
+    VALUES (${ctx.organizationId}, ${message.topic}, ${ctx.sql.json(asJson(message.payload))},
             ${message.idempotencyKey}, ${message.notBefore ?? new Date()}, ${ctx.traceId}, ${ctx.userId})
     ON CONFLICT (organization_id, topic, idempotency_key) DO NOTHING`
 }

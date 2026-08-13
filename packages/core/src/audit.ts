@@ -1,4 +1,4 @@
-import type { ActorType, TenantContext } from '@superwork/db'
+import { asJson, type ActorType, type TenantContext } from '@superwork/db'
 import { SENSITIVE_FIELDS } from '@superwork/auth'
 
 /**
@@ -29,7 +29,7 @@ export async function writeActivity(ctx: TenantContext, input: ActivityInput): P
     ) VALUES (
       ${ctx.organizationId}, ${input.actorType}, ${input.actorUserId ?? null}, ${input.actorAgentId ?? null},
       ${input.actorLabel}, ${input.verb}, ${input.entityType}, ${input.entityId}, ${input.entityLabel},
-      ${input.summary}, ${input.agentRunId ?? null}, ${ctx.sql.json(input.metadata ?? {})},
+      ${input.summary}, ${input.agentRunId ?? null}, ${ctx.sql.json(asJson(input.metadata ?? {}))},
       ${input.occurredAt ?? new Date()}, ${ctx.userId}
     ) RETURNING id`
   return rows[0]!.id
@@ -58,7 +58,7 @@ export async function writeAudit(ctx: TenantContext, input: AuditInput): Promise
     ) VALUES (
       ${ctx.organizationId}, ${input.actorType}, ${input.actorId ?? null},
       ${input.principalUserId ?? ctx.userId}, ${input.action}, ${input.entityType}, ${input.entityId ?? null},
-      ${ctx.sql.json(diff)}, ${redacted}, ${input.ip ?? null}, ${input.userAgent ?? null},
+      ${ctx.sql.json(asJson(diff))}, ${redacted}, ${input.ip ?? null}, ${input.userAgent ?? null},
       ${ctx.requestId}, ${ctx.traceId}, ${input.agentRunId ?? null}
     )`
 }

@@ -1,0 +1,24 @@
+{
+  "name": "@superwork/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000"
+  },
+  "dependencies": {
+    "next": "^15.1.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@superwork/config": "workspace:*",
+    "@superwork/db": "workspace:*",
+    "@superwork/core": "workspace:*",
+    "@superwork/auth": "workspace:*",
+    "@superwork/ai": "workspace:*",
+    "@superwork/tools": "workspace:*",
+    "@superwork/agent": "workspace:*",
+    "@superwork/ui": "workspace:*"
+  }
+}

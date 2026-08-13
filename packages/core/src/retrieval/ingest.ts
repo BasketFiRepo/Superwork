@@ -108,10 +108,11 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
     const classification = classifyContent(normalized, input.sensitivityHint ?? 'internal')
 
     // ---- Version ------------------------------------------------------------
-    const [{ next_ordinal: ordinal }] = await sql<{ next_ordinal: number }[]>`
+    const [nextVersion] = await sql<{ next_ordinal: number }[]>`
       SELECT coalesce(max(ordinal), 0) + 1 AS next_ordinal
       FROM document_versions
       WHERE organization_id = ${ctx.organizationId} AND document_id = ${input.documentId}`
+    const ordinal = nextVersion?.next_ordinal ?? 1
 
     const [previous] = await sql<{ id: string }[]>`
       SELECT id FROM document_versions
@@ -122,7 +123,7 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
       INSERT INTO document_versions (
         organization_id, document_id, ordinal, body, content_hash, supersedes_version_id, created_by
       ) VALUES (
-        ${ctx.organizationId}, ${input.documentId}, ${ordinal!}, ${normalized}, ${contentHash},
+        ${ctx.organizationId}, ${input.documentId}, ${ordinal}, ${normalized}, ${contentHash},
         ${previous?.id ?? null}, ${ctx.userId}
       ) RETURNING id`
     const versionId = version!.id

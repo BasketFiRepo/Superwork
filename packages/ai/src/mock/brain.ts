@@ -210,25 +210,39 @@ export function answerFor(request: string, g: Grounding): AnswerDraft {
     }
   }
 
-  if (g.noAnswer && g.knowledge.length === 0) {
+  // Answer with the sentence that actually addresses the question, not the first
+  // sentence of the top chunk — the difference is what makes a cited answer useful.
+  const terms = queryTerms(request)
+  // A single shared generic word ("policy", "freight") is not an answer. Require real
+  // overlap, counting the passage's own heading, so "no answer" stays an honest outcome.
+  const floor = terms.size >= 3 ? 2 : 1
+  const scored = g.knowledge
+    .map((chunk, index) => {
+      const sentence = bestSentence(chunk.content, chunk.headingPath, terms)
+      return { chunk, index, sentence: sentence.text, score: sentence.score }
+    })
+    .filter((candidate) => candidate.sentence && candidate.score >= floor)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+
+  if (scored.length === 0) {
     return {
       text:
         lines.length > 0
           ? lines.join(' ')
-          : "I don't have anything on this in company memory. If you upload the document that covers it, I'll index it and answer properly — I'd rather say that than guess.",
+          : "I don't have anything on this in company memory. Upload the document that covers it and I'll index it and answer properly — I'd rather say that than guess.",
       citations,
       usedAggregates,
     }
   }
 
-  const top = g.knowledge.slice(0, 4)
-  top.forEach((chunk, index) => {
-    const sentence = firstMeaningfulSentence(chunk.content)
-    if (!sentence) return
-    const prefix = chunk.isSuperseded ? 'A superseded version of this document says: ' : ''
-    lines.push(`${prefix}${sentence}`)
-    citations.push({ claim: sentence, knowledgeIndex: index })
-  })
+  for (const candidate of scored) {
+    const prefix = candidate.chunk.isSuperseded
+      ? 'A superseded version of this document says: '
+      : ''
+    lines.push(`${prefix}${candidate.sentence}`)
+    citations.push({ claim: candidate.sentence, knowledgeIndex: candidate.index })
+  }
 
   if (lines.length === 0) {
     lines.push("I found sources but nothing in them answers this directly, so I'd rather flag that than paraphrase around it.")
@@ -237,19 +251,61 @@ export function answerFor(request: string, g: Grounding): AnswerDraft {
   return { text: lines.join(' '), citations, usedAggregates }
 }
 
-function firstMeaningfulSentence(content: string): string {
+const STOPWORDS = new Set(
+  'a an the and or but is are was were be do does did what who when where why how our we you they this that for of to in on at with from by can could should would our us'.split(
+    ' ',
+  ),
+)
+
+function queryTerms(request: string): Set<string> {
+  return new Set(
+    request
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((token) => token.length > 2 && !STOPWORDS.has(token)),
+  )
+}
+
+/**
+ * Scores each sentence by how much of the question it covers. The passage's heading
+ * counts too: a sentence under "Escalation on excursion" is about escalation even when
+ * the sentence itself does not repeat the word.
+ */
+function bestSentence(content: string, headingPath: string, terms: Set<string>): { text: string; score: number } {
+  const heading = headingPath.toLowerCase()
+  let headingScore = 0
+  for (const term of terms) if (heading.includes(term)) headingScore += 1
   const cleaned = content
     .split('\n')
-    .filter((line) => line.trim() && !line.trim().startsWith('#') && !line.trim().startsWith('|'))
+    .filter((line) => line.trim() && !line.trim().startsWith('#'))
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim()
-  const sentence = cleaned.split(/(?<=[.!?])\s/)[0] ?? cleaned
-  return sentence.length > 320 ? `${sentence.slice(0, 317)}...` : sentence
+
+  const sentences = cleaned.split(/(?<=[.!?])\s+/).filter((s) => s.length > 25)
+  let best = { text: '', score: 0 }
+
+  for (const sentence of sentences) {
+    const lower = sentence.toLowerCase()
+    let score = headingScore
+    for (const term of terms) if (lower.includes(term)) score += 1
+    // A sentence carrying a figure is usually the one that answers a "how much" question.
+    if (/[£$€]\s?[\d,]+|\b\d+\s?(?:days?|hours?|%)\b/.test(sentence)) score += 0.5
+    if (score > best.score) best = { text: trim(sentence), score }
+  }
+
+  return best.score > 0 ? best : { text: trim(sentences[0] ?? cleaned), score: 0 }
+}
+
+function trim(sentence: string): string {
+  return sentence.length > 320 ? `${sentence.slice(0, 317)}…` : sentence
 }
 
 export function reportFor(
   outcome: { created: number; updated: number; drafted: number; sent: number; skipped: string[]; failed: string[] },
+  needsAttention: { label: string; reason: string }[] = [],
+  injectionWarnings: { label: string }[] = [],
 ): string {
   const parts: string[] = []
   if (outcome.created) parts.push(`${outcome.created} ${outcome.created === 1 ? 'task' : 'tasks'} created`)
@@ -258,6 +314,20 @@ export function reportFor(
   parts.push(outcome.sent ? `${outcome.sent} sent` : 'nothing was sent')
 
   const body = [parts.join(', ') + '.']
+  if (needsAttention.length) {
+    body.push(
+      `${needsAttention.length} ${needsAttention.length === 1 ? 'item is' : 'items are'} ambiguous and I flagged rather than acted on ${needsAttention.length === 1 ? 'it' : 'them'}: ${needsAttention
+        .map((item) => `${item.label} (${item.reason})`)
+        .join('; ')}`,
+    )
+  }
+  if (injectionWarnings.length) {
+    body.push(
+      `${injectionWarnings.length} source${injectionWarnings.length === 1 ? '' : 's'} contained instructions aimed at me — ${injectionWarnings
+        .map((w) => w.label)
+        .join(', ')}. I reported ${injectionWarnings.length === 1 ? 'it' : 'them'} and did not act on ${injectionWarnings.length === 1 ? 'it' : 'them'}.`,
+    )
+  }
   if (outcome.skipped.length) body.push(`Skipped: ${outcome.skipped.join('; ')}.`)
   if (outcome.failed.length) body.push(`Failed: ${outcome.failed.join('; ')}.`)
   return body.join(' ')

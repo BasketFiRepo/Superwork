@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -18,28 +22,78 @@
     "jsx": "preserve",
     "noEmit": true,
     "baseUrl": ".",
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "paths": {
-      "@superwork/config": ["packages/config/src/index.ts"],
-      "@superwork/config/*": ["packages/config/src/*"],
-      "@superwork/db": ["packages/db/src/index.ts"],
-      "@superwork/db/*": ["packages/db/src/*"],
-      "@superwork/core": ["packages/core/src/index.ts"],
-      "@superwork/core/*": ["packages/core/src/*"],
-      "@superwork/auth": ["packages/auth/src/index.ts"],
-      "@superwork/auth/*": ["packages/auth/src/*"],
-      "@superwork/ai": ["packages/ai/src/index.ts"],
-      "@superwork/ai/*": ["packages/ai/src/*"],
-      "@superwork/tools": ["packages/tools/src/index.ts"],
-      "@superwork/tools/*": ["packages/tools/src/*"],
-      "@superwork/agent": ["packages/agent/src/index.ts"],
-      "@superwork/agent/*": ["packages/agent/src/*"],
-      "@superwork/integrations": ["packages/integrations/src/index.ts"],
-      "@superwork/integrations/*": ["packages/integrations/src/*"],
-      "@superwork/ui": ["packages/ui/src/index.ts"],
-      "@superwork/ui/*": ["packages/ui/src/*"]
+      "@superwork/config": [
+        "packages/config/src/index.ts"
+      ],
+      "@superwork/config/*": [
+        "packages/config/src/*"
+      ],
+      "@superwork/db": [
+        "packages/db/src/index.ts"
+      ],
+      "@superwork/db/*": [
+        "packages/db/src/*"
+      ],
+      "@superwork/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@superwork/core/*": [
+        "packages/core/src/*"
+      ],
+      "@superwork/auth": [
+        "packages/auth/src/index.ts"
+      ],
+      "@superwork/auth/*": [
+        "packages/auth/src/*"
+      ],
+      "@superwork/ai": [
+        "packages/ai/src/index.ts"
+      ],
+      "@superwork/ai/*": [
+        "packages/ai/src/*"
+      ],
+      "@superwork/tools": [
+        "packages/tools/src/index.ts"
+      ],
+      "@superwork/tools/*": [
+        "packages/tools/src/*"
+      ],
+      "@superwork/agent": [
+        "packages/agent/src/index.ts"
+      ],
+      "@superwork/agent/*": [
+        "packages/agent/src/*"
+      ],
+      "@superwork/integrations": [
+        "packages/integrations/src/index.ts"
+      ],
+      "@superwork/integrations/*": [
+        "packages/integrations/src/*"
+      ],
+      "@superwork/ui": [
+        "packages/ui/src/index.ts"
+      ],
+      "@superwork/ui/*": [
+        "packages/ui/src/*"
+      ]
     }
   },
-  "include": ["packages/**/*.ts", "packages/**/*.tsx", "apps/**/*.ts", "apps/**/*.tsx", "tests/**/*.ts"],
-  "exclude": ["node_modules", "**/node_modules", "**/.next", "**/dist"]
+  "include": [
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "apps/worker/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/node_modules",
+    "**/.next",
+    "**/dist",
+    "apps/web"
+  ]
 }

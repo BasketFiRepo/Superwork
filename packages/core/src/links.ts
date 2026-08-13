@@ -1,4 +1,4 @@
-import type { LinkRelation, TenantContext } from '@superwork/db'
+import { asJson, type LinkRelation, type TenantContext } from '@superwork/db'
 
 /**
  * The polymorphic edge table (§3.4). Every agent-created entity carries a
@@ -21,7 +21,7 @@ export async function link(
   await ctx.sql`
     INSERT INTO links (organization_id, from_type, from_id, to_type, to_id, relation, metadata, created_by)
     VALUES (${ctx.organizationId}, ${from.type}, ${from.id}, ${to.type}, ${to.id}, ${relation},
-            ${ctx.sql.json(metadata)}, ${ctx.userId})
+            ${ctx.sql.json(asJson(metadata))}, ${ctx.userId})
     ON CONFLICT DO NOTHING`
 }
 

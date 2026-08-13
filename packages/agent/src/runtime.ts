@@ -416,7 +416,11 @@ async function executeApprovedPlan(
       system: system || 'Summarize what changed, plainly and honestly.',
       blocks,
       userMessage: input.request,
-      grounding: { outcome },
+      grounding: {
+        outcome,
+        needsAttention: plan.needsAttention,
+        injectionWarnings: grounded?.injectionFindings ?? [],
+      },
     })
     if (narrativeResponse.usage) {
       recordUsage(budget, narrativeResponse.usage)

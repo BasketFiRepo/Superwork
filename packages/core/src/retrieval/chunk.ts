@@ -109,7 +109,8 @@ function parseBlocks(markdown: string): Block[] {
 export function chunkDocument(markdown: string): Chunk[] {
   const blocks = parseBlocks(markdown)
   const chunks: Chunk[] = []
-  let current: { lines: string[]; tokens: number; headingPath: string; anchor: string } | null = null
+  type Pending = { lines: string[]; tokens: number; headingPath: string; anchor: string }
+  let current: Pending | null = null
 
   const commit = () => {
     if (!current || current.lines.length === 0) return
@@ -146,9 +147,14 @@ export function chunkDocument(markdown: string): Chunk[] {
       continue
     }
 
-    const headingChanged = current.headingPath !== block.headingPath
-    if (current.tokens + tokens > TARGET_TOKENS || (headingChanged && current.tokens > TARGET_TOKENS / 2)) {
-      const tail = current.lines[current.lines.length - 1] ?? ''
+    const open: Pending = current
+    const headingChanged = open.headingPath !== block.headingPath
+    // Merging across a heading boundary is only safe when the new block sits *inside*
+    // the current section; otherwise the chunk would be labelled with a heading it no
+    // longer belongs to, and its citation would deep-link to the wrong place.
+    const sameSection = !headingChanged || block.headingPath.startsWith(open.headingPath)
+    if (open.tokens + tokens > TARGET_TOKENS || !sameSection) {
+      const tail = open.lines[open.lines.length - 1] ?? ''
       const overlap = headingChanged ? '' : tail.slice(-Math.floor(tail.length * OVERLAP_RATIO))
       commit()
       current = {
@@ -160,8 +166,13 @@ export function chunkDocument(markdown: string): Chunk[] {
       continue
     }
 
-    current.lines.push(block.text)
-    current.tokens += tokens
+    open.lines.push(block.text)
+    open.tokens += tokens
+    if (headingChanged) {
+      // The chunk is labelled and anchored by the deepest section it actually covers.
+      open.headingPath = block.headingPath
+      open.anchor = block.anchor
+    }
   }
   commit()
 

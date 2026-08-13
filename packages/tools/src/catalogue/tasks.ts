@@ -16,6 +16,19 @@ function toDate(value: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+/** Previews are read by people, so dates render in the viewing user's timezone. */
+function readableDate(value: Date | null, timeZone: string): string {
+  if (!value) return 'no date'
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(value)
+}
+
 export const createTaskTool = register({
   name: 'create_task@v1',
   description: 'Create a task with an owner and a due date. Always link it back to the email, meeting or document it came from.',
@@ -43,7 +56,7 @@ export const createTaskTool = register({
       description: input.description ?? null,
       assigneeId: input.assigneeId ?? null,
       projectId: input.projectId ?? null,
-      priority: input.priority,
+      priority: input.priority ?? 'medium',
       dueAt: toDate(input.dueAt),
       ...(input.derivedFrom ? { derivedFrom: input.derivedFrom } : {}),
       agentRunId: ctx.agentRunId,
@@ -72,7 +85,7 @@ export const createTaskTool = register({
         entityLabel: input.title,
         changes: [
           { field: 'Assignee', to: assignee },
-          { field: 'Due', to: due ? due.toISOString() : 'no date' },
+          { field: 'Due', to: readableDate(due, ctx.tenantDb.timezone) },
           { field: 'Priority', to: input.priority },
         ],
         riskTier: 'low',
@@ -153,8 +166,8 @@ export const updateTaskTool = register({
     if (input.dueAt !== undefined) {
       changes.push({
         field: 'Due',
-        from: before.dueAt ? before.dueAt.toISOString() : 'no date',
-        to: toDate(input.dueAt)?.toISOString() ?? 'no date',
+        from: readableDate(before.dueAt, ctx.tenantDb.timezone),
+        to: readableDate(toDate(input.dueAt), ctx.tenantDb.timezone),
       })
     }
     if (input.assigneeId !== undefined) changes.push({ field: 'Assignee', from: before.assigneeName, to: input.assigneeId ?? 'unassigned' })

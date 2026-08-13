@@ -1,4 +1,4 @@
-import { withTenant, type TenantContext } from '@superwork/db'
+import { withTenant, type TenantContext, asJson } from '@superwork/db'
 import { loadActor, type Actor } from '@superwork/auth'
 import { runAggregate } from '@superwork/core'
 import type { RunSession } from '../runtime.js'
@@ -200,8 +200,8 @@ export async function runWatchers(session: RunSession, keys?: string[]): Promise
           recommended_actions, dedupe_key, assigned_to, created_by
         ) VALUES (
           ${ctx.organizationId}, ${draft.watcher}, ${draft.type}, ${draft.severity}, ${draft.title},
-          ${draft.body}, ${ctx.sql.json(draft.evidence)}, ${ctx.sql.json(draft.entities)},
-          ${ctx.sql.json(draft.recommendedActions)}, ${draft.dedupeKey}, ${draft.assignedTo ?? null}, ${ctx.userId}
+          ${draft.body}, ${ctx.sql.json(asJson(draft.evidence))}, ${ctx.sql.json(asJson(draft.entities))},
+          ${ctx.sql.json(asJson(draft.recommendedActions))}, ${draft.dedupeKey}, ${draft.assignedTo ?? null}, ${ctx.userId}
         )
         ON CONFLICT (organization_id, dedupe_key) WHERE deleted_at IS NULL DO NOTHING
         RETURNING id`

@@ -1,4 +1,4 @@
-import type { ApprovalStatus, RiskTier, TenantContext } from '@superwork/db'
+import { asJson, type ApprovalStatus, type RiskTier, type TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
@@ -82,7 +82,7 @@ export async function createApproval(
       ${input.riskTier}, ${actor.type}, ${actor.userId}, ${input.agentRunId ?? null},
       ${input.approverUserId ?? actor.userId}, ${slaHours},
       ${new Date(Date.now() + slaHours * 3600_000 * 6)},
-      ${ctx.sql.json(input.preview)}, ${ctx.sql.json(input.evidence)},
+      ${ctx.sql.json(asJson(input.preview))}, ${ctx.sql.json(asJson(input.evidence))},
       ${input.policyReason ?? null}, ${ctx.userId}
     ) RETURNING id`
 
@@ -177,7 +177,7 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
     UPDATE approvals
     SET status = ${status}, decided_by = ${actor.userId}, decided_at = now(),
         decision_reason = ${input.reason ?? null},
-        edits = ${input.edits ? ctx.sql.json(input.edits) : null}
+        edits = ${input.edits ? ctx.sql.json(asJson(input.edits)) : null}
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.approvalId}`
 
   await writeActivity(ctx, {

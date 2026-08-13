@@ -35,8 +35,10 @@ export interface Tool<I = unknown, O = unknown> {
   name: string
   /** Written for the model: at most two sentences, no ambiguity. */
   description: string
-  inputSchema: z.ZodType<I>
-  outputSchema: z.ZodType<O>
+  // The third parameter is left open so `I` infers as the schema's *output* type:
+  // fields carrying `.default()` are required by the time `execute` sees them.
+  inputSchema: z.ZodType<I, z.ZodTypeDef, any>
+  outputSchema: z.ZodType<O, z.ZodTypeDef, any>
   riskTier: RiskTier
   requiredPermissions: string[]
   reversible: boolean

@@ -240,8 +240,10 @@ function intersectAgent(
   }
 
   // execute:low — reversible internal writes.
-  if (agent.capabilityDowngraded && resource.type === 'email_draft') {
-    return ALLOW('Downgraded run: outbound content requires approval.', { requiresApproval: true })
+  if (agent.capabilityDowngraded && (resource.type === 'email_draft' || resource.type === 'email')) {
+    return ALLOW('This run read untrusted external content, so outbound content requires approval.', {
+      requiresApproval: true,
+    })
   }
   return ALLOW(`${agent.agentName} may perform this reversible change.`, redactions ? { redactions } : {})
 }
