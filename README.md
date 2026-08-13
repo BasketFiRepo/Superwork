@@ -129,9 +129,15 @@ wherever it affects what you should believe. `AUTOPILOT_ENABLED` is rejected whi
 
 ## Deployment
 
-The repository is a pnpm workspace and the deployable application is `apps/web`. On Vercel
-the project's **Root Directory** must be set to `apps/web`, which is where `next.config.mjs`
-and the `next` dependency live. Vercel then detects the Next.js preset on its own, installs
-from the workspace root because it sees `pnpm-workspace.yaml`, and reads the build output
-from `apps/web/.next`. Left at the repository root the build still succeeds, but the
-deployment fails looking for a static `public/` directory that this project does not have.
+The repository is a pnpm workspace and the deployable application is `apps/web`. Vercel
+builds from the repository root, where there is no Next.js app, so `vercel.json` names the
+framework, builds the one workspace package, and points at `apps/web/.next` for the output.
+Without it the build succeeds and the deployment then fails looking for a static `public/`
+directory that this project does not have. `next` is declared in the root `devDependencies`
+for the same reason: Vercel resolves the Next.js version from the `package.json` in the
+directory it builds from, and refuses to deploy when it cannot find one.
+
+The **Root Directory** in the Vercel project settings must therefore stay at the repository
+root. Setting it to `apps/web` is the other supported arrangement — Vercel then detects
+Next.js by itself and needs none of the above — but the two do not combine: with a root
+directory set, Vercel reads `apps/web/vercel.json` and ignores the file at the root.
