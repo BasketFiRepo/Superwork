@@ -245,6 +245,10 @@ try {
   // has a real card in front of it rather than a fixture.
   await page.locator('[data-testid="workflow-activate"]').click()
   await page.getByRole('button', { name: 'Run it now' }).waitFor({ timeout: 20_000 })
+  await page.waitForSelector('[data-testid="workflow-schedule"]', { timeout: 15_000 })
+  const scheduleText = await page.locator('[data-testid="workflow-schedule"]').innerText()
+  ok('Activating puts it on the clock', /every weekday at 09:00/i.test(scheduleText), scheduleText.split('\n')[0])
+  ok('The schedule names the timezone it is evaluated in', /Europe\/London|UTC/.test(scheduleText))
   await page.getByRole('button', { name: 'Run it now' }).click()
   // The panel already holds the dry-run result, so wait for the text to change rather
   // than for the element to appear.

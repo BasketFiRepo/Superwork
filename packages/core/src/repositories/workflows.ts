@@ -4,6 +4,8 @@ import { can, type Actor } from '@superwork/auth'
 import type { CompiledWorkflow, DetectedRisk, WorkflowGraph } from '@superwork/ai'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { describeCron } from '../cron.js'
+import { setScheduleEnabled, upsertSchedule, type ScheduleView } from './schedules.js'
 
 /**
  * Workflows (§10).
@@ -34,6 +36,14 @@ export interface WorkflowView {
   maxConcurrentRuns: number
   dailyActionCap: number
   createdAt: Date
+  /** Null when the workflow only runs when somebody runs it. */
+  scheduleCron: string | null
+  scheduleTimezone: string | null
+  scheduleEnabled: boolean | null
+  nextRunAt: Date | null
+  lastRunAt: Date | null
+  skippedTotal: number | null
+  lastSkippedReason: string | null
 }
 
 const SELECT_WORKFLOW = (ctx: TenantContext) => ctx.sql`
@@ -42,10 +52,15 @@ const SELECT_WORKFLOW = (ctx: TenantContext) => ctx.sql`
          v.graph, coalesce(v.readback, '') AS readback, coalesce(v.detected_risks, '[]'::jsonb) AS risks,
          w.simulated_ok AS "simulatedOk", w.last_simulation_id AS "lastSimulationId",
          w.max_concurrent_runs AS "maxConcurrentRuns", w.daily_action_cap AS "dailyActionCap",
-         w.created_at AS "createdAt"
+         w.created_at AS "createdAt",
+         s.cron AS "scheduleCron", s.timezone AS "scheduleTimezone", s.enabled AS "scheduleEnabled",
+         s.next_run_at AS "nextRunAt", s.last_run_at AS "lastRunAt",
+         s.skipped_total AS "skippedTotal", s.last_skipped_reason AS "lastSkippedReason"
   FROM workflows w
   LEFT JOIN users u ON u.id = w.owner_user_id
-  LEFT JOIN workflow_versions v ON v.id = w.current_version_id`
+  LEFT JOIN workflow_versions v ON v.id = w.current_version_id
+  LEFT JOIN schedules s ON s.organization_id = w.organization_id AND s.kind = 'workflow'
+                       AND s.target_id = w.id AND s.deleted_at IS NULL`
 
 function guard(ctx: TenantContext, actor: Actor, action: string): void {
   const decision = can(actor, action, {
@@ -117,6 +132,10 @@ export async function saveCompiled(
     SET current_version_id = ${version!.id}, description = ${input.description},
         simulated_ok = false, last_simulation_id = NULL, status = 'draft'
     WHERE organization_id = ${ctx.organizationId} AND id = ${workflowId}`
+  // Editing returns a workflow to draft, so it comes off the clock with it. An edited
+  // automation that kept firing on its old schedule would be firing a version nobody
+  // dry-ran.
+  await setScheduleEnabled(ctx, 'workflow', workflowId, false)
 
   await writeAudit(ctx, {
     actorType: actor.type,
@@ -204,6 +223,19 @@ export async function activateWorkflow(
     UPDATE workflow_versions SET published_at = now(), published_by = ${actor.userId}
     WHERE organization_id = ${ctx.organizationId} AND id = ${workflow.currentVersionId}`
 
+  // Activation is what puts a workflow on the clock. A schedule created any earlier would
+  // mean a draft that fires, which is not a draft.
+  const trigger = workflow.graph?.trigger
+  let schedule: ScheduleView | null = null
+  if (trigger?.kind === 'schedule') {
+    schedule = await upsertSchedule(ctx, {
+      kind: 'workflow',
+      targetId: input.workflowId,
+      cron: trigger.spec,
+      timezone: ctx.timezone,
+    })
+  }
+
   await writeAudit(ctx, {
     actorType: actor.type,
     actorId: actor.userId,
@@ -220,7 +252,11 @@ export async function activateWorkflow(
     entityType: 'workflow',
     entityId: input.workflowId,
     entityLabel: workflow.name,
-    summary: `Activated version ${workflow.currentVersionOrdinal}. ${workflow.readback}`,
+    summary:
+      `Activated version ${workflow.currentVersionOrdinal}. ${workflow.readback}` +
+      (schedule
+        ? ` It runs ${describeCron(schedule.cron, schedule.timezone)}, starting ${schedule.nextRunAt?.toISOString() ?? 'shortly'}.`
+        : ' It runs when somebody runs it.'),
   })
 
   return getWorkflow(ctx, actor, input.workflowId)
@@ -237,6 +273,8 @@ export async function setWorkflowStatus(
   await ctx.sql`
     UPDATE workflows SET status = ${input.status}
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.workflowId}`
+  // Pausing a workflow that is not on the clock is what people expect "pause" to mean.
+  await setScheduleEnabled(ctx, 'workflow', input.workflowId, false)
   await writeAudit(ctx, {
     actorType: actor.type,
     actorId: actor.userId,

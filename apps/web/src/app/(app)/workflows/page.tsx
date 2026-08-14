@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { listWorkflows } from '@superwork/core'
+import { describeCron, listWorkflows } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
 import { WorkflowComposer } from '@/components/WorkflowComposer'
 
@@ -52,6 +52,7 @@ export default async function WorkflowsPage() {
                   <th>Workflow</th>
                   <th style={{ width: 160 }}>Owner</th>
                   <th style={{ width: 110 }}>Status</th>
+                  <th style={{ width: 220 }}>Schedule</th>
                   <th style={{ width: 200 }}>Dry run</th>
                 </tr>
               </thead>
@@ -68,6 +69,11 @@ export default async function WorkflowsPage() {
                     </td>
                     <td className="small secondary">{workflow.ownerName ?? 'unassigned'}</td>
                     <td className="small secondary">{workflow.status}</td>
+                    <td className="small secondary">
+                      {workflow.scheduleCron && workflow.scheduleEnabled
+                        ? describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')
+                        : 'when somebody runs it'}
+                    </td>
                     <td>
                       {workflow.simulatedOk ? (
                         <span className="chip chip-positive">passed</span>

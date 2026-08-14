@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { getWorkflow, listWorkflowRuns } from '@superwork/core'
+import { describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
 import { WorkflowControls } from '@/components/WorkflowControls'
 import { WorkflowGraphView, type CompiledView } from '@/components/WorkflowGraphView'
@@ -51,6 +51,37 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
           </div>
           <div className="panel-body">
             <WorkflowGraphView compiled={compiled} />
+          </div>
+        </section>
+      ) : null}
+
+      {workflow.scheduleCron ? (
+        <section className="panel" data-testid="workflow-schedule">
+          <div className="panel-header">
+            <h2>On the clock</h2>
+            <span className={workflow.scheduleEnabled ? 'chip chip-positive' : 'chip chip-attention'}>
+              {workflow.scheduleEnabled ? 'firing' : 'stopped'}
+            </span>
+          </div>
+          <div className="panel-body stack stack-3">
+            <p className="prose" style={{ margin: 0 }}>
+              Runs {describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')} — the company's
+              timezone, not the server's, and the same on the morning the clocks change.
+            </p>
+            <div className="row wrap small secondary">
+              <span>
+                Next: {workflow.nextRunAt ? workflow.nextRunAt.toISOString().slice(0, 16).replace('T', ' ') : '—'} UTC
+              </span>
+              <span>
+                Last: {workflow.lastRunAt ? workflow.lastRunAt.toISOString().slice(0, 16).replace('T', ' ') : 'never'}
+              </span>
+              {workflow.skippedTotal ? <span>{workflow.skippedTotal} firings skipped</span> : null}
+            </div>
+            {workflow.lastSkippedReason ? (
+              <div className="banner">
+                <span>Last skipped firing: {workflow.lastSkippedReason}</span>
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}

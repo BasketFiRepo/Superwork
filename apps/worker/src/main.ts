@@ -1,14 +1,16 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
 import { claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
-import { evict, generateDueBriefings, generateDueDigests, runWatchers } from '@superwork/agent'
+import { evict, generateDueBriefings, generateDueDigests, runDueWorkflows, runWatchers } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
 /**
  * The background worker.
  *
- * Two jobs, both of which the spec insists must be observable rather than silent:
+ * Every job here must be observable rather than silent:
  *   • dispatch the transactional outbox, honouring the email recall window (§2.4, §5.7)
  *   • run the read-only watchers that produce insights (§9.1)
+ *   • fire the workflow schedules that are due (§10.2)
+ *   • generate briefings, deliver the nudge ladder, write agent digests
  *
  * Failures back off exponentially and land in a dead-letter state after six attempts;
  * nothing is retried forever and nothing fails quietly.
@@ -19,6 +21,9 @@ const WATCHER_MS = Number(process.env['WORKER_WATCHER_MS'] ?? 15 * 60_000)
 const BRIEFING_MS = Number(process.env['WORKER_BRIEFING_MS'] ?? 30 * 60_000)
 const DIGEST_MS = Number(process.env['WORKER_DIGEST_MS'] ?? 60 * 60_000)
 const NUDGE_MS = Number(process.env['WORKER_NUDGE_MS'] ?? 5 * 60_000)
+// Schedules are minute-granular, so the sweep has to be too. Claiming is cheap: one
+// indexed query per organization that returns nothing almost every time.
+const SCHEDULE_MS = Number(process.env['WORKER_SCHEDULE_MS'] ?? 60_000)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -100,11 +105,15 @@ async function dispatchEmail(
 }
 
 async function main(): Promise<void> {
-  console.log(`Superwork worker started · outbox every ${POLL_MS}ms · watchers every ${WATCHER_MS}ms`)
+  console.log(
+    `Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms · ` +
+      `watchers every ${WATCHER_MS}ms`,
+  )
   let lastWatcherRun = 0
   let lastBriefingRun = 0
   let lastDigestRun = 0
   let lastNudgeRun = 0
+  let lastScheduleSweep = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -173,6 +182,32 @@ async function main(): Promise<void> {
           }
         } catch (error) {
           console.error(`[nudges] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+      }
+    }
+
+    // Workflow schedules (§10.2). A firing that did not happen — late, or held back because
+    // the last batch is still waiting for a person — is logged with its reason; a workflow
+    // that has quietly stopped working is worse than one that visibly stopped.
+    if (Date.now() - lastScheduleSweep > SCHEDULE_MS) {
+      lastScheduleSweep = Date.now()
+      for (const org of organizations) {
+        if (!org.ownerId) continue
+        try {
+          const sweep = await runDueWorkflows({
+            organizationId: org.id,
+            userId: org.ownerId,
+            timezone: org.timezone,
+          })
+          if (sweep.claimed > 0) {
+            console.log(
+              `[workflows] ${org.id}: ${sweep.claimed} due · ${sweep.ran} ran ` +
+                `(${sweep.awaitingApproval} waiting for approval) · ${sweep.skipped} skipped · ${sweep.failed} failed`,
+            )
+            for (const note of sweep.notes) console.log(`[workflows] ${org.id}: ${note}`)
+          }
+        } catch (error) {
+          console.error(`[workflows] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
       }
     }

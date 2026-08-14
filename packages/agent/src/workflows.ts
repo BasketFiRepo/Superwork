@@ -4,11 +4,14 @@ import { env } from '@superwork/config'
 import { asAgent, can, loadActor, type Actor } from '@superwork/auth'
 import {
   assertEditsAreOffered,
+  claimDueSchedules,
   createApproval,
+  occurrencesBetween,
   getApproval,
   getWorkflow,
   recordSimulation,
   runAggregate,
+  startOfDay,
   writeAudit,
   type AggregateQuery,
   type PreviewLine,
@@ -46,7 +49,7 @@ export interface WorkflowRunOutcome {
   runId: string
   workflowId: string
   agentRunId: string | null
-  status: 'succeeded' | 'awaiting_approval' | 'failed'
+  status: 'succeeded' | 'awaiting_approval' | 'failed' | 'skipped'
   simulated: boolean
   /** How many times the trigger fired in the window (simulations) or 1 (live). */
   occurrences: number
@@ -104,7 +107,16 @@ async function execute(
       throw new Error('Only an active workflow runs for real. Dry-run it and activate it first.')
     }
 
+    // Unattended work is bounded by numbers a person set, checked against what actually
+    // happened rather than against a counter in memory (§27.6).
+    const capacity = input.simulated ? { allow: true, reason: '', remaining: MAX_ITEMS_PER_RUN } : await checkCapacity(ctx, workflow)
     const runId = await openRun(ctx, workflow, input.simulated, input.trigger ?? 'manual')
+    if (!capacity.allow) {
+      await ctx.sql`
+        UPDATE workflow_runs SET status = 'cancelled', finished_at = now(), error = ${capacity.reason}
+        WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
+      return { workflow, runId, agentRunId: null, actor, capacity }
+    }
     const agentRunId = input.simulated
       ? null
       : await insertRun(ctx, {
@@ -124,7 +136,7 @@ async function execute(
         WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
       await setRunStatus(ctx, agentRunId, 'running')
     }
-    return { workflow, runId, agentRunId, actor }
+    return { workflow, runId, agentRunId, actor, capacity }
   })
 
   const outcome: WorkflowRunOutcome = {
@@ -144,8 +156,23 @@ async function execute(
     error: null,
   }
 
+  if (!prepared.capacity.allow) {
+    outcome.status = 'skipped'
+    outcome.note = prepared.capacity.reason
+    return outcome
+  }
+
   try {
-    await walk(session, traceId, prepared.workflow, prepared.workflow.graph!, outcome, windowFrom, windowTo)
+    await walk(
+      session,
+      traceId,
+      prepared.workflow,
+      prepared.workflow.graph!,
+      outcome,
+      windowFrom,
+      windowTo,
+      prepared.capacity.remaining,
+    )
   } catch (error) {
     outcome.status = 'failed'
     outcome.error = error instanceof Error ? error.message : String(error)
@@ -204,6 +231,8 @@ async function walk(
   outcome: WorkflowRunOutcome,
   windowFrom: Date,
   windowTo: Date,
+  /** What is left of the workflow's daily action cap, or the per-run ceiling for a dry run. */
+  remaining = MAX_ITEMS_PER_RUN,
 ): Promise<void> {
   const byId = new Map(graph.nodes.map((node) => [node.id, node]))
   const order = topological(graph)
@@ -219,7 +248,9 @@ async function walk(
     switch (node.type) {
       case 'trigger': {
         outcome.occurrences =
-          graph.trigger.kind === 'schedule' ? countFirings(graph.trigger.spec, windowFrom, windowTo) : 1
+          graph.trigger.kind === 'schedule'
+            ? countFirings(graph.trigger.spec, windowFrom, windowTo, session.timezone)
+            : 1
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
           detail:
             graph.trigger.kind === 'schedule'
@@ -235,7 +266,8 @@ async function walk(
           const actor = await loadActor(ctx)
           return runAggregate(ctx, actor, node.ref as AggregateQuery, (node.args ?? {}) as never)
         })
-        items = result.rows.slice(0, MAX_ITEMS_PER_RUN)
+        const ceiling = Math.min(MAX_ITEMS_PER_RUN, Math.max(remaining, 0))
+        items = result.rows.slice(0, ceiling)
         outcome.matched = result.rows.length
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
           detail: `${result.rows.length} matched. ${result.basis}`,
@@ -247,7 +279,7 @@ async function walk(
       case 'for_each': {
         await step(session, traceId, outcome, ordinal++, node, items.length ? 'succeeded' : 'skipped', {
           detail: items.length
-            ? `${items.length} to work through${outcome.matched > items.length ? ` (of ${outcome.matched}; capped at ${MAX_ITEMS_PER_RUN})` : ''}`
+            ? `${items.length} to work through${outcome.matched > items.length ? ` — of ${outcome.matched}; the rest are over what this run may do and will be picked up next time` : ''}`
             : 'Nothing matched, so nothing was worked through.',
         })
         break
@@ -482,6 +514,61 @@ async function applyActions(
   }
 }
 
+export interface SweepOutcome {
+  claimed: number
+  ran: number
+  skipped: number
+  awaitingApproval: number
+  failed: number
+  notes: string[]
+}
+
+/**
+ * The scheduled sweep (§10.2). Called by the worker.
+ *
+ * Claiming and rescheduling happen in one transaction, so two workers divide the due
+ * schedules between them rather than both firing the same one. Everything a firing did not
+ * do — because it was late, because the last batch is still waiting for a person, because
+ * the day's cap is spent — is counted and reported rather than dropped, because a workflow
+ * that has quietly stopped working is worse than one that visibly stopped.
+ */
+export async function runDueWorkflows(session: RunSession, now = new Date()): Promise<SweepOutcome> {
+  const traceId = randomUUID()
+  const claimed = await withTenant({ ...session, traceId }, (ctx) => claimDueSchedules(ctx, 'workflow', 20, now))
+
+  const outcome: SweepOutcome = { claimed: claimed.length, ran: 0, skipped: 0, awaitingApproval: 0, failed: 0, notes: [] }
+
+  for (const schedule of claimed) {
+    if (schedule.skipped > 0 && schedule.skippedReason) {
+      outcome.skipped += schedule.skipped
+      outcome.notes.push(`${schedule.targetId}: ${schedule.skippedReason}`)
+    }
+    for (let index = 0; index < schedule.runs; index += 1) {
+      try {
+        const run = await runWorkflow(session, { workflowId: schedule.targetId, trigger: 'schedule' })
+        if (run.status === 'skipped') {
+          outcome.skipped += 1
+          outcome.notes.push(`${schedule.targetId}: ${run.note}`)
+        } else if (run.status === 'awaiting_approval') {
+          outcome.awaitingApproval += 1
+          outcome.ran += 1
+        } else if (run.status === 'failed') {
+          outcome.failed += 1
+          outcome.notes.push(`${schedule.targetId}: ${run.error ?? 'failed'}`)
+        } else {
+          outcome.ran += 1
+        }
+      } catch (error) {
+        // A workflow that has been paused or deleted since the sweep began is not an
+        // error worth retrying; it is reported once and the schedule stays advanced.
+        outcome.failed += 1
+        outcome.notes.push(`${schedule.targetId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+  return outcome
+}
+
 /** Resumes a workflow run whose approval was decided. */
 export async function continueWorkflowAfterApproval(
   session: RunSession,
@@ -616,6 +703,63 @@ async function notifyOwners(
 }
 
 // ---------------------------------------------------------------------------
+// Capacity
+// ---------------------------------------------------------------------------
+
+export interface Capacity {
+  allow: boolean
+  reason: string
+  /** How many actions this run may still take today. */
+  remaining: number
+}
+
+/**
+ * What this workflow may do right now, counted from what it has actually done (§27.6).
+ *
+ * Two limits, both columns a person set. A workflow whose last batch is still waiting for
+ * approval does not queue a second one — that is how somebody arrives on Monday to two
+ * hundred approvals. And the day's action cap is counted from the tool calls that really
+ * happened, not from a counter that resets when a process restarts.
+ */
+export async function checkCapacity(ctx: TenantContext, workflow: WorkflowView): Promise<Capacity> {
+  const [busy] = await ctx.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM workflow_runs
+    WHERE organization_id = ${ctx.organizationId} AND workflow_id = ${workflow.id}
+      AND deleted_at IS NULL AND simulated = false
+      AND status IN ('queued', 'running', 'awaiting_approval')`
+  if ((busy?.count ?? 0) >= workflow.maxConcurrentRuns) {
+    return {
+      allow: false,
+      remaining: 0,
+      reason:
+        `Skipped: ${busy!.count} earlier ${busy!.count === 1 ? 'run is' : 'runs are'} still unfinished — most likely ` +
+        'waiting for somebody to approve them. It will run again once they are decided.',
+    }
+  }
+
+  const [today] = await ctx.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count
+    FROM tool_calls tc
+    JOIN agent_runs r ON r.id = tc.run_id
+    WHERE tc.organization_id = ${ctx.organizationId} AND tc.ok = true
+      AND r.trigger = 'workflow'
+      AND r.ui_context->>'workflowId' = ${workflow.id}
+      AND tc.created_at >= ${startOfDay(new Date(), ctx.timezone)}`
+  const used = today?.count ?? 0
+  const remaining = workflow.dailyActionCap - used
+  if (remaining <= 0) {
+    return {
+      allow: false,
+      remaining: 0,
+      reason:
+        `Skipped: it has already done ${used} things today and its cap is ${workflow.dailyActionCap}. ` +
+        'Raise the cap if that is too low — it is a number somebody set, not a failure.',
+    }
+  }
+  return { allow: true, reason: '', remaining }
+}
+
+// ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
@@ -741,46 +885,14 @@ function topological(graph: WorkflowGraph): string[] {
 }
 
 /**
- * How many times a cron schedule fired between two instants. Counted by walking hours in
- * UTC — a workflow's history is a number a person will check, so it is computed, never
- * estimated.
+ * How many times a schedule fired between two instants, in the timezone it is scheduled in.
+ *
+ * The same function the scheduler uses to find the next firing, so the number a dry run
+ * reports is the number the worker will actually produce — a prediction computed a
+ * different way from the thing it predicts is not a prediction.
  */
-export function countFirings(spec: string, from: Date, to: Date): number {
-  const parts = spec.trim().split(/\s+/)
-  if (parts.length !== 5) return 0
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts as [string, string, string, string, string]
-
-  let count = 0
-  const cursor = new Date(from)
-  cursor.setUTCMinutes(0, 0, 0)
-  while (cursor <= to) {
-    const matchesMinute = matches(minute, 0) || minute === '*'
-    if (
-      matchesMinute &&
-      matches(hour, cursor.getUTCHours()) &&
-      matches(dayOfMonth, cursor.getUTCDate()) &&
-      matches(month, cursor.getUTCMonth() + 1) &&
-      matches(dayOfWeek, cursor.getUTCDay())
-    ) {
-      count += 1
-    }
-    cursor.setUTCHours(cursor.getUTCHours() + 1)
-  }
-  return count
-}
-
-function matches(field: string, value: number): boolean {
-  if (field === '*') return true
-  return field.split(',').some((part) => {
-    const [range, stepText] = part.split('/')
-    const stride = stepText ? Number(stepText) : 1
-    if (range === '*') return value % stride === 0
-    const [startText, endText] = range!.split('-')
-    const start = Number(startText)
-    const end = endText === undefined ? start : Number(endText)
-    if (Number.isNaN(start) || Number.isNaN(end)) return false
-    return value >= start && value <= end && (value - start) % stride === 0
-  })
+export function countFirings(spec: string, from: Date, to: Date, timeZone = 'UTC'): number {
+  return occurrencesBetween(spec, timeZone, from, to).length
 }
 
 function days(from: Date, to: Date): number {

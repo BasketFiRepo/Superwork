@@ -6,7 +6,8 @@
  * things the product itself said were missing once Phase 4 was done:
  *
  *   1. natural-language workflow authoring (§10.3) — describe it, read it back, see the
- *      risks, dry-run it, then and only then activate it;
+ *      risks, dry-run it, then and only then activate it, and let the worker fire it on a
+ *      schedule evaluated in the company's timezone;
  *   2. approve with edits (§11.2) — correct the artifact on the card, have the corrected
  *      plan re-gated, and have the correction recorded as its own signal;
  *   3. admin-authored HTTP tools (§22) — a tenant's own tool, through the same registry,
@@ -22,16 +23,18 @@ import {
   activateWorkflow,
   createApproval,
   decideApproval,
+  describeCron,
   getWorkflow,
   listCustomTools,
   listWorkflowRuns,
   reviewHost,
   saveCompiled,
   saveCustomTool,
+  scheduleFor,
   trustLedger,
 } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
-import { continueWorkflowAfterApproval, runWorkflow, simulateWorkflow } from '@superwork/agent'
+import { checkCapacity, continueWorkflowAfterApproval, runDueWorkflows, runWorkflow, simulateWorkflow } from '@superwork/agent'
 import { demoSession } from '@superwork/agent/evals/harness'
 
 const ok = (label: string, condition: boolean, detail = '') => {
@@ -185,6 +188,50 @@ try {
       drafts.some((draft) => draft.body_text.includes('Hope the rollout went well')))
     ok('Nothing was sent', drafts.every((draft) => draft.status === 'draft'))
   }
+
+  // ---- 4b. The clock -------------------------------------------------------
+  console.log('\nPutting it on the clock…\n')
+  const schedule = await withTenant(session, (ctx) => scheduleFor(ctx, 'workflow', workflowId))
+  ok('Activating put it on a schedule', Boolean(schedule?.enabled),
+    schedule ? describeCron(schedule.cron, schedule.timezone) : 'no schedule')
+  ok('The schedule is in the company’s timezone, not the server’s', schedule?.timezone === session.timezone,
+    schedule?.timezone ?? '—')
+  ok('It knows when it next fires', Boolean(schedule?.nextRunAt && schedule.nextRunAt.getTime() > Date.now()),
+    schedule?.nextRunAt?.toISOString() ?? '—')
+
+  // Everything else in the demo organization comes off the clock so this sweep is about
+  // one workflow, and this one is made due a minute ago.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE schedules SET enabled = false
+      WHERE organization_id = ${ctx.organizationId} AND kind = 'workflow' AND target_id <> ${workflowId}`
+    await ctx.sql`
+      UPDATE schedules SET next_run_at = now() - interval '1 minute'
+      WHERE organization_id = ${ctx.organizationId} AND kind = 'workflow' AND target_id = ${workflowId}`
+  })
+
+  const sweep = await runDueWorkflows(session)
+  console.log(
+    `  Swept: ${sweep.claimed} due · ${sweep.ran} ran · ${sweep.awaitingApproval} waiting for approval · ` +
+      `${sweep.skipped} skipped · ${sweep.failed} failed`,
+  )
+  for (const note of sweep.notes) console.log(`    · ${note}`)
+  console.log()
+  ok('The worker fires what is due', sweep.claimed === 1)
+  ok('And what it did is either a run or a stated reason', sweep.ran + sweep.skipped === 1,
+    sweep.notes.join(' | '))
+
+  const idle = await runDueWorkflows(session)
+  ok('A second sweep a moment later fires nothing', idle.claimed === 0)
+
+  // A schedule whose last batch is still waiting is held back rather than piling up.
+  const held = await withTenant(session, async (ctx) => {
+    const workflow = await getWorkflow(ctx, await loadActor(ctx), workflowId)
+    return checkCapacity(ctx, workflow)
+  })
+  ok('A firing is held back while the last batch waits for a person',
+    sweep.awaitingApproval === 0 || !held.allow,
+    held.reason || 'nothing outstanding')
 
   // ---- 5. Custom tools -----------------------------------------------------
   console.log('\nTeaching Superwork to call one of the company’s own systems…\n')

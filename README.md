@@ -34,7 +34,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 534 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 546 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -86,7 +86,7 @@ index-only scan — evidence about query shape, and explicitly not a 100,000-use
 ```
 apps/
   web                 Next.js app — UI, route handlers, SSE agent stream
-  worker              Outbox dispatcher, watcher scheduler, email recall window
+  worker              Outbox dispatcher, workflow schedules, watchers, email recall window
 packages/
   config              Env schema (fails fast), model routing by task class, plan limits
   db                  Migrations, RLS policies, TenantContext, demo seed
@@ -255,6 +255,20 @@ today's data — multiplying them would be a made-up number, so it does not. A r
 off an `agent_runs` row and uses the same tools, gate, approvals, audit and undo ledger as
 an agent run: there is no second execution path for effects. See ADR 0012.
 
+**And it fires on a schedule.** Activation puts the workflow on the clock; pausing takes it
+off; editing takes it off too, because an edited workflow returns to draft and a draft that
+kept firing would be firing a version nobody dry-ran. Cron is evaluated in the company's
+timezone a whole local day at a time, so "every weekday at 9" means nine where the company
+is, and means it exactly once on the morning the clocks change — not twice, and not never.
+The worker claims due schedules with `FOR UPDATE SKIP LOCKED` and advances them in the same
+transaction, so two workers divide the work rather than both firing the same one. A missed
+firing is a fact, not a gap: the catch-up policy decides whether a lost night fires once,
+skips, or catches up to five, and whatever it drops is counted on the row and shown on the
+workflow's page. Before a scheduled run starts, its unfinished runs are counted against
+`max_concurrent_runs` and today's real tool calls against `daily_action_cap` — so approvals
+cannot pile up while nobody decides them, and a run held back appears in the run list with
+its reason. See ADR 0014.
+
 **Approve with edits** (`/approvals`) — the fields a tool marked editable can be corrected
 in place on the card. The edited plan is then re-gated on the server: arguments re-validated,
 permissions re-checked, previews re-rendered, and if the edit made the plan riskier than the
@@ -285,8 +299,9 @@ returns a deterministic locally-generated response marked **Simulated**, and eve
 around it — review, permissions, previews, approvals, audit — is real. Every other provider
 ships as a simulated implementation too, and connecting one says so on the row. The workflow
 compiler understands the sentences it understands and refuses the rest; new shapes need a
-named query in the safe query layer, not a cleverer prompt. Workflow schedules are recorded
-but not yet fired by the worker — a workflow runs when somebody runs it. The scale budgets
+named query in the safe query layer, not a cleverer prompt. The cron grammar is the five
+standard fields — nothing parses `@daily` or `L`, and a spec that does not parse is refused
+when the schedule is written rather than silently never firing. The scale budgets
 are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
