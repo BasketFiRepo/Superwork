@@ -1,8 +1,8 @@
 import type { IndexStatus, Sensitivity, TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
-import { NotFoundError, PermissionError } from '../errors.js'
+import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
-import { ingestDocument, type IngestResult } from '../retrieval/ingest.js'
+import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
 
 export interface DocumentView {
   id: string
@@ -187,4 +187,87 @@ export async function knowledgeHealth(ctx: TenantContext): Promise<{
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND citation_count > 0
     ORDER BY citation_count DESC LIMIT 10`
   return { byStatus, totalChunks: chunks?.count ?? 0, topUnanswered, mostCited }
+}
+
+/**
+ * Deleting a document, reachably (§25.13).
+ *
+ * `purgeDocument` — which removes the chunks, the versions, the citations, the links, and
+ * marks the memories derived from it forgotten — has existed since Phase 1 and was called
+ * by nothing. The anti-pattern it exists to prevent ("deleting a document must delete
+ * chunks, embeddings and derived memories, otherwise you have a compliance hole and a
+ * hallucination source") was therefore satisfied only in principle: there was no way to
+ * delete a document at all.
+ *
+ * This is that way. Permission first, the purge second, the audit last — and the audit
+ * carries the counts, because "it was deleted" and "everything derived from it went with
+ * it" are different claims and only the second one matters here.
+ */
+export async function deleteDocument(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { documentId: string; reason: string },
+): Promise<{ title: string; chunks: number; citations: number; memories: number }> {
+  const document = await getDocument(ctx, actor, input.documentId)
+  const decision = can(actor, 'document:delete', {
+    type: 'document',
+    id: document.id,
+    organizationId: ctx.organizationId,
+    ownerId: document.ownerId,
+    sensitivity: document.sensitivity,
+    riskTier: 'high',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+  if (input.reason.trim().length < 4) {
+    throw new ValidationError('Say why it is being deleted. It goes in the audit trail beside what was removed.')
+  }
+
+  // Counted before, because after the purge there is nothing left to count — and the
+  // numbers are the evidence that the derived data went too.
+  const [counts] = await ctx.sql<{ chunks: number; citations: number; memories: number }[]>`
+    SELECT
+      (SELECT count(*)::int FROM document_chunks
+        WHERE organization_id = ${ctx.organizationId} AND document_id = ${input.documentId}) AS chunks,
+      (SELECT count(*)::int FROM citations
+        WHERE organization_id = ${ctx.organizationId} AND document_id = ${input.documentId}) AS citations,
+      (SELECT count(*)::int FROM memory_facts
+        WHERE organization_id = ${ctx.organizationId}
+          AND source_citation->>'documentId' = ${input.documentId}
+          AND state <> 'forgotten') AS memories`
+
+  await purgeDocument(ctx, input.documentId)
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.deleted',
+    entityType: 'document',
+    entityId: input.documentId,
+    before: { title: document.title, sensitivity: document.sensitivity },
+    after: {
+      reason: input.reason,
+      chunksRemoved: counts?.chunks ?? 0,
+      citationsRemoved: counts?.citations ?? 0,
+      memoriesForgotten: counts?.memories ?? 0,
+    },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'deleted',
+    entityType: 'document',
+    entityId: input.documentId,
+    entityLabel: document.title,
+    summary:
+      `${actor.displayName} deleted "${document.title}" — ${counts?.chunks ?? 0} indexed passages and ` +
+      `${counts?.memories ?? 0} derived memories went with it. ${input.reason}`,
+  })
+
+  return {
+    title: document.title,
+    chunks: counts?.chunks ?? 0,
+    citations: counts?.citations ?? 0,
+    memories: counts?.memories ?? 0,
+  }
 }

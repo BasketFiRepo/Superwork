@@ -259,6 +259,18 @@ export interface ComplianceReview {
  * report changes when the configuration does — which is the only kind of compliance
  * report worth having.
  */
+/**
+ * The profile in force for this organization: the strictest of every legal entity in it,
+ * so a single German subsidiary sets the floor for the whole tenant (§29.6).
+ */
+export async function jurisdiction(ctx: TenantContext): Promise<{ profile: JurisdictionProfile; rules: ProfileRules }> {
+  const rows = await ctx.sql<{ jurisdiction_profile: JurisdictionProfile }[]>`
+    SELECT jurisdiction_profile FROM legal_entities
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+  const profile = strictestProfile(rows.map((row) => ({ jurisdictionProfile: row.jurisdiction_profile })))
+  return { profile, rules: PROFILES[profile] }
+}
+
 export async function worksCouncilReview(ctx: TenantContext, actor: Actor): Promise<ComplianceReview> {
   guard(ctx, actor, 'settings:read')
   const sql = ctx.sql

@@ -116,7 +116,7 @@ export default async function KnowledgePage() {
             </thead>
             <tbody>
               {documents.map((doc) => (
-                <tr key={doc.id}>
+                <tr key={doc.id} data-testid="document-row">
                   <td>
                     <Link href={`/knowledge/${doc.id}`}>{doc.title}</Link>
                   </td>

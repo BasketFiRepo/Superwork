@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import { getDocumentBody, NotFoundError, PermissionError } from '@superwork/core'
+import { DeleteDocument } from '@/components/DeleteDocument'
 
 export const dynamic = 'force-dynamic'
 
@@ -32,6 +33,13 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             <div className="banner banner-attention">{document.indexError}</div>
           ) : null}
         </header>
+
+        <DeleteDocument
+          documentId={document.id}
+          title={document.title}
+          chunkCount={document.chunkCount}
+          citationCount={document.citationCount}
+        />
 
         <article className="panel">
           <div className="panel-body">

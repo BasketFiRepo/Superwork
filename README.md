@@ -34,7 +34,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 581 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 594 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -252,7 +252,8 @@ already isolates something. This build runs one shard and says so.
 ## Beyond Phase 4 — the debts the build had listed
 
 The specification stops at Phase 4. What follows is the list this README used to call "what
-is deliberately not true yet", built. `pnpm loop:phase5` drives all three end to end.
+is deliberately not true yet", built, together with the controls the interface had claimed
+and the product did not have. `pnpm loop:phase5` drives all of it end to end.
 
 **Natural-language workflow authoring** (`/workflows`) — describe an automation in a
 sentence and the compiler emits a schema-validated DAG, a plain-English readback of what it
@@ -369,6 +370,58 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Retention and erasure
+
+Migration 0009 made `audit_logs` append-only and, in its own header, named the exception:
+history may leave only "by the retention and erasure jobs". Those jobs were never written.
+`purgeDocument` — which removes a document with its chunks, embeddings, citations and derived
+memories in one transaction — had existed since Phase 1 and was called by nothing, so there
+was no way to delete a document at all. And nothing anywhere said how long anything was kept.
+
+**Seven classes, each with a window.** Agent runs, tool calls, meeting transcripts,
+notifications and nudges, resolved insights, the API request log, and the audit trail. A class
+nobody has configured falls back to the default for the organization's jurisdiction profile,
+and the screen says which — *"The default for works council. Nobody has changed it."* Every
+class also has a floor in code that no configuration can go under; the audit trail's floor is
+two years and its default is the longest of the seven, because the trail is what makes every
+other claim here checkable.
+
+Changing a window needs a reason of at least eight characters — a `CHECK` constraint, not form
+validation — and a re-typed password, because shortening a window is destruction on a timer,
+decided once and executed silently thereafter. The worker sweeps every 24 hours, in batches,
+and writes back what it removed per class; the screen shows it, and "not yet run" is a
+legitimate state it will admit to. A run still waiting for somebody's approval is never
+purged: it is not old, it is outstanding.
+
+The audit purge is the one statement in the product that runs on the owner connection. The
+application role has `DELETE` REVOKEd and the 0009 trigger would refuse it anyway, so the
+statement carries its own `organization_id` predicate — there is no RLS behind it to catch a
+mistake. That is the door 0009 promised, cut once, in the open.
+
+**Erasing a person says what it will do, in full, first.** Eleven tables, each marked
+*deleted*, *anonymised* or *kept*, each with its basis:
+
+- **Deleted** — what is only theirs and only about them: nudges, notifications, briefings,
+  sessions, notification preferences.
+- **Anonymised** — other people's work with their name on it: tasks, commitments, transcript
+  segments, agent runs. Deleting a task because its owner left destroys work the company still
+  has to do.
+- **Kept, with the basis stated** — the audit trail and the disclosure log. The disclosure log
+  is the record of what was said about a person to somebody else; erasing it to protect them
+  would destroy their only proof that nothing was said behind their back.
+
+Nothing is anonymised to a blank: rows point at one tombstone user, and the erasure record
+itself stores *"A former member of this organization"* under a constraint that rejects
+anything containing an `@`. When it completes it drops the subject's id, so the record of the
+erasure is not itself a record of the person. Blockers — sole owner, or an active workflow
+naming them as accountable — stop it before the button appears. Nobody can erase themselves.
+
+**Deleting a document counts what went with it.** The warning states the passages and
+citations before, the API returns what it actually removed after, and the audit row carries
+both. A cascade nobody can see is indistinguishable from one that did not happen.
+
+Both live on **Settings → Retention**, behind `owner`. See ADR 0016.
+
 ## What is deliberately not true yet
 
 Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
@@ -379,7 +432,12 @@ compiler understands the sentences it understands and refuses the rest; new shap
 named query in the safe query layer, not a cleverer prompt. The cron grammar is the five
 standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
 that does not parse is refused when the schedule is written rather than silently never
-firing. Schedules are minute-granular; sub-minute schedules are not supported. The scale
+firing. Schedules are minute-granular; sub-minute schedules are not supported. Retention
+windows are per class, not per record: a single meeting cannot be pinned and a legal hold on
+one matter is not expressible. Erasure is an admin action only — there is no self-service
+route, because verifying that a request came from the person it names is a problem this
+product does not solve, and a self-service endpoint with a weak identity check is worse than
+none. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -409,9 +467,16 @@ disabled with the reason named. Nothing in the interface pretends to work.
   nothing but the click — stopping the agents in a hurry is the point, and friction belongs
   on the other side. *Releasing* it asks who is there.
 - **Nothing irreversible happens on a session alone.** Publishing or widening an agent,
-  rolling one back, activating a custom tool, reviewing a host it may call, and releasing the
-  kill switch all require the person to re-enter their password within the last five minutes,
-  and the proof is stamped on the audit row.
+  rolling one back, activating a custom tool, reviewing a host it may call, releasing the
+  kill switch, shortening a retention window and erasing a person all require the person to
+  re-enter their password within the last five minutes, and the proof is stamped on the audit
+  row.
+- **Deleting a document deletes what was derived from it.** The chunks, embeddings, citations
+  and memories go in the same transaction, and the count of each is reported to the caller and
+  written to the audit trail (§25.13).
+- **Everything kept has a stated window and a purge that runs.** Seven classes, each with a
+  floor no configuration can go under, swept daily by the worker, with what it removed written
+  back where anyone can see it.
 
 ## Configuration
 
