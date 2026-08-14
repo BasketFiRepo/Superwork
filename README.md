@@ -8,9 +8,11 @@ context → an action was proposed → a human approved it → it was executed �
 verified → everyone can see what occurred and why.
 
 This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
-(the nervous system: inbox, meetings, CRM and the daily briefing) and Phase 3 (scale,
-trust and depth) of the build specification, end to end, **with zero external
-credentials**.
+(the nervous system: inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust
+and depth) and Phase 4 (enterprise scale) of the build specification, end to end, **with
+zero external credentials** — and then the three things the build itself had listed as not
+yet true: natural-language workflow authoring, approve-with-edits, and admin-authored HTTP
+tools.
 
 ---
 
@@ -32,13 +34,16 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 482 assertions: units, isolation, permissions, briefing, injection, ledger, studio
+pnpm test              # 558 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
-pnpm check:browser     # walks Inbox, Meetings, CRM and the Briefing in a real browser
+pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool
+pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
+pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
 
 `pnpm check:browser` expects the app already running (`pnpm dev`, or `pnpm build && pnpm
@@ -68,12 +73,20 @@ department; an agent can be created, permissioned, simulated and published throu
 control without an engineer; and every employee can open one screen showing what is held
 about them and what was reported to whom.
 
+Phase 4 adds three again. `pnpm loop:phase4` proves two of them — a bulk job of 120 runs
+does not delay a department that queues four, and the works-council review answers ten
+questions with evidence from this tenant's own rows. The third is measured rather than
+asserted: `pnpm loadtest` builds a synthetic tenant, times the operations §26.9 states
+budgets for, and prints the scale it actually reached beside the scale the target assumes.
+At 5,000 users and 120,000 tasks every budget is met with the scoped list view served by an
+index-only scan — evidence about query shape, and explicitly not a 100,000-user result.
+
 ## Layout
 
 ```
 apps/
   web                 Next.js app — UI, route handlers, SSE agent stream
-  worker              Outbox dispatcher, watcher scheduler, email recall window
+  worker              Outbox dispatcher, workflow schedules, watchers, email recall window
 packages/
   config              Env schema (fails fast), model routing by task class, plan limits
   db                  Migrations, RLS policies, TenantContext, demo seed
@@ -192,15 +205,118 @@ rather than pretending data moved.
 **Usage and cost** (`/settings/billing`) — spend by unit, by task class and by department,
 against the plan's caps, plus API call volume.
 
+## Phase 4 — enterprise scale
+
+**Fair-share scheduling** (`/settings/queue`) — runs are claimed through deficit weighted
+round-robin held in the database, not started where they were created. A department that
+queues two hundred jobs at nine o'clock gets its share of the workers and no more;
+interactive work is scheduled ahead of bulk at equal weight; a department at its concurrency
+cap is skipped rather than blocking. Weights, caps and the wait each department is actually
+getting are on one screen. See ADR 0010.
+
+**Jurisdiction profiles and the works-council review** (`/settings/compliance`) — a legal
+entity starts on the strictest profile; loosening it needs a justification and a named
+approver and is recorded. The review answers ten questions with live queries against this
+tenant — most of them backed by a schema property rather than a runtime check, so the answer
+cannot be massaged. It fails until a consultation is recorded, which is what makes the
+passing version mean anything. See ADR 0011.
+
+**The nudge ladder with a shared budget** — the ladder opens at the rung that fits now
+rather than the one the calendar suggests, one action closes it, finishing the work cancels
+it everywhere, and the daily budget belongs to the *person* and is shared across every
+agent. Where the profile forbids manager escalation, that rung does not exist. Delivery goes
+through chat where the capability is connected and degrades to in-app when it is not.
+
+**Relation tuples** — sharing one project with a colleague is a tuple, not a role change.
+Tuples are loaded once with the actor so a permission check stays synchronous and under the
+10 ms budget, and you can only share what you could already do yourself.
+
+**Placement** — a tenant's shard and tier are a row, and the resolver refuses to record a
+move to a shard that has no connection configured rather than pretending a `dedicated` tier
+already isolates something. This build runs one shard and says so.
+
+## Beyond Phase 4 — the debts the build had listed
+
+The specification stops at Phase 4. What follows is the list this README used to call "what
+is deliberately not true yet", built. `pnpm loop:phase5` drives all three end to end.
+
+**Natural-language workflow authoring** (`/workflows`) — describe an automation in a
+sentence and the compiler emits a schema-validated DAG, a plain-English readback of what it
+will actually do, and the risks it found. It inserts an approval step whenever anything
+could leave the company, whatever the sentence asked for: "send them a follow-up" compiles
+to a draft plus an approval, and says so on the card. What it cannot build it says it cannot
+build rather than guessing — a compiler that guesses produces an automation nobody can
+predict. Activation is refused until a dry run of *that version* has passed; editing the
+workflow closes the gate again. The dry run reads exactly what a live run would, stops
+before every effect, and reports a counted number: "This would have fired 22 times in the
+last 30 days. Run against today's data it matches 5 items and would have done: 5 × draft a
+reply. Nothing was created, drafted or sent." The firings are history and the effects are
+today's data — multiplying them would be a made-up number, so it does not. A real run hangs
+off an `agent_runs` row and uses the same tools, gate, approvals, audit and undo ledger as
+an agent run: there is no second execution path for effects. See ADR 0012.
+
+**And it fires on a schedule.** Activation puts the workflow on the clock; pausing takes it
+off; editing takes it off too, because an edited workflow returns to draft and a draft that
+kept firing would be firing a version nobody dry-ran. Cron is evaluated in the company's
+timezone a whole local day at a time, so "every weekday at 9" means nine where the company
+is, and means it exactly once on the morning the clocks change — not twice, and not never.
+The worker claims due schedules with `FOR UPDATE SKIP LOCKED` and advances them in the same
+transaction, so two workers divide the work rather than both firing the same one. A missed
+firing is a fact, not a gap: the catch-up policy decides whether a lost night fires once,
+skips, or catches up to five, and whatever it drops is counted on the row and shown on the
+workflow's page. Before a scheduled run starts, its unfinished runs are counted against
+`max_concurrent_runs` and today's real tool calls against `daily_action_cap` — so approvals
+cannot pile up while nobody decides them, and a run held back appears in the run list with
+its reason. See ADR 0014.
+
+**And you can say when, in the words people use.** The schedule editor on a workflow's page
+takes the traditional aliases — `@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`,
+`@yearly`, `@annually` — or five cron fields. An alias is expanded on the way in, so one
+grammar reaches the database however it was typed, and the same English description is shown
+either way. Nothing is committed to a clock without showing the next three firings as real
+dates. What cannot be honoured is refused by name with what to do instead: `@reboot` is
+"whenever the process happens to start", which is not a promise about a time; `@fortnightly`
+is not one of the aliases; `L`, `W` and `#` are not supported. A cron expression that would
+never fire is never stored as a schedule.
+
+**Approve with edits** (`/approvals`) — the fields a tool marked editable can be corrected
+in place on the card. The edited plan is then re-gated on the server: arguments re-validated,
+permissions re-checked, previews re-rendered, and if the edit made the plan riskier than the
+one on the card it goes back for a fresh decision rather than running on the old one. An
+edit may only touch an argument the card actually offered — the recipient of an email is
+deliberately not one, for the same reason retrieved content can never introduce one. The
+correction is recorded as `approved_with_edits` and counted separately in the trust ledger,
+because "approved after a tweak" tells you something "approved" does not. See ADR 0013.
+
+**Admin-authored HTTP tools** (`/settings/tools`) — an organization can teach Superwork to
+call one of its own systems. The tool is resolved through the same registry, checked by the
+same policy engine, previewed and approved through the same approval flow, and written to
+the same `tool_calls` audit trail. No exceptions: a custom tool must not be a permission
+bypass. A tool cannot be activated until a named person has reviewed its host with a reason
+on a recorded date, and revoking a host disables every tool that used it in the same breath.
+https only; private and link-local addresses are refused; a literal credential in a header is
+refused in favour of a `${SECRET}` reference; an argument the definition never declared never
+reaches the request; and a tool is never advertised as reversible, because Superwork cannot
+undo a change in somebody else's system. Custom tools are visible to the orchestrator only —
+a sub-agent's registry is a structural guarantee, and an admin-authored tool must not be a
+way to hand the Researcher a write. They are built per tenant and never registered globally,
+so one organization's tool cannot appear in another's registry. See ADR 0013.
+
 ## What is deliberately not true yet
 
-Controls for unbuilt features render disabled with the phase named — never as live-looking
-no-ops. The workflow engine's tables, versioning and simulation gate exist but
-natural-language authoring does not; approve-with-edits is stubbed with an explanation;
-admin-authored HTTP tools need a reviewed host allowlist and a sandbox, so the control says
-Phase 4 and there is no table pretending otherwise. Every provider ships as a simulated
-implementation — connecting one says so on the row. Nothing in the interface pretends to
-work.
+Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
+returns a deterministic locally-generated response marked **Simulated**, and everything
+around it — review, permissions, previews, approvals, audit — is real. Every other provider
+ships as a simulated implementation too, and connecting one says so on the row. The workflow
+compiler understands the sentences it understands and refuses the rest; new shapes need a
+named query in the safe query layer, not a cleverer prompt. The cron grammar is the five
+standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
+that does not parse is refused when the schedule is written rather than silently never
+firing. Schedules are minute-granular; sub-minute schedules are not supported. The scale
+budgets
+are measured at the scale this machine can build, and the harness prints that scale next to
+the target rather than rounding the difference away. Controls for anything unbuilt render
+disabled with the reason named. Nothing in the interface pretends to work.
 
 ## Safety properties this implementation actually holds
 

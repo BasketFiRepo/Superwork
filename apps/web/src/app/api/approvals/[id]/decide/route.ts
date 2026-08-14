@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
-import { decideApproval, getApproval } from '@superwork/core'
-import { continueAfterApproval } from '@superwork/agent'
+import { decideApproval, getApproval, workflowRunForAgentRun } from '@superwork/core'
+import { continueAfterApproval, continueWorkflowAfterApproval } from '@superwork/agent'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
@@ -21,23 +21,32 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   try {
-    const approval = await withActor(session, async (ctx, actor) => {
+    const { approval, workflowRunId } = await withActor(session, async (ctx, actor) => {
       await decideApproval(ctx, actor, {
         approvalId: id,
         decision: parsed.data.decision,
         ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
         ...(parsed.data.edits ? { edits: parsed.data.edits } : {}),
       })
-      return getApproval(ctx, actor, id)
+      const decided = await getApproval(ctx, actor, id)
+      return {
+        approval: decided,
+        workflowRunId: decided.agentRunId ? await workflowRunForAgentRun(ctx, decided.agentRunId) : null,
+      }
     })
 
-    // Approving a plan resumes its run from the checkpoint it paused at (§5.3).
+    // Approving resumes whatever paused for it, from the checkpoint it paused at (§5.3).
     if (approval.agentRunId && parsed.data.decision !== 'reject') {
-      await continueAfterApproval(
-        { organizationId: session.organizationId, userId: session.userId, timezone: session.timezone },
-        approval.agentRunId,
-        parsed.data.edits,
-      )
+      const runSession = {
+        organizationId: session.organizationId,
+        userId: session.userId,
+        timezone: session.timezone,
+      }
+      if (workflowRunId) {
+        await continueWorkflowAfterApproval(runSession, workflowRunId)
+      } else {
+        await continueAfterApproval(runSession, approval.agentRunId, parsed.data.edits)
+      }
     }
 
     return NextResponse.json({ status: approval.status, runId: approval.agentRunId })

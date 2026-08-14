@@ -1,13 +1,24 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 /**
  * The approval card (§11.2). Without a click it shows: what will happen (the rendered
  * preview diff), why it was proposed (evidence), what it affects, who proposed it, the
  * risk tier and the expiry.
+ *
+ * Fields the tool marked editable can be corrected in place. Correcting is not the same
+ * as approving: the edited plan is re-gated on the server before anything runs, and the
+ * edit is recorded in the trust ledger, because "approved after a tweak" is a different
+ * signal from "approved as proposed".
  */
+
+export interface EditableField {
+  arg: string
+  multiline?: boolean
+  help?: string
+}
 
 export interface ApprovalCardView {
   id: string
@@ -24,27 +35,65 @@ export interface ApprovalCardView {
     operation: string
     entityType: string
     entityLabel: string
-    changes: { field: string; from?: string | null; to: string | null }[]
+    changes: { field: string; from?: string | null; to: string | null; editable?: EditableField }[]
     riskTier: string
     reversible: boolean
+    stepId?: string
   }[]
   evidence: { claim: string; sourceType: string; documentId?: string | null; anchor?: string | null }[]
   decisionReason: string | null
 }
 
+type Draft = Record<string, Record<string, string>>
+
 export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
   const [rejecting, setRejecting] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   const pending = approval.status === 'pending'
   const breached = approval.hoursWaiting > approval.slaHours
 
-  async function decide(decision: 'approve' | 'reject') {
+  const original = useMemo<Draft>(() => {
+    const out: Draft = {}
+    for (const line of approval.preview) {
+      if (!line.stepId) continue
+      for (const change of line.changes) {
+        if (!change.editable) continue
+        ;(out[line.stepId] ??= {})[change.editable.arg] = change.to ?? ''
+      }
+    }
+    return out
+  }, [approval.preview])
+
+  const [draft, setDraft] = useState<Draft>(original)
+  const editable = Object.keys(original).length > 0
+
+  const changed = useMemo(() => {
+    const out: Draft = {}
+    for (const [stepId, args] of Object.entries(draft)) {
+      for (const [arg, value] of Object.entries(args)) {
+        if (value !== original[stepId]?.[arg]) (out[stepId] ??= {})[arg] = value
+      }
+    }
+    return out
+  }, [draft, original])
+  const hasEdits = Object.keys(changed).length > 0
+
+  function set(stepId: string, arg: string, value: string) {
+    setDraft((current) => ({ ...current, [stepId]: { ...current[stepId], [arg]: value } }))
+  }
+
+  async function decide(decision: 'approve' | 'approve_with_edits' | 'reject') {
     if (decision === 'reject' && !reason.trim()) {
       setError('A rejection needs a reason — it is the signal that improves future proposals.')
+      return
+    }
+    if (decision === 'approve_with_edits' && !hasEdits) {
+      setError('Nothing has been changed yet. Approve it as proposed if it is right as it stands.')
       return
     }
     setBusy(true)
@@ -52,7 +101,11 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
     const response = await fetch(`/api/approvals/${approval.id}/decide`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ decision, reason: decision === 'reject' ? reason : undefined }),
+      body: JSON.stringify({
+        decision,
+        reason: decision === 'reject' ? reason : reason.trim() || undefined,
+        edits: decision === 'approve_with_edits' ? { steps: changed } : undefined,
+      }),
     })
     setBusy(false)
     if (!response.ok) {
@@ -61,6 +114,7 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
       return
     }
     setRejecting(false)
+    setEditing(false)
     router.refresh()
   }
 
@@ -98,13 +152,46 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
                   <span className="small secondary">{line.entityLabel}</span>
                   {line.reversible ? null : <span className="chip chip-critical">cannot be undone</span>}
                 </div>
-                {line.changes.map((change, changeIndex) => (
-                  <div className="diff-line" key={changeIndex}>
-                    <span className="diff-field">{change.field}</span>
-                    {change.from ? <span className="diff-from">{change.from}</span> : null}
-                    <span className="diff-to">{change.to}</span>
-                  </div>
-                ))}
+                {line.changes.map((change, changeIndex) => {
+                  const field = change.editable
+                  const stepId = line.stepId
+                  if (editing && pending && field && stepId) {
+                    const value = draft[stepId]?.[field.arg] ?? ''
+                    const id = `${approval.id}-${stepId}-${field.arg}`
+                    return (
+                      <label className="stack stack-2" data-testid="editable-field" key={changeIndex} htmlFor={id}>
+                        <span className="micro">
+                          {change.field}
+                          {value !== original[stepId]?.[field.arg] ? ' · edited' : ''}
+                        </span>
+                        {field.multiline ? (
+                          <textarea
+                            id={id}
+                            className="textarea"
+                            rows={6}
+                            value={value}
+                            onChange={(event) => set(stepId, field.arg, event.target.value)}
+                          />
+                        ) : (
+                          <input
+                            id={id}
+                            className="input"
+                            value={value}
+                            onChange={(event) => set(stepId, field.arg, event.target.value)}
+                          />
+                        )}
+                        {field.help ? <span className="small muted">{field.help}</span> : null}
+                      </label>
+                    )
+                  }
+                  return (
+                    <div className="diff-line" key={changeIndex}>
+                      <span className="diff-field">{change.field}</span>
+                      {change.from ? <span className="diff-from">{change.from}</span> : null}
+                      <span className="diff-to">{change.to}</span>
+                    </div>
+                  )
+                })}
               </div>
             ))}
           </div>
@@ -161,6 +248,38 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
                 </button>
               </div>
             </div>
+          ) : editing ? (
+            <div className="stack stack-4">
+              <label className="stack stack-2">
+                <span className="micro">What did you change, and why? (optional, but it teaches)</span>
+                <input
+                  className="input"
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  placeholder="Softer close — this account prefers it."
+                />
+              </label>
+              <p className="small muted" style={{ margin: 0 }}>
+                Your edits are re-checked against the same permission rules before anything runs. If an edit
+                makes the plan riskier than what you were shown, it comes back for a fresh decision.
+              </p>
+              <div className="row wrap">
+                <button className="btn btn-primary" onClick={() => decide('approve_with_edits')} disabled={busy || !hasEdits}>
+                  {busy ? 'Working…' : 'Approve with my edits'}
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    setDraft(original)
+                    setEditing(false)
+                    setError(null)
+                  }}
+                  disabled={busy}
+                >
+                  Discard edits
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="row wrap">
               <button className="btn btn-primary" onClick={() => decide('approve')} disabled={busy}>
@@ -175,12 +294,17 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
                 </a>
               ) : null}
               <button
-                className="btn btn-ghost"
-                disabled
-                title="Editing a draft inline lands in Phase 2. Reject with a reason for now — the reason is fed back as a learning signal."
+                className="btn"
+                data-testid="approve-with-edits"
+                onClick={() => setEditing(true)}
+                disabled={busy || !editable}
+                title={
+                  editable
+                    ? 'Correct the wording or the details, then approve what you actually want.'
+                    : 'Nothing on this card is editable. Reject with a reason instead.'
+                }
               >
                 Approve with edits
-                <span className="chip">Coming soon</span>
               </button>
             </div>
           )

@@ -80,8 +80,11 @@ export function Sidebar({
       items: [
         { href: '/settings/agents', label: 'Agents' },
         { href: '/settings/integrations', label: 'Integrations' },
+        { href: '/settings/tools', label: 'Custom tools' },
         { href: '/settings/api', label: 'API and MCP' },
         { href: '/settings/identity', label: 'Identity' },
+        { href: '/settings/compliance', label: 'Jurisdiction' },
+        { href: '/settings/queue', label: 'Agent queue' },
         { href: '/settings/billing', label: 'Usage and cost' },
         { href: '/settings/ai-governance', label: 'AI governance' },
       ],

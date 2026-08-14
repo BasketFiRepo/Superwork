@@ -29,6 +29,8 @@ const EnvSchema = z
     CALENDAR_MODE: RuntimeMode.default('mock'),
     STORAGE_MODE: RuntimeMode.default('mock'),
     BILLING_MODE: RuntimeMode.default('mock'),
+    /** Outbound HTTP for admin-authored tools (§22). Mock by default: no credentials, no egress. */
+    HTTP_TOOLS_MODE: RuntimeMode.default('mock'),
 
     AUTOPILOT_ENABLED: boolish.default(false),
     AGENT_KILL_SWITCH: boolish.default(false),
@@ -38,6 +40,12 @@ const EnvSchema = z
 
     /** Seconds an outbound email waits in the recall window before dispatch (§5.7). */
     EMAIL_SEND_DELAY_SECONDS: z.coerce.number().int().min(0).default(60),
+
+    /**
+     * How many agent runs one process drives at once. The fair-share scheduler decides
+     * *which* department goes next; this decides how many go at all (§26.6).
+     */
+    AGENT_MAX_CONCURRENT: z.coerce.number().int().min(1).max(256).default(8),
 
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     OTEL_ENABLED: boolish.default(false),

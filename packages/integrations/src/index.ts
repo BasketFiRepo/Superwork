@@ -8,6 +8,7 @@ import type {
   RuntimeMode,
 } from './contracts.js'
 import { MockEmailProvider } from './mock/email.js'
+import { FetchHttpTransport, MockHttpTransport, type HttpTransport } from './http.js'
 import {
   MockChatProvider,
   MockCrmProvider,
@@ -16,6 +17,7 @@ import {
 } from './mock/workplace.js'
 
 export * from './contracts.js'
+export * from './http.js'
 export { MockEmailProvider } from './mock/email.js'
 export {
   MockChatProvider,
@@ -33,7 +35,7 @@ export {
  * Slack is connected.
  */
 
-export type Capability = 'email' | 'calendar' | 'storage' | 'chat' | 'finance' | 'crm' | 'identity'
+export type Capability = 'email' | 'calendar' | 'storage' | 'chat' | 'finance' | 'crm' | 'identity' | 'http'
 
 const overrides: Partial<Record<Capability, unknown>> = {}
 
@@ -59,6 +61,14 @@ export function crmProvider(): CrmProvider {
 
 export function identityProvider(): IdentityProvider {
   return resolve('identity', () => new MockIdentityProvider())
+}
+
+/**
+ * The transport admin-authored tools call through (§22). Mock unless a deployment has
+ * deliberately turned outbound HTTP on, so the product runs credential-free by default.
+ */
+export function httpTransport(): HttpTransport {
+  return resolve('http', () => (env().HTTP_TOOLS_MODE === 'live' ? new FetchHttpTransport() : new MockHttpTransport()))
 }
 
 /** Tests and the sandbox swap implementations; nothing else does. */

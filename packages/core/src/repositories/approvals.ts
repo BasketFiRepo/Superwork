@@ -9,15 +9,45 @@ import { writeActivity, writeAudit } from '../audit.js'
  * proposed it, the risk tier, and the expiry. All of that is stored on the row.
  */
 
+/**
+ * A change an approver may correct in place (§11.2). `arg` names the tool argument the
+ * line describes; only arguments named here can be edited, so an edit can never reach a
+ * field the tool did not offer — a recipient, an identifier, a permission.
+ */
+export interface EditableField {
+  arg: string
+  multiline?: boolean
+  help?: string
+}
+
 export interface PreviewLine {
   /** e.g. "Create task" / "Send email" */
   operation: string
   entityType: string
   entityLabel: string
   /** Field-level description of the change, rendered as a diff. */
-  changes: { field: string; from?: string | null; to: string | null }[]
+  changes: { field: string; from?: string | null; to: string | null; editable?: EditableField }[]
   riskTier: RiskTier
   reversible: boolean
+  /** Set by the runtime when the line is attached to an approval: the plan step it came from. */
+  stepId?: string
+}
+
+/**
+ * The allow-list an edit is checked against: which arguments of which step a person may
+ * change. Derived from the stored preview, so it cannot drift from what was shown.
+ */
+export function editableArgs(preview: PreviewLine[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const line of preview) {
+    if (!line.stepId) continue
+    for (const change of line.changes) {
+      if (!change.editable) continue
+      const args = (out[line.stepId] ??= [])
+      if (!args.includes(change.editable.arg)) args.push(change.editable.arg)
+    }
+  }
+  return out
 }
 
 export interface EvidenceItem {
@@ -169,6 +199,9 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
   if (input.decision === 'reject' && !input.reason?.trim()) {
     throw new ValidationError('A rejection needs a reason — it is the signal that improves future proposals.')
   }
+  if (input.decision === 'approve_with_edits') {
+    assertEditsAreOffered(approval.preview, input.edits)
+  }
 
   const status: ApprovalStatus =
     input.decision === 'approve' ? 'approved' : input.decision === 'approve_with_edits' ? 'approved_with_edits' : 'rejected'
@@ -210,6 +243,35 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
   )
 
   return getApproval(ctx, actor, input.approvalId)
+}
+
+/**
+ * Edits are checked against what the card actually offered. Anything else — a step that
+ * was not previewed, an argument that was not editable — is refused rather than merged,
+ * because an approval that can rewrite an arbitrary argument is a permission bypass with
+ * a friendly button on it.
+ */
+export function assertEditsAreOffered(preview: PreviewLine[], edits: Record<string, unknown> | undefined): void {
+  const steps = (edits?.['steps'] ?? {}) as Record<string, Record<string, unknown>>
+  const entries = Object.entries(steps)
+  if (entries.length === 0) {
+    throw new ValidationError('Approving with edits needs an edit. Approve it as proposed if nothing should change.')
+  }
+  const allowed = editableArgs(preview)
+  for (const [stepId, args] of entries) {
+    const offered = allowed[stepId]
+    if (!offered) {
+      throw new ValidationError(`This approval has nothing editable in step "${stepId}".`)
+    }
+    for (const arg of Object.keys(args)) {
+      if (!offered.includes(arg)) {
+        throw new ValidationError(
+          `"${arg}" is not editable on this card. Only the fields shown as editable can be changed; ` +
+            'reject with a reason if something else is wrong.',
+        )
+      }
+    }
+  }
 }
 
 async function recordTrust(

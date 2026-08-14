@@ -21,6 +21,14 @@ export {
   type BriefingGrounding,
   type CrmGrounding,
 } from './mock/nervous-system.js'
+export {
+  compileWorkflow,
+  readbackFor,
+  type CompiledWorkflow,
+  type DetectedRisk,
+  type WorkflowGraph,
+  type WorkflowNode,
+} from './mock/workflow-compiler.js'
 export { MockLLMProvider } from './mock/provider.js'
 export { AnthropicProvider } from './anthropic/provider.js'
 

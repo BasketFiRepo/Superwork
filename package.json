@@ -24,6 +24,9 @@
     "loop": "node --env-file=.env --import tsx scripts/acceptance-loop.ts",
     "loop:phase2": "node --env-file=.env --import tsx scripts/phase2-loop.ts",
     "loop:phase3": "node --env-file=.env --import tsx scripts/phase3-loop.ts",
+    "loop:phase4": "node --env-file=.env --import tsx scripts/phase4-loop.ts",
+    "loop:phase5": "node --env-file=.env --import tsx scripts/phase5-loop.ts",
+    "loadtest": "node --env-file=.env --import tsx scripts/loadtest.ts",
     "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts"
   },
   "devDependencies": {
