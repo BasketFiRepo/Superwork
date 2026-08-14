@@ -115,7 +115,11 @@ importers:
 
   packages/integrations: {}
 
-  packages/tools: {}
+  packages/tools:
+    dependencies:
+      '@superwork/integrations':
+        specifier: workspace:*
+        version: link:../integrations
 
   packages/ui: {}
 

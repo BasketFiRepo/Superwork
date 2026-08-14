@@ -14,6 +14,14 @@ export {
   type BriefingView,
 } from './briefing.js'
 export { simulateAgent, type SimulateInput } from './studio.js'
+export {
+  simulateWorkflow,
+  runWorkflow,
+  continueWorkflowAfterApproval,
+  countFirings,
+  type WorkflowRunOutcome,
+  type WorkflowStepOutcome,
+} from './workflows.js'
 export { generateDigest, generateDueDigests } from './digest.js'
 export {
   checkAutopilotCaps,

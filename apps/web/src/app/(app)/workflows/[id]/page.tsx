@@ -1,0 +1,107 @@
+import Link from 'next/link'
+import { notFound } from 'next/navigation'
+import { getWorkflow, listWorkflowRuns } from '@superwork/core'
+import { requireSession, withActor } from '@/lib/session'
+import { WorkflowControls } from '@/components/WorkflowControls'
+import { WorkflowGraphView, type CompiledView } from '@/components/WorkflowGraphView'
+
+export const dynamic = 'force-dynamic'
+
+/** One workflow: what it says it does, what a dry run showed, and what it has done. */
+export default async function WorkflowPage({ params }: { params: Promise<{ id: string }> }) {
+  const session = await requireSession()
+  const { id } = await params
+
+  const data = await withActor(session, async (ctx, actor) => {
+    const workflow = await getWorkflow(ctx, actor, id).catch(() => null)
+    if (!workflow) return null
+    const runs = await listWorkflowRuns(ctx, actor, { workflowId: id, limit: 10 })
+    const members = await ctx.sql<{ id: string; name: string }[]>`
+      SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+        AND m.role IN ('admin', 'manager', 'member')
+      ORDER BY u.name`
+    return { workflow, runs, members }
+  })
+
+  if (!data) notFound()
+  const { workflow, runs, members } = data
+  const compiled: CompiledView | null = workflow.graph
+    ? { name: workflow.name, graph: workflow.graph, readback: workflow.readback, risks: workflow.risks, unsupported: null }
+    : null
+
+  return (
+    <div className="stack stack-8">
+      <header className="stack stack-2">
+        <span className="micro">
+          <Link href="/workflows">Workflows</Link>
+        </span>
+        <h1>{workflow.name}</h1>
+        <p className="small secondary">
+          Version {workflow.currentVersionOrdinal ?? '—'} · {workflow.status} · owner{' '}
+          {workflow.ownerName ?? 'unassigned'}
+        </p>
+      </header>
+
+      {compiled ? (
+        <section className="panel">
+          <div className="panel-header">
+            <h2>What it does</h2>
+            <span className="small muted">Compiled from “{workflow.description}”</span>
+          </div>
+          <div className="panel-body">
+            <WorkflowGraphView compiled={compiled} />
+          </div>
+        </section>
+      ) : null}
+
+      <WorkflowControls
+        workflow={{
+          id: workflow.id,
+          status: workflow.status,
+          simulatedOk: workflow.simulatedOk,
+          ownerUserId: workflow.ownerUserId,
+        }}
+        members={members}
+      />
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2>Runs</h2>
+          <span className="small muted">Dry runs and real ones, in order</span>
+        </div>
+        {runs.length === 0 ? (
+          <div className="empty stack stack-2">
+            <p className="secondary">It has never run.</p>
+            <p className="small muted">A dry run reads real data and stops before every effect.</p>
+          </div>
+        ) : (
+          <div className="panel-body stack stack-5">
+            {runs.map((run) => (
+              <article key={run.id} className="stack stack-2" style={{ paddingLeft: 'var(--s-5)', borderLeft: '1px solid var(--hairline)' }}>
+                <div className="row-tight">
+                  <span className={run.simulated ? 'chip' : 'chip chip-positive'}>
+                    {run.simulated ? 'dry run' : 'real'}
+                  </span>
+                  <span className="small">{run.status.replace(/_/g, ' ')}</span>
+                  <span className="small muted">
+                    version {run.versionOrdinal} · {run.startedAt ? run.startedAt.toISOString().slice(0, 16).replace('T', ' ') : '—'}
+                  </span>
+                </div>
+                {run.error ? <p className="small" style={{ margin: 0 }}>{run.error}</p> : null}
+                <ul className="stack stack-2 small secondary" style={{ margin: 0, paddingLeft: 'var(--s-7)' }}>
+                  {run.steps.map((step, index) => (
+                    <li key={index}>
+                      <strong>{step.label}</strong> — {step.status}
+                      {step.detail ? ` · ${step.detail}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}

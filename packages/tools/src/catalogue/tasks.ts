@@ -84,9 +84,16 @@ export const createTaskTool = register({
         entityType: 'task',
         entityLabel: input.title,
         changes: [
+          { field: 'Title', to: input.title, editable: { arg: 'title' } },
+          // The assignee is not editable here: changing who owns a task is a change of
+          // responsibility, and it goes through the task itself where the person is told.
           { field: 'Assignee', to: assignee },
-          { field: 'Due', to: readableDate(due, ctx.tenantDb.timezone) },
-          { field: 'Priority', to: input.priority },
+          {
+            field: 'Due',
+            to: readableDate(due, ctx.tenantDb.timezone),
+            editable: { arg: 'dueAt', help: 'A date, or words like "next Tuesday".' },
+          },
+          { field: 'Priority', to: input.priority, editable: { arg: 'priority', help: 'urgent, high, medium or low.' } },
         ],
         riskTier: 'low',
         reversible: true,

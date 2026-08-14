@@ -1,22 +1,22 @@
+import Link from 'next/link'
+import { listWorkflows } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
+import { WorkflowComposer } from '@/components/WorkflowComposer'
 
 export const dynamic = 'force-dynamic'
 
+const EXAMPLES = [
+  'Every weekday at 9, find customer threads with no reply for 5 days and draft a follow-up.',
+  'Each morning, find overdue tasks and create a follow-up task for the owner.',
+]
+
 /**
- * Workflows (§10). Phase 1 ships the durable model and the dry-run requirement; the
- * visual DAG editor and natural-language authoring land in Phase 2. Controls that are
- * not built render disabled with the phase named, never as live-looking no-ops (§0.2).
+ * Workflows (§10). A workflow is a versioned DAG with durable, resumable runs. Nothing can
+ * be activated until a dry run against real data has passed.
  */
 export default async function WorkflowsPage() {
   const session = await requireSession()
-
-  const workflows = await withActor(session, async (ctx) => {
-    return ctx.sql<{ id: string; name: string; status: string; simulated_ok: boolean; owner: string | null }[]>`
-      SELECT w.id, w.name, w.status, w.simulated_ok, u.name AS owner
-      FROM workflows w LEFT JOIN users u ON u.id = w.owner_user_id
-      WHERE w.organization_id = ${ctx.organizationId} AND w.deleted_at IS NULL
-      ORDER BY w.name`
-  })
+  const workflows = await withActor(session, (ctx, actor) => listWorkflows(ctx, actor))
 
   return (
     <div className="stack stack-8">
@@ -24,49 +24,52 @@ export default async function WorkflowsPage() {
         <span className="micro">Operate</span>
         <h1>Workflows</h1>
         <p className="prose secondary">
-          A workflow is a versioned DAG with durable, resumable runs. Nothing can be activated
-          until a dry run against real data has passed — that single rule prevents most automation
-          disasters.
+          Describe what should happen and Superwork compiles it into a graph you can read. Nothing
+          is activated until a dry run against real data has shown what it would have done — that
+          single rule prevents most automation disasters.
         </p>
       </header>
 
-      {workflows.length === 0 ? (
-        <div className="panel">
-          <div className="empty stack stack-4">
-            <p className="secondary">No workflows yet.</p>
-            <p className="prose small muted" style={{ margin: '0 auto' }}>
-              The engine, the versioned graph, the durable run tables and the simulation gate are
-              built. Authoring — describing an automation in plain language, seeing the DAG and its
-              readback, and dry-running it against the last thirty days — lands in Phase 2.
-            </p>
-            <div className="row" style={{ justifyContent: 'center' }}>
-              <button className="btn btn-primary" disabled title="Natural-language authoring lands in Phase 2.">
-                Describe an automation
-                <span className="chip">Coming soon</span>
-              </button>
-            </div>
-          </div>
+      <WorkflowComposer examples={EXAMPLES} />
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2>Your workflows</h2>
+          <span className="small muted">
+            {workflows.length} {workflows.length === 1 ? 'workflow' : 'workflows'}
+          </span>
         </div>
-      ) : (
-        <div className="panel">
+        {workflows.length === 0 ? (
+          <div className="empty stack stack-3">
+            <p className="secondary">No workflows yet.</p>
+            <p className="small muted">Describe one above and it will appear here as a draft.</p>
+          </div>
+        ) : (
           <div className="panel-body-flush table-scroll">
             <table className="table">
               <thead>
                 <tr>
                   <th>Workflow</th>
-                  <th style={{ width: 140 }}>Owner</th>
+                  <th style={{ width: 160 }}>Owner</th>
                   <th style={{ width: 110 }}>Status</th>
-                  <th style={{ width: 140 }}>Simulated</th>
+                  <th style={{ width: 200 }}>Dry run</th>
                 </tr>
               </thead>
               <tbody>
                 {workflows.map((workflow) => (
                   <tr key={workflow.id}>
-                    <td>{workflow.name}</td>
-                    <td className="small secondary">{workflow.owner ?? 'unassigned'}</td>
+                    <td>
+                      <Link href={`/workflows/${workflow.id}`}>{workflow.name}</Link>
+                      {workflow.readback ? (
+                        <div className="small muted" style={{ marginTop: 'var(--s-2)' }}>
+                          {workflow.readback}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="small secondary">{workflow.ownerName ?? 'unassigned'}</td>
                     <td className="small secondary">{workflow.status}</td>
                     <td>
-                      {workflow.simulated_ok ? (
+                      {workflow.simulatedOk ? (
                         <span className="chip chip-positive">passed</span>
                       ) : (
                         <span className="chip chip-attention">required before activation</span>
@@ -77,8 +80,8 @@ export default async function WorkflowsPage() {
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        )}
+      </section>
     </div>
   )
 }

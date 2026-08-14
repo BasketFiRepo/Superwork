@@ -1,5 +1,6 @@
 /**
- * Browser check for the Phase 2 and Phase 3 surfaces (§24).
+ * Browser check for the Phase 2, Phase 3 and Phase 4 surfaces, plus workflow authoring,
+ * approve-with-edits and custom tools (§24).
  *
  * Signs in as the demo owner and walks Inbox, Meetings, CRM, the Briefing, the AI ledger,
  * the personal record, the agent studio and the API screen — asserting that each renders
@@ -209,6 +210,71 @@ try {
   ok('Each answer carries evidence', /constraint/i.test(reviewText))
   ok('It names the profile it reviewed against', /works council/i.test(reviewText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/compliance.png`, fullPage: true })
+
+  // ---- Workflow authoring -------------------------------------------------
+  await page.goto(`${BASE}/workflows`)
+  await page.waitForSelector('[data-testid="workflow-composer"]', { timeout: 15_000 })
+  await page.fill(
+    '#workflow-description',
+    'Every weekday at 9, find customer threads with no reply for 3 days and draft a follow-up.',
+  )
+  await page.locator('[data-testid="workflow-compile"]').click()
+  await page.waitForSelector('[data-testid="workflow-readback"]', { timeout: 20_000 })
+  const readback = await page.locator('[data-testid="workflow-readback"]').innerText()
+  ok('A sentence compiles to a graph', (await page.locator('[data-testid="workflow-node"]').count()) >= 4)
+  ok('It reads the graph back in plain English', /every weekday/i.test(readback) && /approve/i.test(readback))
+  ok('It shows the risk it found', (await page.locator('[data-testid="workflow-risk"]').count()) > 0)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-compose.png`, fullPage: true })
+
+  await page.locator('[data-testid="workflow-save"]').click()
+  await page.waitForURL(/\/workflows\/[0-9a-f-]{36}/, { timeout: 20_000 })
+  await page.waitForSelector('[data-testid="workflow-activate"]', { timeout: 15_000 })
+  ok('Activation is disabled until a dry run has passed',
+    await page.locator('[data-testid="workflow-activate"]').isDisabled())
+
+  await page.locator('[data-testid="workflow-dry-run"]').click()
+  await page.waitForSelector('[data-testid="workflow-outcome"]', { timeout: 60_000 })
+  const outcome = await page.locator('[data-testid="workflow-outcome"]').innerText()
+  ok('The dry run says how often it would have fired', /would have fired \d+ times/i.test(outcome))
+  ok('And that nothing happened', /nothing was created, drafted or sent/i.test(outcome))
+  await page.waitForSelector('[data-testid="workflow-activate"]:not([disabled])', { timeout: 15_000 })
+  ok('Activation opens once it has passed', true)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-dryrun.png`, fullPage: true })
+
+  // Activating and running it is what produces something to approve, so the next check
+  // has a real card in front of it rather than a fixture.
+  await page.locator('[data-testid="workflow-activate"]').click()
+  await page.getByRole('button', { name: 'Run it now' }).waitFor({ timeout: 20_000 })
+  await page.getByRole('button', { name: 'Run it now' }).click()
+  // The panel already holds the dry-run result, so wait for the text to change rather
+  // than for the element to appear.
+  await page
+    .locator('[data-testid="workflow-outcome"]')
+    .getByText(/stopped for approval|applied \d+ change/i)
+    .waitFor({ timeout: 60_000 })
+    .catch(() => undefined)
+  const ranText = await page.locator('[data-testid="workflow-outcome"]').innerText()
+  ok('A real run stops for a person', /stopped for approval/i.test(ranText), ranText.slice(0, 160))
+
+  // ---- Approve with edits -------------------------------------------------
+  await page.goto(`${BASE}/approvals`)
+  const editButton = page.locator('[data-testid="approve-with-edits"]').first()
+  if (await editButton.count()) {
+    await editButton.click()
+    await page.waitForSelector('[data-testid="editable-field"]', { timeout: 15_000 })
+    ok('An approval can be corrected in place', (await page.locator('[data-testid="editable-field"]').count()) > 0)
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/approval-edit.png`, fullPage: true })
+  } else {
+    ok('An approval can be corrected in place', false, 'no pending approval offered an editable field')
+  }
+
+  // ---- Custom tools -------------------------------------------------------
+  await page.goto(`${BASE}/settings/tools`)
+  await page.waitForSelector('[data-testid="reviewed-hosts"]', { timeout: 15_000 })
+  const toolsText = await page.locator('main').innerText()
+  ok('Custom tools explains the rule it enforces', /same permission check/i.test(toolsText))
+  ok('It says outbound HTTP is simulated here', /simulated/i.test(toolsText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/custom-tools.png`, fullPage: true })
 
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {

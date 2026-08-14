@@ -70,6 +70,17 @@ export function getTool(name: string): Tool<any, any> | undefined {
   return tools.get(name)
 }
 
+/**
+ * Resolves a tool name against the built-in registry plus this tenant's own tools (§22).
+ *
+ * The tenant overlay is passed in rather than registered globally: the registry is a
+ * process-wide map, and putting one organization's tool in it would make that tool visible
+ * to every other organization in the same process.
+ */
+export function resolveTool(name: string, tenant?: Map<string, Tool<any, any>> | null): Tool<any, any> | undefined {
+  return tools.get(name) ?? tools.get(`${name}@v1`) ?? tenant?.get(name) ?? tenant?.get(`${name}@v1`)
+}
+
 export function allTools(): Tool<any, any>[] {
   return [...tools.values()]
 }
@@ -112,8 +123,18 @@ export function toolsForSubagent(subagent: string): Tool<any, any>[] {
  * (§6.2). This prevents both wasted turns and social-engineering attempts against
  * capabilities the actor does not hold.
  */
-export function visibleTools(actor: Actor, subagent: string, organizationId: string, killSwitch = false): Tool<any, any>[] {
-  const candidates = subagent === 'orchestrator' ? allTools() : toolsForSubagent(subagent)
+export function visibleTools(
+  actor: Actor,
+  subagent: string,
+  organizationId: string,
+  killSwitch = false,
+  tenant?: Map<string, Tool<any, any>> | null,
+): Tool<any, any>[] {
+  // Custom tools reach the orchestrator only. A sub-agent's registry is a structural
+  // guarantee — the Researcher cannot write because it holds no write tool — and an
+  // admin-authored tool must not be a way to hand it one.
+  const candidates =
+    subagent === 'orchestrator' ? [...allTools(), ...(tenant?.values() ?? [])] : toolsForSubagent(subagent)
   const permitted = candidates.filter((tool) => {
     const decision = can(actor, `${primaryResource(tool)}:${primaryAction(tool)}`, {
       type: primaryResource(tool),

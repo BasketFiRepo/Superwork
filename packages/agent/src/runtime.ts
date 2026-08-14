@@ -16,7 +16,15 @@ import {
   type PreviewLine,
 } from '@superwork/core'
 import { completeWithFallback, loadPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
-import { getTool, hashArgs, redactInput, visibleTools, type ToolContext } from '@superwork/tools'
+import {
+  customToolsFor,
+  hashArgs,
+  redactInput,
+  resolveTool,
+  visibleTools,
+  type Tool,
+  type ToolContext,
+} from '@superwork/tools'
 import {
   PlanSchema,
   type GateOutcome,
@@ -216,10 +224,13 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     const [org] = await ctx.sql<{ name: string; industry: string | null }[]>`
       SELECT name, industry FROM organizations WHERE id = ${ctx.organizationId}`
     const persona = input.persona ?? (await resolvePersona(ctx, input.agentKey ?? 'orchestrator'))
+    // This tenant's own tools, resolved once per run. They are ordinary tools from here on.
+    const tenantTools = await customToolsFor(ctx)
     return {
       actor,
       killSwitch,
       persona,
+      tenantTools,
       orgName: org?.name ?? 'this organization',
       industry: org?.industry ?? 'operations',
     }
@@ -321,7 +332,7 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     effective_capabilities: input.mode === 'ask' ? 'read only' : input.mode === 'assist' ? 'read and propose' : 'read, propose and reversible writes',
   }
   const system = renderPrompt(loadPrompt('system', 1), promptVars)
-  const blocks = buildBlocks(grounded, agentActor, input)
+  const blocks = buildBlocks(grounded, agentActor, input, intake.tenantTools)
   const assembly = assembleContext(blocks)
 
   const planStarted = Date.now()
@@ -374,6 +385,7 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
       plan,
       (step) => toolContext(ctx, agentActor, runId, step.id, step.tool, input.dryRun ?? false),
       intake.killSwitch,
+      intake.tenantTools,
     )
     await savePlan(ctx, runId, plan, outcome)
     await emitStep(ctx, runId, phase, {
@@ -469,7 +481,11 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
   // ---- Approval gate --------------------------------------------------------
   if (gate.requiresApproval || capReason) {
     const approvalId = await withTenant(session, async (ctx) => {
-      const preview: PreviewLine[] = gate.steps.filter((s) => s.allowed).flatMap((s) => s.preview)
+      // Every preview line carries the step it came from, so an approver's edit lands on a
+      // known argument of a known step rather than on a free-text patch (§11.2).
+      const preview: PreviewLine[] = gate.steps
+        .filter((s) => s.allowed)
+        .flatMap((s) => s.preview.map((line) => ({ ...line, stepId: s.id })))
       const evidence = buildEvidence(grounded)
       const id = await createApproval(ctx, agentActor, {
         title: gate.approvalTitle,
@@ -498,7 +514,20 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     return
   }
 
-  await executeApprovedPlan(session, runId, phase, budget, plan, gate, input, grounded, system, assembly.blocks, planResponse.degraded)
+  await executeApprovedPlan(
+    session,
+    runId,
+    phase,
+    budget,
+    plan,
+    gate,
+    input,
+    grounded,
+    system,
+    assembly.blocks,
+    planResponse.degraded,
+    intake.tenantTools,
+  )
 }
 
 /** Resumes a run whose plan was approved. Called by the approvals API. */
@@ -512,13 +541,68 @@ export async function continueAfterApproval(
     const [row] = await ctx.sql<{ plan: { plan: Plan; gate: GateOutcome }; request: string; mode: string; steps_used: number }[]>`
       SELECT plan, request, mode, steps_used FROM agent_runs
       WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
-    return row ?? null
+    return row ? { ...row, tenantTools: await customToolsFor(ctx) } : null
   })
   if (!state?.plan) throw new Error('This run has no stored plan to resume.')
+  const tenantTools = state.tenantTools
 
   const phase: Phase = { ordinal: state.steps_used }
   const budget = newBudget()
   const plan = applyEdits(state.plan.plan, edits)
+
+  // An edited plan is not the plan that was gated. Re-running the gate is what keeps
+  // "approve with edits" from being a way to widen what was approved: the edited
+  // arguments are re-validated, re-permissioned and re-previewed, and if the edit made
+  // the plan riskier than the one on the card it goes back for a fresh approval (§11.2).
+  let gate = state.plan.gate
+  if (edits) {
+    const regated = await withTenant({ ...session, traceId }, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const agentActor = await asAgent(ctx, actor, {
+        agentId: runId,
+        agentName: 'Superwork',
+        mode: 'execute',
+        toolGrants: ['*'],
+        maxSensitivity: 'confidential',
+      })
+      const outcome = await gatePlan(
+        ctx,
+        agentActor,
+        plan,
+        (step) => toolContext(ctx, agentActor, runId, step.id, step.tool, false),
+        await killSwitchEngaged(ctx),
+        tenantTools,
+      )
+      await savePlan(ctx, runId, plan, outcome)
+      await emitStep(ctx, runId, phase, {
+        phase: 'gate',
+        label: 'Re-checked the edited plan',
+        status: 'succeeded',
+        detail: {
+          allowed: outcome.steps.filter((s) => s.allowed).length,
+          blocked: outcome.blocked.map((s) => ({ tool: s.tool, reason: s.reason })),
+        },
+      })
+      return outcome
+    })
+
+    const before = riskRank(state.plan.gate.riskTier)
+    if (riskRank(regated.riskTier) > before) {
+      const message =
+        'Those edits make this riskier than the plan that was approved, so it is going back for a fresh ' +
+        'decision rather than running on the old one.'
+      await withTenant({ ...session, traceId }, (ctx) =>
+        setRunStatus(ctx, runId, 'awaiting_approval', { failureClass: 'policy', failureDetail: message }),
+      )
+      publish(runId, { type: 'run.failed', failureClass: 'policy', message })
+      throw new Error(message)
+    }
+    gate = regated
+  }
+
+  // Marked running before the work is detached, so a caller that polls immediately after
+  // approving sees the transition rather than the status it approved from.
+  await withTenant({ ...session, traceId }, (ctx) => setRunStatus(ctx, runId, 'running'))
 
   void executeApprovedPlan(
     { ...session, traceId },
@@ -526,12 +610,13 @@ export async function continueAfterApproval(
     phase,
     budget,
     plan,
-    state.plan.gate,
+    gate,
     { request: state.request, mode: state.mode as StartRunInput['mode'] },
     null,
     '',
     [],
     null,
+    tenantTools,
   ).catch(async (error) => {
     const message = error instanceof Error ? error.message : String(error)
     publish(runId, { type: 'run.failed', failureClass: 'transient', message })
@@ -553,6 +638,7 @@ async function executeApprovedPlan(
   system: string,
   blocks: ContextBlock[],
   degraded: string | null,
+  tenantTools?: Map<string, Tool<any, any>> | null,
 ): Promise<void> {
   const outcome: RunReport['outcome'] = { created: 0, updated: 0, drafted: 0, sent: 0, skipped: [], failed: [] }
   let undoOrdinal = 0
@@ -585,7 +671,7 @@ async function executeApprovedPlan(
       throw error
     }
 
-    const executed = await runStep(session, runId, phase, budget, step, input.dryRun ?? false, undoOrdinal)
+    const executed = await runStep(session, runId, phase, budget, step, input.dryRun ?? false, undoOrdinal, tenantTools)
     if (executed.undoRecorded) undoOrdinal += 1
 
     if (executed.ok) {
@@ -658,8 +744,9 @@ async function runStep(
   step: GatedStep,
   dryRun: boolean,
   undoOrdinal: number,
+  tenantTools?: Map<string, Tool<any, any>> | null,
 ): Promise<{ ok: boolean; message: string; looping: boolean; undoRecorded: boolean }> {
-  const tool = getTool(step.tool) ?? getTool(`${step.tool}@v1`)
+  const tool = resolveTool(step.tool, tenantTools)
   if (!tool) return { ok: false, message: 'tool not found', looping: false, undoRecorded: false }
 
   const argsHash = hashArgs(tool.name, step.args)
@@ -946,6 +1033,7 @@ function buildBlocks(
   grounded: Awaited<ReturnType<typeof ground>>,
   actor: Actor,
   input: StartRunInput,
+  tenantTools?: Map<string, Tool<any, any>> | null,
 ): ContextBlock[] {
   const blocks: ContextBlock[] = [
     {
@@ -994,7 +1082,7 @@ function buildBlocks(
     })
   }
 
-  const visible = visibleTools(actor, 'orchestrator', actor.organizationId)
+  const visible = visibleTools(actor, 'orchestrator', actor.organizationId, false, tenantTools)
   blocks.push({
     zone: 'tools',
     trust: 'trusted_system',
@@ -1166,6 +1254,10 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   } finally {
     clearTimeout(timer!)
   }
+}
+
+function riskRank(tier: 'read' | 'low' | 'high' | string): number {
+  return tier === 'high' ? 2 : tier === 'low' ? 1 : 0
 }
 
 function applyEdits(plan: Plan, edits?: Record<string, unknown>): Plan {

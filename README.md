@@ -10,7 +10,9 @@ verified → everyone can see what occurred and why.
 This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
 (the nervous system: inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust
 and depth) and Phase 4 (enterprise scale) of the build specification, end to end, **with
-zero external credentials**.
+zero external credentials** — and then the three things the build itself had listed as not
+yet true: natural-language workflow authoring, approve-with-edits, and admin-authored HTTP
+tools.
 
 ---
 
@@ -32,15 +34,16 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 503 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 534 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
-pnpm check:browser     # walks Inbox, Meetings, CRM and the Briefing in a real browser
+pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
 
 `pnpm check:browser` expects the app already running (`pnpm dev`, or `pnpm build && pnpm
@@ -232,17 +235,61 @@ Tuples are loaded once with the actor so a permission check stays synchronous an
 move to a shard that has no connection configured rather than pretending a `dedicated` tier
 already isolates something. This build runs one shard and says so.
 
+## Beyond Phase 4 — the debts the build had listed
+
+The specification stops at Phase 4. What follows is the list this README used to call "what
+is deliberately not true yet", built. `pnpm loop:phase5` drives all three end to end.
+
+**Natural-language workflow authoring** (`/workflows`) — describe an automation in a
+sentence and the compiler emits a schema-validated DAG, a plain-English readback of what it
+will actually do, and the risks it found. It inserts an approval step whenever anything
+could leave the company, whatever the sentence asked for: "send them a follow-up" compiles
+to a draft plus an approval, and says so on the card. What it cannot build it says it cannot
+build rather than guessing — a compiler that guesses produces an automation nobody can
+predict. Activation is refused until a dry run of *that version* has passed; editing the
+workflow closes the gate again. The dry run reads exactly what a live run would, stops
+before every effect, and reports a counted number: "This would have fired 22 times in the
+last 30 days. Run against today's data it matches 5 items and would have done: 5 × draft a
+reply. Nothing was created, drafted or sent." The firings are history and the effects are
+today's data — multiplying them would be a made-up number, so it does not. A real run hangs
+off an `agent_runs` row and uses the same tools, gate, approvals, audit and undo ledger as
+an agent run: there is no second execution path for effects. See ADR 0012.
+
+**Approve with edits** (`/approvals`) — the fields a tool marked editable can be corrected
+in place on the card. The edited plan is then re-gated on the server: arguments re-validated,
+permissions re-checked, previews re-rendered, and if the edit made the plan riskier than the
+one on the card it goes back for a fresh decision rather than running on the old one. An
+edit may only touch an argument the card actually offered — the recipient of an email is
+deliberately not one, for the same reason retrieved content can never introduce one. The
+correction is recorded as `approved_with_edits` and counted separately in the trust ledger,
+because "approved after a tweak" tells you something "approved" does not. See ADR 0013.
+
+**Admin-authored HTTP tools** (`/settings/tools`) — an organization can teach Superwork to
+call one of its own systems. The tool is resolved through the same registry, checked by the
+same policy engine, previewed and approved through the same approval flow, and written to
+the same `tool_calls` audit trail. No exceptions: a custom tool must not be a permission
+bypass. A tool cannot be activated until a named person has reviewed its host with a reason
+on a recorded date, and revoking a host disables every tool that used it in the same breath.
+https only; private and link-local addresses are refused; a literal credential in a header is
+refused in favour of a `${SECRET}` reference; an argument the definition never declared never
+reaches the request; and a tool is never advertised as reversible, because Superwork cannot
+undo a change in somebody else's system. Custom tools are visible to the orchestrator only —
+a sub-agent's registry is a structural guarantee, and an admin-authored tool must not be a
+way to hand the Researcher a write. They are built per tenant and never registered globally,
+so one organization's tool cannot appear in another's registry. See ADR 0013.
+
 ## What is deliberately not true yet
 
-Controls for unbuilt features render disabled with the phase named — never as live-looking
-no-ops. The workflow engine's tables, versioning and simulation gate exist but
-natural-language authoring does not; approve-with-edits is stubbed with an explanation;
-admin-authored HTTP tools still need a reviewed host allowlist and a sandbox, and this build
-has no outbound network, so the control stays disabled rather than failing in front of you.
-Every provider ships as a simulated implementation — connecting one says so on the row. The
-scale budgets are measured at the scale this machine can build, and the harness prints that
-scale next to the target rather than rounding the difference away. Nothing in the interface
-pretends to work.
+Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
+returns a deterministic locally-generated response marked **Simulated**, and everything
+around it — review, permissions, previews, approvals, audit — is real. Every other provider
+ships as a simulated implementation too, and connecting one says so on the row. The workflow
+compiler understands the sentences it understands and refuses the rest; new shapes need a
+named query in the safe query layer, not a cleverer prompt. Workflow schedules are recorded
+but not yet fired by the worker — a workflow runs when somebody runs it. The scale budgets
+are measured at the scale this machine can build, and the harness prints that scale next to
+the target rather than rounding the difference away. Controls for anything unbuilt render
+disabled with the reason named. Nothing in the interface pretends to work.
 
 ## Safety properties this implementation actually holds
 

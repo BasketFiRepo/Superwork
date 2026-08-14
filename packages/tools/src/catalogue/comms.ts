@@ -84,13 +84,19 @@ export const draftEmail = register({
   },
   async preview(input, ctx: ToolContext): Promise<PreviewLine[]> {
     const recipients = await resolveRecipients(ctx, input.conversationId ?? null, input.companyId ?? null, input.toAddresses)
+    const body = input.body ?? (await composeFollowUp(ctx, input.conversationId ?? null))
     return [
       {
         operation: 'Draft email',
         entityType: 'email_draft',
         entityLabel: input.subject,
         changes: [
+          // The recipient is deliberately not editable: it is resolved from known contacts
+          // on the account, and letting an approval introduce an address would be the same
+          // hole as letting retrieved content do it (§5.9.4).
           { field: 'To', to: recipients.join(', ') || 'no known recipient' },
+          { field: 'Subject', to: input.subject, editable: { arg: 'subject' } },
+          { field: 'Body', to: body, editable: { arg: 'body', multiline: true, help: 'Edit the wording before it is drafted.' } },
           { field: 'Sends now', to: 'no — saved to Approvals' },
         ],
         riskTier: 'low',

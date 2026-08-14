@@ -29,6 +29,8 @@ const EnvSchema = z
     CALENDAR_MODE: RuntimeMode.default('mock'),
     STORAGE_MODE: RuntimeMode.default('mock'),
     BILLING_MODE: RuntimeMode.default('mock'),
+    /** Outbound HTTP for admin-authored tools (§22). Mock by default: no credentials, no egress. */
+    HTTP_TOOLS_MODE: RuntimeMode.default('mock'),
 
     AUTOPILOT_ENABLED: boolish.default(false),
     AGENT_KILL_SWITCH: boolish.default(false),

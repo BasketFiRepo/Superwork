@@ -1,7 +1,7 @@
 import type { RiskTier, TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import type { PreviewLine } from '@superwork/core'
-import { getTool, type ToolContext } from '@superwork/tools'
+import { resolveTool, type Tool, type ToolContext } from '@superwork/tools'
 import type { GateOutcome, GatedStep, Plan } from './types.js'
 
 /**
@@ -18,12 +18,14 @@ export async function gatePlan(
   plan: Plan,
   toolCtxFor: (step: { id: string; tool: string }) => ToolContext,
   killSwitch: boolean,
+  /** This tenant's admin-authored tools, gated exactly like the built-ins (§22). */
+  tenantTools?: Map<string, Tool<any, any>> | null,
 ): Promise<GateOutcome> {
   const steps: GatedStep[] = []
   let highestRisk: RiskTier = 'read'
 
   for (const step of plan.steps) {
-    const tool = getTool(step.tool) ?? getTool(`${step.tool}@v1`)
+    const tool = resolveTool(step.tool, tenantTools)
     if (!tool) {
       steps.push({
         ...step,
