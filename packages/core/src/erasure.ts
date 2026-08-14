@@ -3,6 +3,7 @@ import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from './errors.js'
 import { writeActivity, writeAudit } from './audit.js'
 import { assertSteppedUp } from './step-up.js'
+import { holdsCovering } from './legal-hold.js'
 
 /**
  * Erasure (§21).
@@ -197,6 +198,17 @@ export async function previewErasure(
       `${workflows!.count} active ${Number(workflows!.count) === 1 ? 'workflow names' : 'workflows name'} them as the ` +
         'accountable owner. Give those to somebody else first — an automation with nobody answerable for it is ' +
         'the thing the owner requirement exists to prevent.',
+    )
+  }
+
+  // A hold outranks an erasure request. Both are legal obligations; only one of them can
+  // be satisfied later. So this refuses, names the matter, and leaves the choice of whether
+  // to release the hold to the people who placed it.
+  const holds = await holdsCovering(ctx, subjectUserId)
+  for (const hold of holds) {
+    blockers.push(
+      `Records concerning them are preserved for “${hold.matter}”. Erasing them now would destroy evidence ` +
+        'in a live matter. Release that hold first, if the matter is closed.',
     )
   }
 

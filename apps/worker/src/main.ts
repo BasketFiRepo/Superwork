@@ -239,6 +239,16 @@ async function main(): Promise<void> {
                 purged.map((o) => `${o.purged} ${o.dataClass} past ${o.keepDays} days`).join(' · '),
             )
           }
+          // Logged separately and always, even when nothing was purged. A sweep that
+          // removed nothing because a hold covered everything is a materially different
+          // event from a sweep that found nothing to remove.
+          const held = outcomes.filter((outcome) => outcome.held > 0)
+          if (held.length > 0) {
+            console.log(
+              `[retention] ${org.id}: kept by a legal hold — ` +
+                held.map((o) => `${o.held} ${o.dataClass}`).join(' · '),
+            )
+          }
         } catch (error) {
           console.error(`[retention] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }

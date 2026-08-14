@@ -3,6 +3,13 @@ import { env } from '@superwork/config'
 
 export type Sql = postgres.Sql<{}>
 
+/**
+ * A piece of SQL built by the tagged template and nested inside another query. Composing
+ * fragments is how a predicate can be written once and used by two queries that need to
+ * agree — as opposed to building SQL from strings, which this codebase never does.
+ */
+export type Fragment = postgres.PendingQuery<postgres.Row[]>
+
 let appPool: Sql | null = null
 let authPool: Sql | null = null
 let adminPool: Sql | null = null

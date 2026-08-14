@@ -23,6 +23,7 @@ export interface PolicyRow {
   setByName: string | null
   lastAppliedAt: string | null
   lastPurged: number
+  lastHeld: number
 }
 
 export interface MemberRow {
@@ -52,7 +53,17 @@ const DISPOSITION: Record<PreviewLine['disposition'], { label: string; chip: str
   keep: { label: 'kept', chip: 'chip' },
 }
 
-export function RetentionAdmin({ policies, members }: { policies: PolicyRow[]; members: MemberRow[] }) {
+export function RetentionAdmin({
+  policies,
+  members,
+  liveHolds,
+}: {
+  policies: PolicyRow[]
+  members: MemberRow[]
+  /** Matters currently suspending deletion. Shown from the moment one is placed, rather
+   *  than after the next sweep — a window that looks unenforced is a support call. */
+  liveHolds: { id: string; matter: string }[]
+}) {
   const router = useRouter()
   const stepUp = useStepUp()
   const [busy, setBusy] = useState(false)
@@ -98,6 +109,18 @@ export function RetentionAdmin({ policies, members }: { policies: PolicyRow[]; m
           <h2>How long things are kept</h2>
           <span className="small muted">Defaults come from the jurisdiction in force</span>
         </div>
+        {liveHolds.length > 0 ? (
+          <div className="panel-body hairline-bottom" data-testid="retention-holds">
+            <div className="banner banner-attention">
+              <span>
+                {liveHolds.length === 1 ? 'A legal hold is' : `${liveHolds.length} legal holds are`} in force
+                {liveHolds.length <= 3 ? ` — ${liveHolds.map((hold) => hold.matter).join(', ')}` : ''}. These
+                windows do not apply to what they cover, however old it is.{' '}
+                <a href="/settings/holds">See what is being preserved</a>.
+              </span>
+            </div>
+          </div>
+        ) : null}
         <div className="panel-body-flush table-scroll">
           <table className="table">
             <thead>
@@ -125,6 +148,11 @@ export function RetentionAdmin({ policies, members }: { policies: PolicyRow[]; m
                     {policy.lastAppliedAt
                       ? `${policy.lastPurged} removed · ${policy.lastAppliedAt.slice(0, 10)}`
                       : 'not yet run'}
+                    {/* What a hold kept back, on the same row as what the window took. A
+                        window that appears not to be working is usually a hold working. */}
+                    {policy.lastHeld > 0 ? (
+                      <div className="small muted">{policy.lastHeld} kept by a legal hold</div>
+                    ) : null}
                   </td>
                   <td>
                     <button

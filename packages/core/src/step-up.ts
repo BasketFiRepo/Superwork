@@ -24,6 +24,9 @@ export const STEP_UP_ACTIONS = {
   'kill_switch.release': 'letting the agents run again',
   'retention.set': 'changing how long Superwork keeps something',
   'erasure.execute': 'erasing a person from this organization',
+  // Placing one is not here on purpose: preserving evidence in a hurry is the point, and
+  // the friction belongs on the side that lets the deletion resume.
+  'legal_hold.release': 'letting a matter’s records be deleted again',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

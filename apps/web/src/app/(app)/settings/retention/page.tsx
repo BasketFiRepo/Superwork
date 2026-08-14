@@ -1,4 +1,4 @@
-import { listErasures, PermissionError, retentionPolicies } from '@superwork/core'
+import { listErasures, listHolds, PermissionError, retentionPolicies } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
 import { RetentionAdmin } from '@/components/RetentionAdmin'
 
@@ -16,6 +16,7 @@ export default async function RetentionPage() {
     policies: Awaited<ReturnType<typeof retentionPolicies>>
     members: { id: string; name: string; role: string }[]
     erasures: Awaited<ReturnType<typeof listErasures>>
+    liveHolds: { id: string; matter: string }[]
   } | null = null
   let denied: string | null = null
 
@@ -28,6 +29,9 @@ export default async function RetentionPage() {
           AND m.user_id <> ${actor.userId}
         ORDER BY u.name`,
       erasures: await listErasures(ctx, actor),
+      liveHolds: (await listHolds(ctx, actor))
+        .filter((hold) => hold.live)
+        .map((hold) => ({ id: hold.id, matter: hold.matter })),
     }))
   } catch (error) {
     if (error instanceof PermissionError) denied = error.message
@@ -58,6 +62,7 @@ export default async function RetentionPage() {
               lastAppliedAt: policy.lastAppliedAt ? policy.lastAppliedAt.toISOString() : null,
             }))}
             members={data?.members ?? []}
+            liveHolds={data?.liveHolds ?? []}
           />
 
           <section className="panel" data-testid="erasure-history">
