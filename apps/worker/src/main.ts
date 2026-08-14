@@ -1,5 +1,5 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
-import { claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
+import { applyRetention, claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
@@ -11,6 +11,7 @@ import { emailProvider } from '@superwork/integrations'
  *   • run each read-only watcher on the cadence it declares (§9.1)
  *   • fire the workflow schedules that are due (§10.2)
  *   • generate briefings, deliver the nudge ladder, write agent digests
+ *   • purge what is past its retention window (§21)
  *
  * Failures back off exponentially and land in a dead-letter state after six attempts;
  * nothing is retried forever and nothing fails quietly.
@@ -24,6 +25,10 @@ const NUDGE_MS = Number(process.env['WORKER_NUDGE_MS'] ?? 5 * 60_000)
 // indexed query per organization that returns nothing almost every time. Workflows and
 // watchers share the sweep because they share the mechanism.
 const SCHEDULE_MS = Number(process.env['WORKER_SCHEDULE_MS'] ?? 60_000)
+// Retention is a daily job. Sweeping more often would delete the same nothing repeatedly;
+// less often lets data outlive its window by up to that interval, which is a promise broken
+// by a scheduling choice.
+const RETENTION_MS = Number(process.env['WORKER_RETENTION_MS'] ?? 24 * 60 * 60_000)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -105,11 +110,15 @@ async function dispatchEmail(
 }
 
 async function main(): Promise<void> {
-  console.log(`Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms`)
+  console.log(
+    `Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms · ` +
+      `retention every ${Math.round(RETENTION_MS / 3_600_000)}h`,
+  )
   let lastBriefingRun = 0
   let lastDigestRun = 0
   let lastNudgeRun = 0
   let lastScheduleSweep = 0
+  let lastRetentionSweep = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -209,6 +218,30 @@ async function main(): Promise<void> {
         if (written > 0) console.log(`[digests] wrote ${written}`)
       } catch (error) {
         console.error('[digests] failed:', error instanceof Error ? error.message : error)
+      }
+    }
+
+    // Retention (§21). What is past its window goes, in bounded batches, and what went is
+    // logged — a purge nobody can see is indistinguishable from one that never ran.
+    if (Date.now() - lastRetentionSweep > RETENTION_MS) {
+      lastRetentionSweep = Date.now()
+      for (const org of organizations) {
+        if (!org.ownerId) continue
+        try {
+          const outcomes = await withTenant(
+            { organizationId: org.id, userId: org.ownerId, timezone: org.timezone },
+            (ctx) => applyRetention(ctx),
+          )
+          const purged = outcomes.filter((outcome) => outcome.purged > 0)
+          if (purged.length > 0) {
+            console.log(
+              `[retention] ${org.id}: ` +
+                purged.map((o) => `${o.purged} ${o.dataClass} past ${o.keepDays} days`).join(' · '),
+            )
+          }
+        } catch (error) {
+          console.error(`[retention] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
       }
     }
 

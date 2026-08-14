@@ -32,6 +32,11 @@ import {
   listWorkflowRuns,
   reviewHost,
   saveCompiled,
+  applyRetention,
+  deleteDocument,
+  ingestDocument,
+  previewErasure,
+  retentionPolicies,
   saveCustomTool,
   scheduleFor,
   previewSchedule,
@@ -393,13 +398,82 @@ try {
     audited.includes('custom_tool.activated') && audited.includes('custom_tool_host.reviewed'),
     audited.join(', '))
 
+  // ---- 6. What is kept, and what can be removed ----------------------------
+  console.log('\nRetention and erasure…\n')
+  const policies = await withTenant(session, async (ctx) => retentionPolicies(ctx, await loadActor(ctx)))
+  for (const policy of policies) {
+    console.log(`  · ${policy.label.padEnd(34)} ${String(policy.keepDays).padStart(4)} days   ${policy.reason}`)
+  }
+  console.log()
+  ok('Every class Superwork keeps has a window', policies.length >= 7)
+  ok('The audit trail is kept longest of all',
+    policies.every((p) => p.dataClass === 'audit_logs' || p.keepDays < policies.find((a) => a.dataClass === 'audit_logs')!.keepDays))
+
+  const purge = await withTenant(session, (ctx) => applyRetention(ctx))
+  ok('The purge runs and reports what it removed per class', purge.length === policies.length,
+    `${purge.reduce((sum, p) => sum + p.purged, 0)} rows removed`)
+
+  // Deleting a document must take its passages and derived memories with it (§25.13).
+  const deletion = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [doc] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${`Loop policy ${Date.now()}`}, 'policy', 'internal', 'pending', true, ${session.userId})
+      RETURNING id`
+    await ingestDocument(ctx, {
+      documentId: doc!.id,
+      title: 'Loop policy',
+      docType: 'policy',
+      body: '# Cold chain\n\n## Pre-cooling\n\nReefer units are pre-cooled for 90 minutes before loading.\n',
+    })
+    const [before] = await ctx.sql<{ chunks: number }[]>`
+      SELECT count(*)::int AS chunks FROM document_chunks
+      WHERE organization_id = ${ctx.organizationId} AND document_id = ${doc!.id}`
+    const removed = await deleteDocument(ctx, actor, { documentId: doc!.id, reason: 'Superseded by the loop.' })
+    const [after] = await ctx.sql<{ chunks: number; documents: number }[]>`
+      SELECT
+        (SELECT count(*)::int FROM document_chunks
+          WHERE organization_id = ${ctx.organizationId} AND document_id = ${doc!.id}) AS chunks,
+        (SELECT count(*)::int FROM documents
+          WHERE organization_id = ${ctx.organizationId} AND id = ${doc!.id}) AS documents`
+    return { indexed: before!.chunks, removed, after: after! }
+  })
+  ok('A document is indexed into passages', deletion.indexed > 0, `${deletion.indexed} passages`)
+  ok('Deleting it takes every passage with it', deletion.after.chunks === 0 && deletion.after.documents === 0)
+  ok('And says how many went', deletion.removed.chunks === deletion.indexed, `${deletion.removed.chunks} reported`)
+
+  // An erasure says what it would do before it will do anything.
+  const erasure = await withTenant(session, async (ctx) => {
+    const [member] = await ctx.sql<{ id: string }[]>`
+      SELECT m.user_id AS id FROM memberships m
+      WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    return previewErasure(ctx, await loadActor(ctx), member!.id)
+  })
+  ok('An erasure is previewed before anything happens', erasure.lines.length >= 8, `${erasure.lines.length} record types`)
+  ok('Every line says what becomes of it and why',
+    erasure.lines.every((line) => ['delete', 'anonymise', 'keep'].includes(line.disposition) && line.basis.length > 10))
+  ok('Something is kept, with the basis stated', erasure.lines.some((line) => line.disposition === 'keep'))
+  ok('The label that outlives them is not their name', !/@/.test(erasure.subjectLabel), erasure.subjectLabel)
+
+  const withoutConfirming = await withTenant(session, async (ctx) => {
+    const { erasePerson } = await import('@superwork/core')
+    return erasePerson(ctx, await loadActor(ctx), {
+      subjectUserId: erasure.subjectUserId,
+      reason: 'The loop should not be able to do this.',
+    }).then(() => null, (error: Error) => error.message)
+  })
+  ok('Erasing needs the person to re-confirm who they are', /confirm your password/i.test(withoutConfirming ?? ''),
+    withoutConfirming ?? 'it was allowed')
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
       ? '\nThe debts loop failed.\n'
       : `\nPassed: “${workflow.name}” was described, read back, dry-run and activated; a real run stopped for a ` +
-        'person; a correction was applied and counted; and a company’s own tool went through the same gate as ' +
-        'everything else.\n',
+        'person; a correction was applied and counted; a company’s own tool went through the same gate as ' +
+        'everything else; and what Superwork keeps has a stated window, a purge that runs, and a way out for ' +
+        'one document and one person.\n',
   )
 } catch (error) {
   console.error(error)

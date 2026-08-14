@@ -22,6 +22,8 @@ export const STEP_UP_ACTIONS = {
   'custom_tool.activate': 'letting a tool call a system outside this company',
   'custom_tool_host.review': 'adding a system that tools may call',
   'kill_switch.release': 'letting the agents run again',
+  'retention.set': 'changing how long Superwork keeps something',
+  'erasure.execute': 'erasing a person from this organization',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

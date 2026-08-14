@@ -3,9 +3,9 @@
  * approve-with-edits and custom tools (§24).
  *
  * Signs in as the demo owner and walks Inbox, Meetings, CRM, the Briefing, the AI ledger,
- * the personal record, the agent studio and the API screen — asserting that each renders
- * real rows rather than an empty shell, that keyboard triage works, and that nothing threw
- * in the console on the way.
+ * the personal record, the agent studio, the API screen and the retention screen —
+ * asserting that each renders real rows rather than an empty shell, that keyboard triage
+ * works, and that nothing threw in the console on the way.
  *
  * Run against a started app:  BASE_URL=http://localhost:3000 node --import tsx scripts/browser-check.ts
  */
@@ -365,6 +365,76 @@ try {
   ok('Confirming carries out the action you asked for, without asking again',
     /erp\.northwind\.example/.test(hostsText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/step-up.png`, fullPage: true })
+
+  // ---- Retention and erasure ----------------------------------------------
+  await page.goto(`${BASE}/settings/retention`)
+  await page.waitForSelector('[data-testid="retention"]', { timeout: 15_000 })
+  const retentionRows = await page.locator('[data-testid="retention-row"]').count()
+  ok('Every class of data Superwork keeps has a stated window', retentionRows >= 7, `${retentionRows} classes`)
+  const retentionText = await page.locator('[data-testid="retention"]').innerText()
+  ok('Each window says where the number came from', /works council|GDPR|standard/i.test(retentionText))
+
+  // Shortening a window deletes things on a schedule, so it wants fresh proof of identity.
+  // The confirmation given on the tools screen may still be inside its five minutes, so
+  // this accepts either outcome — the point is that the change lands either way.
+  await page.locator('[data-testid="retention-row"] button', { hasText: 'Change' }).first().click()
+  await page.waitForSelector('[data-testid="retention-editor"]', { timeout: 15_000 })
+  const saveWindow = page.getByRole('button', { name: 'Save this window' })
+  await page.fill('#retention-days', '365')
+  ok('A window will not be changed without a reason', await saveWindow.isDisabled())
+  await page.fill('#retention-reason', 'Our DPIA sets a year for anything naming a person.')
+  expectingRefusal = true
+  await saveWindow.click()
+  const retentionStepUp = page.locator('[data-testid="step-up"]')
+  await retentionStepUp.waitFor({ timeout: 5_000 }).catch(() => undefined)
+  if (await retentionStepUp.count()) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  expectingRefusal = false
+  await page.waitForSelector('[data-testid="retention-editor"]', { state: 'detached', timeout: 20_000 })
+  await page.waitForFunction(
+    () => /365 days/.test(document.querySelector('[data-testid="retention"]')?.textContent ?? ''),
+    undefined,
+    { timeout: 20_000 },
+  )
+  const changedText = await page.locator('[data-testid="retention"]').innerText()
+  ok('A changed window is stored with the reason and who set it',
+    /365 days/.test(changedText) && /DPIA/.test(changedText) && /Set by/.test(changedText))
+
+  // Preview only. Erasure has no undo, so the check reads the list and stops — proving the
+  // list is real is the whole point, and carrying it out would prove nothing extra.
+  await page.locator('[data-testid="erasure-preview"]').click()
+  await page.waitForSelector('[data-testid="erasure-preview-result"]', { timeout: 20_000 })
+  const previewRows = await page.locator('[data-testid="erasure-preview-result"] tbody tr').count()
+  ok('An erasure is shown in full before anybody confirms it', previewRows >= 8, `${previewRows} record types`)
+  const erasureText = await page.locator('[data-testid="erasure-preview-result"]').innerText()
+  ok('It says what is deleted, what is anonymised and what is kept',
+    /deleted/.test(erasureText) && /anonymised/.test(erasureText) && /kept/.test(erasureText))
+  ok('Nothing is erased until a reason is given',
+    await page.locator('[data-testid="erasure-execute"]').isDisabled())
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/retention.png`, fullPage: true })
+
+  // ---- Deleting a document, and everything derived from it ----------------
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
+  const documentsBefore = await page.locator('[data-testid="document-row"]').count()
+  await page.locator('[data-testid="document-row"] a').first().click()
+  await page.waitForSelector('[data-testid="delete-document"]', { timeout: 15_000 })
+  await page.locator('[data-testid="delete-document"]').click()
+  await page.waitForSelector('[data-testid="delete-document-panel"]', { timeout: 15_000 })
+  const deleteText = await page.locator('[data-testid="delete-document-panel"]').innerText()
+  ok('Deleting a document says what goes with it',
+    /indexed passages/.test(deleteText) && /citations/.test(deleteText) && /memories/.test(deleteText))
+  ok('It will not delete without a reason',
+    await page.locator('[data-testid="delete-document-confirm"]').isDisabled())
+  await page.fill('#delete-reason', 'Superseded by the 2026 policy.')
+  await page.locator('[data-testid="delete-document-confirm"]').click()
+  await page.waitForURL(/\/knowledge$/, { timeout: 20_000 })
+  await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
+  const documentsAfter = await page.locator('[data-testid="document-row"]').count()
+  ok('And it is gone from the library', documentsAfter === documentsBefore - 1,
+    `${documentsBefore} → ${documentsAfter}`)
 
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {
