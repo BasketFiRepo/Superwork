@@ -409,6 +409,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['meetings'] = await seedMeetings(ctx, userIds, companyIds, projectIds)
     counts['preferences'] = await seedPreferences(ctx, userIds)
     counts['mergeCandidates'] = await seedDuplicateContact(ctx, companyIds, userIds)
+    counts['memories'] = await seedMemory(ctx, companyIds, userIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -813,6 +814,110 @@ async function seedPreferences(ctx: TenantContext, userIds: Map<string, string>)
       ON CONFLICT DO NOTHING`
     count += 1
   }
+  return count
+}
+
+/**
+ * What the assistant has noticed, and what the company has agreed (§9.3).
+ *
+ * A demo of memory has to show the state that makes it interesting, not an empty screen:
+ * something confirmed and in use, something still waiting for a person, and a case where
+ * a newer document contradicts an agreed fact — which is the whole reason contradiction is
+ * a thing a person resolves rather than something the assistant settles on its own.
+ *
+ * Every one points at a real seeded document, because a memory whose citation does not
+ * open is exactly what the constraint in 0019 exists to prevent.
+ */
+async function seedMemory(
+  ctx: TenantContext,
+  companyIds: Map<string, string>,
+  userIds: Map<string, string>,
+): Promise<number> {
+  const chunks = await ctx.sql<{ document_id: string; title: string; anchor: string; content: string }[]>`
+    SELECT ch.document_id, d.title, ch.anchor, ch.content
+    FROM document_chunks ch JOIN documents d ON d.id = ch.document_id
+    WHERE ch.organization_id = ${ctx.organizationId} AND ch.is_superseded = false
+    ORDER BY d.title, ch.ordinal`
+
+  const pick = (needle: RegExp) => chunks.find((chunk) => needle.test(chunk.content) || needle.test(chunk.title))
+  const source = (chunk: { document_id: string; title: string; anchor: string; content: string }) => ({
+    documentId: chunk.document_id,
+    anchor: chunk.anchor,
+    documentTitle: chunk.title,
+    snippet: chunk.content.slice(0, 400),
+  })
+
+  const cold = pick(/pre-?cool|reefer|cold chain/i) ?? chunks[0]
+  const liability = pick(/liability|cap/i) ?? chunks[1] ?? chunks[0]
+  if (!cold || !liability) return 0
+
+  let count = 0
+  const insert = async (fact: {
+    scope: string
+    scopeId: string | null
+    subject: string
+    predicate: string
+    object: string
+    state: 'candidate' | 'confirmed'
+    volatile: boolean
+    confidence: number
+    chunk: typeof cold
+    conflict?: boolean
+  }) => {
+    await ctx.sql`
+      INSERT INTO memory_facts (
+        organization_id, scope, scope_id, subject, predicate, object, confidence, state,
+        volatile, source_citation, conflict_flagged, confirmed_by, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${fact.scope}, ${fact.scopeId}, ${fact.subject}, ${fact.predicate},
+        ${fact.object}, ${fact.confidence}, ${fact.state}, ${fact.volatile},
+        ${ctx.sql.json(source(fact.chunk!) as never)}, ${fact.conflict ?? false},
+        ${fact.state === 'confirmed' ? userIds.get('maya')! : null}, true, ${ctx.userId}
+      )`
+    count += 1
+  }
+
+  // Agreed, in use, and the kind of thing a new joiner would otherwise have to ask about.
+  await insert({
+    scope: 'organization',
+    scopeId: null,
+    subject: 'Reefer units',
+    predicate: 'are pre-cooled for',
+    object: '90 minutes before loading',
+    confidence: 0.9,
+    state: 'confirmed',
+    volatile: true,
+    chunk: cold,
+  })
+
+  // Waiting for somebody. Noticed on a run, not yet anybody's opinion.
+  await insert({
+    scope: 'company',
+    scopeId: companyIds.get('halden') ?? null,
+    subject: 'The Halden liability cap',
+    predicate: 'is',
+    object: 'the greater of €250,000 or the fees paid in the preceding twelve months',
+    confidence: 0.7,
+    state: 'candidate',
+    volatile: false,
+    chunk: liability,
+  })
+
+  // The interesting one: a second answer to a question already settled. Nothing about this
+  // resolves itself — somebody decides, and the old answer survives either way.
+  await insert({
+    scope: 'organization',
+    scopeId: null,
+    subject: 'Reefer units',
+    predicate: 'are pre-cooled for',
+    object: '45 minutes before loading',
+    confidence: 0.6,
+    state: 'candidate',
+    volatile: true,
+    chunk: cold,
+    conflict: true,
+  })
+
   return count
 }
 

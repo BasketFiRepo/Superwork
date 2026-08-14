@@ -1,6 +1,6 @@
 import type { TenantContext } from '@superwork/db'
 import type { Actor } from '@superwork/auth'
-import { detectInjection, hybridSearch, runAggregate, type AggregateQuery } from '@superwork/core'
+import { detectInjection, hybridSearch, recallMemories, runAggregate, type AggregateQuery } from '@superwork/core'
 import type { Grounding } from '@superwork/ai'
 
 /**
@@ -139,6 +139,14 @@ export async function ground(
     injectionFindings.push({ sourceId: chunk.documentId, label, patterns: findings.map((f) => f.pattern) })
   }
 
+  // What the organization has already agreed is true (§9.3). Recall is scoped by the same
+  // permissions as retrieval — a memory is a compressed quotation of its source, so it
+  // reaches only the people who could have read that source themselves.
+  const scopeIds = [options.uiContext?.['companyId'], options.uiContext?.['projectId']].filter(
+    (value): value is string => typeof value === 'string',
+  )
+  const recalled = await recallMemories(ctx, actor, { scopeIds })
+
   const [me] = await ctx.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${actor.userId}`
 
   const grounding: Grounding = {
@@ -162,6 +170,18 @@ export async function ground(
       isSuperseded: c.isSuperseded,
     })),
     noAnswer: search.noAnswer,
+    memories: recalled.map((memory) => ({
+      id: memory.id,
+      subject: memory.subject,
+      predicate: memory.predicate,
+      object: memory.object,
+      scopeLabel: memory.scopeLabel,
+      volatile: memory.volatile,
+      stale: memory.stale,
+      agreedOn: memory.validFrom.toISOString(),
+      documentTitle: memory.citation?.documentTitle ?? 'a document',
+      anchor: memory.citation?.anchor ?? '',
+    })),
     untrusted,
     meetingActionItems,
   }
@@ -171,8 +191,12 @@ export async function ground(
     containsUntrusted: untrusted.length > 0,
     injectionFindings,
     aggregatesRun: ran,
-    retrievalNote: search.noAnswer
-      ? 'Nothing in company memory clears the relevance threshold for this question.'
-      : `${search.chunks.length} passages retrieved from company memory.`,
+    retrievalNote:
+      (search.noAnswer
+        ? 'Nothing in company memory clears the relevance threshold for this question.'
+        : `${search.chunks.length} passages retrieved from company memory.`) +
+      (recalled.length > 0
+        ? ` ${recalled.length} agreed ${recalled.length === 1 ? 'fact' : 'facts'} recalled.`
+        : ''),
   }
 }

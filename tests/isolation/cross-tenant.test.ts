@@ -157,9 +157,15 @@ describe('repository layer', () => {
 
   it('memory never crosses organizations', async () => {
     await withTenant({ organizationId: orgA.organizationId, userId: orgA.ownerId, timezone: 'UTC' }, async (ctx) => {
+      // A confirmed fact names who agreed and what it came from (0019). This is about
+      // tenant isolation, so the row is built the way a real one is rather than minimally.
       await ctx.sql`
-        INSERT INTO memory_facts (organization_id, scope, subject, predicate, object, state, created_by)
-        VALUES (${ctx.organizationId}, 'organization', 'Org A', 'prefers', 'email', 'confirmed', ${orgA.ownerId})`
+        INSERT INTO memory_facts (
+          organization_id, scope, subject, predicate, object, state, confirmed_by, source_citation, created_by
+        ) VALUES (
+          ${ctx.organizationId}, 'organization', 'Org A', 'prefers', 'email', 'confirmed', ${orgA.ownerId},
+          ${ctx.sql.json({ documentId: orgA.documentId, anchor: '#preferences' })}, ${orgA.ownerId}
+        )`
     })
     await withTenant({ organizationId: orgB.organizationId, userId: orgB.ownerId, timezone: 'UTC' }, async (ctx) => {
       const rows = await ctx.sql<{ subject: string }[]>`SELECT subject FROM memory_facts`

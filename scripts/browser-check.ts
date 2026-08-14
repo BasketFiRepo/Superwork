@@ -415,6 +415,47 @@ try {
     await page.locator('[data-testid="erasure-execute"]').isDisabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/retention.png`, fullPage: true })
 
+  // ---- What the assistant remembers ---------------------------------------
+  // The demo seed has answered questions from documents, so there is something waiting.
+  await page.goto(`${BASE}/knowledge/memory`)
+  await page.waitForSelector('[data-testid="memory-candidates"]', { timeout: 15_000 })
+  const memoryIntro = await page.locator('main').innerText()
+  ok('Memory explains the arrangement it enforces',
+    /Nothing is used until a person agrees/i.test(memoryIntro) && /supersed/i.test(memoryIntro))
+
+  const candidates = await page.locator('[data-testid="memory-candidate"]').count()
+  ok('It lists what the assistant noticed', candidates > 0, `${candidates} waiting`)
+  const firstCandidate = await page.locator('[data-testid="memory-candidate"]').first().innerText()
+  ok('Every proposal shows the passage it came from and is not in use yet',
+    /›|Freight|policy|Amendment|MSA|handbook|standard/i.test(firstCandidate))
+
+  await page.locator('[data-testid="memory-confirm"]').first().click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="memory-fact"]').length > 0,
+    undefined,
+    { timeout: 20_000 },
+  )
+  const confirmedText = await page.locator('[data-testid="memory-confirmed"]').innerText()
+  ok('Agreeing moves it into what the organization takes to be true', /agreed fact/i.test(confirmedText))
+  ok('And records who agreed and when', /\d{4}-\d{2}-\d{2}/.test(confirmedText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/memory.png`, fullPage: true })
+
+  // Correcting keeps the old answer. The control refuses until it is told why.
+  const confirmedPanel = page.locator('[data-testid="memory-confirmed"]')
+  await confirmedPanel.locator('[data-testid="memory-fact-correct"]').first().click()
+  await confirmedPanel.locator('[data-testid="memory-editor"]').waitFor({ timeout: 15_000 })
+  ok('A correction will not be saved without a reason',
+    await confirmedPanel.locator('[data-testid="memory-correct-confirm"]').isDisabled())
+  await page.fill('#memory-object', 'twenty minutes')
+  await page.fill('#memory-reason', 'Renegotiated in the 2026 handling standard.')
+  await confirmedPanel.locator('[data-testid="memory-correct-confirm"]').click()
+  await page.waitForFunction(
+    () => /twenty minutes/.test(document.querySelector('[data-testid="memory-confirmed"]')?.textContent ?? ''),
+    undefined,
+    { timeout: 20_000 },
+  )
+  ok('The correction replaces what is recalled, without deleting the old answer', true)
+
   // ---- Legal holds --------------------------------------------------------
   await page.goto(`${BASE}/settings/holds`)
   await page.waitForSelector('[data-testid="holds"]', { timeout: 15_000 })

@@ -30,6 +30,23 @@ export interface Grounding {
     isSuperseded: boolean
   }[]
   noAnswer: boolean
+  /**
+   * What the organization has already agreed is true, recalled for this actor and already
+   * filtered by the permissions of the documents it came from (§9.3). Every entry carries
+   * its source, because a remembered fact still has to be arguable with.
+   */
+  memories?: {
+    id: string
+    subject: string
+    predicate: string
+    object: string
+    scopeLabel: string
+    volatile: boolean
+    stale: boolean
+    agreedOn: string
+    documentTitle: string
+    anchor: string
+  }[]
   untrusted: { sourceId: string; label: string; flagged: boolean; patterns: string[] }[]
   /** Confirmed action items from a meeting the user is looking at, awaiting task creation. */
   meetingActionItems?: {
@@ -65,6 +82,20 @@ export interface AnswerDraft {
   text: string
   citations: { claim: string; knowledgeIndex: number }[]
   usedAggregates: string[]
+  /**
+   * Facts this run noticed and thinks are worth keeping. Proposals only: each one is
+   * refused unless `knowledgeIndex` resolves to a passage the run actually retrieved, and
+   * none of them is recalled until a person agrees with it (§9.3).
+   */
+  memories?: {
+    scope: 'organization'
+    subject: string
+    predicate: string
+    object: string
+    confidence: number
+    volatile: boolean
+    knowledgeIndex: number
+  }[]
 }
 
 export interface CriticVerdict {
@@ -262,6 +293,24 @@ export function answerFor(request: string, g: Grounding): AnswerDraft {
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
 
+  // What is already agreed comes before what has to be read again. A recalled fact is
+  // stated with when it was agreed rather than flatly, and a volatile one that has gone
+  // stale says so — the alternative is quoting a number from last spring as though it
+  // were checked this morning.
+  const recalled = (g.memories ?? []).filter((memory) => {
+    const words = `${memory.subject} ${memory.predicate} ${memory.object}`.toLowerCase()
+    return [...terms].filter((term) => words.includes(term)).length >= floor
+  })
+  for (const memory of recalled.slice(0, 2)) {
+    const when = memory.agreedOn.slice(0, 10)
+    lines.push(
+      memory.stale
+        ? `${memory.subject} ${memory.predicate} ${memory.object} — agreed on ${when}, and this is the kind of ` +
+          'figure that moves, so it is worth checking again.'
+        : `${memory.subject} ${memory.predicate} ${memory.object} (agreed on ${when}, from ${memory.documentTitle}).`,
+    )
+  }
+
   if (scored.length === 0) {
     return {
       text:
@@ -285,7 +334,52 @@ export function answerFor(request: string, g: Grounding): AnswerDraft {
     lines.push("I found sources but nothing in them answers this directly, so I'd rather flag that than paraphrase around it.")
   }
 
-  return { text: lines.join(' '), citations, usedAggregates }
+  return { text: lines.join(' '), citations, usedAggregates, memories: proposeFrom(scored, recalled) }
+}
+
+/** A declarative statement, in the shape a fact can be stored as. */
+const STATEMENT = /^(.{3,70}?)\s+(is|are|must be|will be|shall be|has|have|includes?|requires?)\s+(.{3,200}?)\.?$/i
+/** Anything with a figure, a currency or a date in it is a fact that moves. */
+const MOVES = /\d|\b(per cent|percent|%|days?|weeks?|months?|hours?|EUR|USD|GBP|£|\$|€)\b/i
+
+/**
+ * Turns cited sentences into proposed facts, deterministically.
+ *
+ * This is the mock brain's version of "what did I learn", and it is on purpose the most
+ * conservative thing that is still useful: only sentences that are already being cited,
+ * only ones that read as a plain declarative statement, and nothing that repeats what was
+ * just recalled. A model in live mode fills the same shape; the runtime refuses anything
+ * whose citation does not resolve either way, so neither is trusted with the source.
+ */
+function proposeFrom(
+  scored: { chunk: Grounding['knowledge'][number]; index: number; sentence: string; score: number }[],
+  recalled: NonNullable<Grounding['memories']>,
+): NonNullable<AnswerDraft['memories']> {
+  const known = new Set(recalled.map((m) => `${m.subject} ${m.predicate}`.trim().toLowerCase()))
+  const proposals: NonNullable<AnswerDraft['memories']> = []
+
+  for (const candidate of scored) {
+    // A superseded passage is not something to start believing.
+    if (candidate.chunk.isSuperseded) continue
+    const match = STATEMENT.exec(candidate.sentence.trim())
+    if (!match) continue
+    const [, subject, predicate, object] = match
+    if (!subject || !predicate || !object) continue
+    if (known.has(`${subject} ${predicate}`.trim().toLowerCase())) continue
+
+    proposals.push({
+      scope: 'organization',
+      subject: subject.trim(),
+      predicate: predicate.trim().toLowerCase(),
+      object: object.trim(),
+      // The overlap that made this the answering sentence, capped: a rule-based match is
+      // never evidence of certainty, and a person has to agree with it regardless.
+      confidence: Math.min(0.5 + candidate.score * 0.1, 0.8),
+      volatile: MOVES.test(object),
+      knowledgeIndex: candidate.index,
+    })
+  }
+  return proposals.slice(0, 3)
 }
 
 const STOPWORDS = new Set(

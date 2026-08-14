@@ -81,6 +81,15 @@ export const RETENTION_CLASSES: RetentionClass[] = [
     defaultDays: { works_council: 90, gdpr: 90, standard: 180 },
   },
   {
+    key: 'memories',
+    label: 'Forgotten and superseded facts',
+    description:
+      'What the organization used to believe, and stopped. Facts currently agreed are never ' +
+      'purged by age — deleting those would quietly make the assistant know less.',
+    minimumDays: 30,
+    defaultDays: { works_council: 180, gdpr: 365, standard: 730 },
+  },
+  {
     key: 'audit_logs',
     label: 'Audit trail',
     description:
@@ -376,6 +385,23 @@ function classScopes(ctx: TenantContext, entry: RetentionClass, cutoff: Date): C
           source: sql`FROM api_requests q LEFT JOIN api_keys k ON k.id = q.api_key_id
             WHERE q.organization_id = ${org} AND q.occurred_at < ${cutoff}`,
           hold: heldBy(sql, org, sql`q.occurred_at`, sql`k.principal_user_id = ANY(h.custodian_ids)`),
+        },
+      ]
+    case 'memories':
+      return [
+        {
+          exec: sql,
+          table: 'memory_facts',
+          id: sql`f.id`,
+          // Only what the organization has stopped believing. A confirmed fact is current
+          // knowledge, not history, and ageing it out would make the assistant quietly
+          // dumber on a schedule nobody associated with that outcome.
+          source: sql`FROM memory_facts f
+            WHERE f.organization_id = ${org} AND f.state IN ('forgotten', 'superseded')
+              AND coalesce(f.valid_to, f.created_at) < ${cutoff}`,
+          // No person to attribute a fact to — it is something the organization knows.
+          // A hold over the period holds all of them, as with insights.
+          hold: heldBy(sql, org, sql`coalesce(f.valid_to, f.created_at)`, null),
         },
       ]
     case 'audit_logs': {

@@ -33,9 +33,14 @@ import {
   reviewHost,
   saveCompiled,
   applyRetention,
+  confirmMemory,
+  correctMemory,
   deleteDocument,
+  getRun,
   ingestDocument,
   listHolds,
+  listMemories,
+  recallMemories,
   placeHold,
   previewErasure,
   releaseHold,
@@ -527,6 +532,88 @@ try {
     hold.released ?? 'it was allowed')
   ok('And the hold is on the record while it stands', hold.all.some((entry) => entry.id === hold.placed.id && entry.live))
 
+  // ---- What it learns, and who decides ------------------------------------
+  console.log('\nThe assistant notices something, and a person decides…\n')
+
+  const askAbout = async (question: string): Promise<string> => {
+    const { startRun, bufferedEvents } = await import('@superwork/agent')
+    const started = await startRun(session, { request: question, mode: 'ask', uiContext: { route: '/agent' } })
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      if (bufferedEvents(started.runId).some((event) => event.type === 'run.completed')) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    return withTenant(session, async (ctx) => (await getRun(ctx, started.runId)).summary ?? '')
+  }
+
+  const memoryDoc = await withTenant(session, async (ctx) => {
+    const [doc] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'Reefer handling standard', 'policy', 'internal', 'pending', true, ${session.userId})
+      RETURNING id`
+    await ingestDocument(ctx, {
+      documentId: doc!.id,
+      title: 'Reefer handling standard',
+      docType: 'policy',
+      body: '# Reefer handling\n\n## Pre-cooling\n\nReefer units are pre-cooled for 90 minutes before loading.\n',
+    })
+    return doc!.id
+  })
+
+  const firstAnswer = await askAbout('How long are reefer units pre-cooled before loading?')
+  const noticed = await withTenant(session, async (ctx) => listMemories(ctx, await loadActor(ctx)))
+  ok('Answering from a document leaves something it thinks it learned', noticed.candidates.length > 0,
+    noticed.candidates[0] ? `${noticed.candidates[0].subject} ${noticed.candidates[0].predicate} ${noticed.candidates[0].object}` : 'nothing')
+  ok('Every candidate carries the passage it came from',
+    noticed.candidates.every((fact) => Boolean(fact.citation?.documentId && fact.citation.anchor)))
+  // The demo organization already has facts somebody agreed with, so the claim is not
+  // "nothing is recalled" — it is that none of what was *just noticed* is.
+  const inUse = await withTenant(session, async (ctx) => recallMemories(ctx, await loadActor(ctx)))
+  ok('Nothing it merely noticed is in use yet',
+    noticed.candidates.every((fact) => !inUse.some((recalled) => recalled.id === fact.id)),
+    `${inUse.length} already agreed, none of them from this run`)
+  ok('The first answer had to read the document to say it', firstAnswer.length > 0)
+
+  const candidate = noticed.candidates[0]!
+  const agreed = await withTenant(session, async (ctx) => confirmMemory(ctx, await loadActor(ctx), candidate.id))
+  ok('A person agrees, and is named on it', agreed.state === 'confirmed' && Boolean(agreed.confirmedByName),
+    agreed.confirmedByName ?? 'nobody')
+
+  const secondAnswer = await askAbout('How long are reefer units pre-cooled before loading?')
+  ok('Asking again answers from what was agreed, and says when it was agreed',
+    /agreed on \d{4}-\d{2}-\d{2}/i.test(secondAnswer), secondAnswer.slice(0, 110))
+
+  const corrected = await withTenant(session, async (ctx) =>
+    correctMemory(ctx, await loadActor(ctx), {
+      id: agreed.id,
+      object: '20 minutes',
+      reason: 'Renegotiated in the 2026 handling standard.',
+    }),
+  )
+  const history = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ state: string; object: string; valid_to: Date | null }[]>`
+      SELECT state, object, valid_to FROM memory_facts
+      WHERE organization_id = ${ctx.organizationId} AND id = ${agreed.id}`
+    return row!
+  })
+  ok('Correcting it supersedes the old answer rather than overwriting it',
+    history.state === 'superseded' && corrected.supersedesId === agreed.id)
+  ok('The old answer is still there, closed off at the moment it stopped being true',
+    history.object === agreed.object && history.valid_to !== null,
+    `“${history.object}” until ${history.valid_to?.toISOString().slice(0, 10)}`)
+
+  const forgotten = await withTenant(session, async (ctx) => {
+    const removed = await deleteDocument(ctx, await loadActor(ctx), {
+      documentId: memoryDoc,
+      reason: 'Withdrawn from the handbook.',
+    })
+    return { removed, recalled: await recallMemories(ctx, await loadActor(ctx)) }
+  })
+  ok('Deleting the source takes what was learned from it', forgotten.removed.memories > 0,
+    `${forgotten.removed.memories} forgotten`)
+  ok('And it stops being recalled',
+    !forgotten.recalled.some((fact) => fact.citation?.documentId === memoryDoc))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -534,7 +621,8 @@ try {
       : `\nPassed: “${workflow.name}” was described, read back, dry-run and activated; a real run stopped for a ` +
         'person; a correction was applied and counted; a company’s own tool went through the same gate as ' +
         'everything else; what Superwork keeps has a stated window, a purge that runs, and a way out for one ' +
-        'document and one person; and a matter can stop all of it, in the open.\n',
+        'document and one person; a matter can stop all of it, in the open; and the assistant learned one ' +
+        'thing, was agreed with, was corrected, and forgot it when its source went.\n',
   )
 } catch (error) {
   console.error(error)

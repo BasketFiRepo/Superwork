@@ -13,7 +13,8 @@ and depth) and Phase 4 (enterprise scale) of the build specification, end to end
 zero external credentials** — then the three things the build itself had listed as not yet
 true (natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools),
 and then the controls the interface had been claiming and the product did not have: step-up
-authentication, retention and erasure, and legal holds.
+authentication, retention and erasure, legal holds, and the agent memory whose table had
+been designed since Phase 0 with nothing ever written to it.
 
 ---
 
@@ -35,14 +36,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 605 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 619 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -371,6 +372,48 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## What the assistant remembers
+
+`memory_facts` had existed since migration 0006 with a complete design and no writer. Two
+live paths read it — `deleteDocument` counted the memories a deletion forgets and
+`purgeDocument` forgot them — so both reported zero about an empty table, and this README's
+promise that deleting a document takes "any memories the assistant formed from it" was true
+only in the way an empty set makes anything true.
+
+An assistant that cannot remember re-derives the same answer from the same document every
+time. An assistant that remembers badly is worse than one that does not. The design is
+entirely about which of those you get:
+
+- **Nothing is remembered without a source.** Every fact carries the passage it came from,
+  enforced by a `CHECK`, so a remembered fact is a claim somebody can open and argue with.
+- **The source is resolved, never taken.** A proposal names a passage *by its index into the
+  run's own grounding*. A model that invents a document id cannot store one; one that cites a
+  passage the run never retrieved is refused with a reason rather than kept at low confidence.
+- **Nothing is recalled until a person agrees.** Candidates are what the assistant noticed;
+  confirmed facts are what somebody stood behind. `confirmed_by` is NOT NULL and an agent
+  actor is refused outright — the failure mode being prevented is one wrong inference quietly
+  becoming the foundation of every later answer.
+- **Recall is bound by the permissions of the source.** A memory is a compressed quotation, so
+  it is gated by the document it quotes — the same sensitivity ceiling and
+  `document_permissions` predicate the retrieval layer applies. Two people can open the memory
+  screen and see different lists.
+- **Two confirmed answers to one question are unstorable.** A partial unique index means
+  changing what is known is necessarily a supersession: the old answer is closed off with a
+  date, the new one points back at it, and who changed their mind is on the record.
+- **A contradiction is surfaced, not resolved.** A candidate that disagrees with an agreed
+  fact is shown beside it; confirming it directly is refused, and the refusal names the path
+  that is open.
+- **Forgetting is a state, not a delete**, because "we used to believe this" is a question
+  somebody will ask about an answer from last month.
+- **Volatile facts carry their age.** Anything with a figure or a duration in it is recalled
+  with the date it was agreed, and past 90 days is marked worth checking rather than silently
+  retired.
+
+Confirmed facts are never purged by age — only forgotten and superseded ones, under a
+`memories` retention class. A fact scoped to one person is deleted on erasure.
+
+**Knowledge → What it remembers**. See ADR 0018.
+
 ## Retention and erasure
 
 Migration 0009 made `audit_logs` append-only and, in its own header, named the exception:
@@ -485,7 +528,12 @@ telling the custodian tips them off, is not expressible here and has to be taken
 product under a court order. Erasure is an admin action only — there is no self-service
 route, because verifying that a request came from the person it names is a problem this
 product does not solve, and a self-service endpoint with a weak identity check is worse than
-none. The scale
+none. Memory extraction is only as good as its rule: the mock brain notices a fact only when
+a cited sentence reads as a plain "X is Y" statement, so anything phrased another way is not
+noticed at all. Seven tables are dead schema that nothing reads or writes — `agent_messages`,
+`email_accounts`, `events`, `ingestion_jobs`, `invitations`, `saved_views` and
+`task_watchers` — left in place rather than dropped, and listed here so nobody has to
+rediscover them. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -521,7 +569,11 @@ disabled with the reason named. Nothing in the interface pretends to work.
   row.
 - **Deleting a document deletes what was derived from it.** The chunks, embeddings, citations
   and memories go in the same transaction, and the count of each is reported to the caller and
-  written to the audit trail (§25.13).
+  written to the audit trail (§25.13). The memory count is now a real number rather than a
+  fact about an empty table.
+- **The assistant cannot decide what the company believes.** Nothing it notices is recalled
+  until a person agrees; `confirmed_by` is NOT NULL and a non-human actor is refused. Recall
+  never reaches past the permissions of the document a fact was drawn from.
 - **Everything kept has a stated window and a purge that runs.** Seven classes, each with a
   floor no configuration can go under, swept daily by the worker, with what it removed written
   back where anyone can see it.

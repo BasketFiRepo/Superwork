@@ -58,6 +58,7 @@ export function Sidebar({
       title: 'Know',
       items: [
         { href: '/knowledge', label: 'Knowledge' },
+        { href: '/knowledge/memory', label: 'What it remembers' },
         { href: '/agent', label: 'Agent' },
       ],
     },
