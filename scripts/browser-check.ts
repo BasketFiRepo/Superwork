@@ -150,6 +150,25 @@ try {
   )
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/ledger.png`, fullPage: true })
 
+  // ---- Watchers on their own cadences -------------------------------------
+  await page.goto(`${BASE}/insights`)
+  await page.waitForSelector('[data-testid="watcher-schedules"]', { timeout: 15_000 })
+  const watcherRows = await page.locator('[data-testid="watcher-row"]').count()
+  ok('Every watcher shows the cadence it runs on', watcherRows >= 6, `${watcherRows} watchers`)
+  const watcherText = await page.locator('[data-testid="watcher-schedules"]').innerText()
+  ok('The cadences differ from one another', /every weekday at 08:00/i.test(watcherText) && /every Monday/i.test(watcherText))
+  ok('An interval reads as an interval rather than a truncated list', /every 4 hours/i.test(watcherText))
+
+  await page.locator('[data-testid="watcher-row"] button', { hasText: 'Re-time' }).first().click()
+  await page.waitForSelector('[data-testid="watcher-editor"]', { timeout: 15_000 })
+  await page.fill('#watcher-cron', '@daily')
+  await page.getByRole('button', { name: 'Show me the next three' }).click()
+  await page.waitForSelector('[data-testid="watcher-preview"]', { timeout: 15_000 })
+  ok('Re-timing one previews before it saves',
+    /every day at 00:00/i.test(await page.locator('[data-testid="watcher-preview"]').innerText()))
+  await page.getByRole('button', { name: 'Cancel' }).first().click()
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/watchers.png`, fullPage: true })
+
   // ---- Personal record ----------------------------------------------------
   await page.goto(`${BASE}/me`)
   await page.waitForSelector('[data-testid="tracked"]', { timeout: 15_000 })

@@ -539,6 +539,8 @@ export async function runDueWorkflows(session: RunSession, now = new Date()): Pr
   const outcome: SweepOutcome = { claimed: claimed.length, ran: 0, skipped: 0, awaitingApproval: 0, failed: 0, notes: [] }
 
   for (const schedule of claimed) {
+    // A workflow schedule always addresses a row; the constraint guarantees it.
+    if (!schedule.targetId) continue
     if (schedule.skipped > 0 && schedule.skippedReason) {
       outcome.skipped += schedule.skipped
       outcome.notes.push(`${schedule.targetId}: ${schedule.skippedReason}`)

@@ -25,7 +25,7 @@ pnpm install
 cp .env.example .env          # then set DATABASE_URL and SESSION_SECRET
 pnpm db:reset && pnpm db:seed # schema + the Northwind Logistics demo organization
 pnpm dev                      # http://localhost:3000
-pnpm worker                   # outbox dispatch + watchers, in a second terminal
+pnpm worker                   # outbox, schedules and watchers, in a second terminal
 ```
 
 Sign in as `maya@northwind.example` / `superwork`.
@@ -34,7 +34,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 558 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 571 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -86,7 +86,7 @@ index-only scan — evidence about query shape, and explicitly not a 100,000-use
 ```
 apps/
   web                 Next.js app — UI, route handlers, SSE agent stream
-  worker              Outbox dispatcher, workflow schedules, watchers, email recall window
+  worker              Outbox dispatcher, workflow and watcher schedules, email recall window
 packages/
   config              Env schema (fails fast), model routing by task class, plan limits
   db                  Migrations, RLS policies, TenantContext, demo seed
@@ -278,6 +278,20 @@ dates. What cannot be honoured is refused by name with what to do instead: `@reb
 "whenever the process happens to start", which is not a promise about a time; `@fortnightly`
 is not one of the aliases; `L`, `W` and `#` are not supported. A cron expression that would
 never fire is never stored as a schedule.
+
+**Watchers keep their own time too.** Every watcher has declared a `cadence` since the
+framework was written and nothing read it — the worker ran all six every fifteen minutes,
+so a watcher that says it looks for stale threads at 08:00 on weekdays was looking
+ninety-six times a day, and a weekly knowledge-gap check cost the same as an hourly one.
+Now the declaration is the behaviour: each watcher gets a schedule row from its own cadence,
+evaluated in the organization's timezone, and only what is due runs. `/insights` shows the
+six with what each looks for, when it last looked, when it looks next, and whether it has
+been auto-muted for noise — an admin can re-time one, or stop it, with the same preview the
+workflow editor uses. A watcher's declared cadence is a default rather than an override, so
+a re-timing survives the next deploy. Muting keeps the row and says why it did not run: a
+watcher that has silently stopped is indistinguishable from one that has nothing to say.
+Their catch-up policy is `skip_missed` — a missed read is not worth replaying, because the
+next firing sees the same world.
 
 **Approve with edits** (`/approvals`) — the fields a tool marked editable can be corrected
 in place on the card. The edited plan is then re-gated on the server: arguments re-validated,

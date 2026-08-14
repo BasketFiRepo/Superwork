@@ -13,6 +13,9 @@
  *   3. admin-authored HTTP tools (§22) — a tenant's own tool, through the same registry,
  *      the same policy engine, the same approval flow and the same audit trail.
  *
+ * It also covers the watchers, which now run on the cadence each declares rather than all
+ * at once on a fixed timer.
+ *
  * Run with:  pnpm loop:phase5
  */
 import { closePools, withTenant } from '@superwork/db'
@@ -36,7 +39,16 @@ import {
   trustLedger,
 } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
-import { checkCapacity, continueWorkflowAfterApproval, runDueWorkflows, runWorkflow, simulateWorkflow } from '@superwork/agent'
+import {
+  checkCapacity,
+  continueWorkflowAfterApproval,
+  runDueWatchers,
+  runDueWorkflows,
+  runWorkflow,
+  simulateWorkflow,
+  watcherSchedules,
+  WATCHERS,
+} from '@superwork/agent'
 import { demoSession } from '@superwork/agent/evals/harness'
 
 const ok = (label: string, condition: boolean, detail = '') => {
@@ -263,6 +275,37 @@ try {
   ok('A firing is held back while the last batch waits for a person',
     sweep.awaitingApproval === 0 || !held.allow,
     held.reason || 'nothing outstanding')
+
+  // ---- 4c. Watchers keep their own time ------------------------------------
+  console.log('\nThe watchers, on the cadence each one declares…\n')
+  const watchers = await withTenant(session, (ctx) => watcherSchedules(ctx))
+  for (const watcher of watchers) {
+    console.log(
+      `  · ${watcher.title.padEnd(40)} ${watcher.description.padEnd(38)} next ${watcher.nextRunAt?.toISOString() ?? '—'}`,
+    )
+  }
+  console.log()
+  ok('Every watcher has a schedule', watchers.length === WATCHERS.length, `${watchers.length}`)
+  ok('It is the cadence the watcher declares in its own source',
+    watchers.every((watcher) => watcher.cron === watcher.declaredCron))
+  ok('They are not all the same cadence', new Set(watchers.map((w) => w.cron)).size > 1,
+    `${new Set(watchers.map((w) => w.cron)).size} distinct cadences`)
+
+  const quiet = await runDueWatchers(session)
+  ok('Nothing runs when nothing is due', quiet.claimed === 0)
+
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE schedules SET next_run_at = now() - interval '1 minute'
+      WHERE organization_id = ${ctx.organizationId} AND kind = 'watcher' AND target_key = 'overdue_slipping'`
+  })
+  const watched = await runDueWatchers(session)
+  console.log(
+    `  Swept: ${watched.claimed} due · ran ${watched.ran.join(', ') || 'none'} · ` +
+      `${watched.created} new, ${watched.deduped} already known\n`,
+  )
+  ok('The one that was due is the one that ran', watched.ran.length === 1 && watched.ran[0] === 'overdue_slipping')
+  ok('And it is not run twice for the same firing', (await runDueWatchers(session)).ran.length === 0)
 
   // ---- 5. Custom tools -----------------------------------------------------
   console.log('\nTeaching Superwork to call one of the company’s own systems…\n')

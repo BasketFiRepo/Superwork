@@ -85,3 +85,32 @@ description and the next three firings as real instants, and the save button sta
 until they have been shown. It is the same rule as the dry run, one level down: you see what
 it will do before it can do it.
 
+
+## Addendum — watchers (2026-08-14)
+
+Every watcher has declared a `cadence` since the framework was written. Nothing read it: the
+worker ran all six on a fixed fifteen-minute timer. A watcher whose source says
+`cadence: '0 8 * * 1-5'` and which actually runs ninety-six times a day is lying in its own
+declaration, and it makes a weekly check cost what an hourly one costs.
+
+**The declaration is the schedule.** `ensureWatcherSchedules` gives each watcher a row from
+its own cadence on first sweep, and the worker runs only what is due.
+
+**Watchers are keyed by name, not by row.** A workflow is a row and a watcher is code, so
+`schedules.target_key` addresses it. Migration 0015 adds the unique index for that column
+— the 0014 index deliberately covered `target_id` only — and a `CHECK` that a schedule
+carries exactly one of the two. Without it a row could hold a `target_id` and a `target_key`
+that disagree, satisfy both indexes, and mean nothing.
+
+**The declared cadence is a default, not an override.** Seeding is `onlyIfMissing`, so an
+admin who re-times a watcher does not have it reset on the next deploy — and the screen can
+say "changed from its default of `0 9 * * 1`" because it still knows what the source says.
+
+**`skip_missed`, not `run_once`.** A missed read is not worth replaying: the next firing
+sees the same world, and the insight would dedupe anyway. Workflows default the other way
+because a workflow's firing is an action, not an observation.
+
+**A muted watcher keeps its schedule.** Auto-muting (§9.2) is a statement about noise, not
+an instruction to forget the watcher exists. It stays on the clock, is not run, and the
+sweep reports why — because a watcher that quietly stopped looks exactly like one with
+nothing to report.

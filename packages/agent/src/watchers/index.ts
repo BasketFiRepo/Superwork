@@ -1,6 +1,16 @@
+import { randomUUID } from 'node:crypto'
 import { withTenant, type TenantContext, asJson } from '@superwork/db'
 import { loadActor, type Actor } from '@superwork/auth'
-import { runAggregate } from '@superwork/core'
+import {
+  claimDueSchedules,
+  describeCron,
+  listSchedules,
+  runAggregate,
+  scheduleForKey,
+  setScheduleEnabled,
+  upsertSchedule,
+  type ScheduleView,
+} from '@superwork/core'
 import type { RunSession } from '../runtime.js'
 
 /**
@@ -10,6 +20,10 @@ import type { RunSession } from '../runtime.js'
  * (deterministic first), a dedupe key and — mandatorily — a recommended action with the
  * tool call pre-filled. An insight with no evidence must not render; an insight with no
  * next step is noise and the database rejects it.
+ *
+ * The cadence is the schedule. A watcher that says it looks at 08:00 on weekdays is run at
+ * 08:00 on weekdays — the declaration and the behaviour are the same fact, evaluated in the
+ * organization's timezone, and an admin can re-time one without a deploy.
  */
 
 export interface InsightDraft {
@@ -351,4 +365,137 @@ export async function mutedWatchers(ctx: TenantContext): Promise<string[]> {
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
     GROUP BY watcher HAVING count(*) >= 20`
   return rows.filter((r) => r.dismissed / r.total > 0.7).map((r) => r.watcher)
+}
+
+// ---------------------------------------------------------------------------
+// The clock
+// ---------------------------------------------------------------------------
+
+export interface WatcherScheduleView extends ScheduleView {
+  key: string
+  title: string
+  /** The cadence declared in code, for comparison with what is actually stored. */
+  declaredCron: string
+  description: string
+  muted: boolean
+}
+
+/**
+ * Gives every watcher a schedule row from the cadence it declares, once. An existing row is
+ * left alone — the declared cadence is a default, not an override, so an admin who re-times
+ * a watcher does not have it silently reset on the next deploy.
+ */
+export async function ensureWatcherSchedules(ctx: TenantContext): Promise<number> {
+  let created = 0
+  for (const watcher of WATCHERS) {
+    const before = await scheduleForKey(ctx, 'watcher', watcher.key)
+    if (before) continue
+    await upsertSchedule(ctx, {
+      kind: 'watcher',
+      targetKey: watcher.key,
+      cron: watcher.cadence,
+      timezone: ctx.timezone,
+      // A watcher is a read: missing one is not an event worth replaying five times, and
+      // the next firing sees the same world anyway.
+      catchUpPolicy: 'skip_missed',
+      onlyIfMissing: true,
+    })
+    created += 1
+  }
+  return created
+}
+
+/** Every watcher with its schedule, for the screen that shows what is watching. */
+export async function watcherSchedules(ctx: TenantContext): Promise<WatcherScheduleView[]> {
+  await ensureWatcherSchedules(ctx)
+  const rows = await listSchedules(ctx, 'watcher')
+  const muted = await mutedWatchers(ctx)
+  const byKey = new Map(rows.map((row) => [row.targetKey, row]))
+
+  return WATCHERS.map((watcher) => {
+    const schedule = byKey.get(watcher.key)!
+    return {
+      ...schedule,
+      key: watcher.key,
+      title: watcher.title,
+      declaredCron: watcher.cadence,
+      description: describeCron(schedule.cron, schedule.timezone),
+      muted: muted.includes(watcher.key),
+    }
+  })
+}
+
+export interface WatcherSweep {
+  claimed: number
+  ran: string[]
+  created: number
+  deduped: number
+  suppressed: number
+  skipped: string[]
+}
+
+/**
+ * Runs the watchers whose cadence is due (§9.1). Called by the worker.
+ *
+ * A muted watcher keeps its schedule but is not run, and says so — muting is a statement
+ * about noise, not an instruction to forget the watcher exists.
+ */
+export async function runDueWatchers(session: RunSession, now = new Date()): Promise<WatcherSweep> {
+  const traceId = randomUUID()
+  const sweep: WatcherSweep = { claimed: 0, ran: [], created: 0, deduped: 0, suppressed: 0, skipped: [] }
+
+  const { claimed, muted } = await withTenant({ ...session, traceId }, async (ctx) => {
+    await ensureWatcherSchedules(ctx)
+    return { claimed: await claimDueSchedules(ctx, 'watcher', 20, now), muted: await mutedWatchers(ctx) }
+  })
+  sweep.claimed = claimed.length
+
+  const keys: string[] = []
+  for (const schedule of claimed) {
+    if (!schedule.targetKey) continue
+    if (schedule.skipped > 0 && schedule.skippedReason) {
+      sweep.skipped.push(`${schedule.targetKey}: ${schedule.skippedReason}`)
+    }
+    if (schedule.runs === 0) continue
+    if (muted.includes(schedule.targetKey)) {
+      sweep.skipped.push(`${schedule.targetKey}: muted — more than 70% of its insights were dismissed.`)
+      continue
+    }
+    keys.push(schedule.targetKey)
+  }
+
+  if (keys.length === 0) return sweep
+
+  // One pass over the due watchers, so the daily insight cap is applied across them
+  // together rather than once per watcher.
+  const result = await runWatchers(session, keys)
+  sweep.ran = keys
+  sweep.created = result.created
+  sweep.deduped = result.deduped
+  sweep.suppressed = result.suppressed
+  return sweep
+}
+
+/** Re-times a watcher, or stops it. Admin-only; the caller checks that. */
+export async function setWatcherSchedule(
+  ctx: TenantContext,
+  input: { key: string; cron?: string; enabled?: boolean },
+): Promise<ScheduleView | null> {
+  const watcher = WATCHERS.find((entry) => entry.key === input.key)
+  if (!watcher) throw new Error(`No watcher named "${input.key}".`)
+  await ensureWatcherSchedules(ctx)
+
+  if (input.enabled !== undefined && input.cron === undefined) {
+    await setScheduleEnabled(ctx, 'watcher', input.key, input.enabled)
+    return scheduleForKey(ctx, 'watcher', input.key)
+  }
+  const current = await scheduleForKey(ctx, 'watcher', input.key)
+  return upsertSchedule(ctx, {
+    kind: 'watcher',
+    targetKey: input.key,
+    cron: input.cron ?? watcher.cadence,
+    timezone: current?.timezone ?? ctx.timezone,
+    enabled: input.enabled ?? current?.enabled ?? true,
+    catchUpPolicy: current?.catchUpPolicy ?? 'skip_missed',
+  })
 }

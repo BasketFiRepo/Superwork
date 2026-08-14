@@ -1,6 +1,6 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
 import { claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
-import { evict, generateDueBriefings, generateDueDigests, runDueWorkflows, runWatchers } from '@superwork/agent'
+import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
 /**
@@ -8,7 +8,7 @@ import { emailProvider } from '@superwork/integrations'
  *
  * Every job here must be observable rather than silent:
  *   • dispatch the transactional outbox, honouring the email recall window (§2.4, §5.7)
- *   • run the read-only watchers that produce insights (§9.1)
+ *   • run each read-only watcher on the cadence it declares (§9.1)
  *   • fire the workflow schedules that are due (§10.2)
  *   • generate briefings, deliver the nudge ladder, write agent digests
  *
@@ -17,12 +17,12 @@ import { emailProvider } from '@superwork/integrations'
  */
 
 const POLL_MS = Number(process.env['WORKER_POLL_MS'] ?? 5000)
-const WATCHER_MS = Number(process.env['WORKER_WATCHER_MS'] ?? 15 * 60_000)
 const BRIEFING_MS = Number(process.env['WORKER_BRIEFING_MS'] ?? 30 * 60_000)
 const DIGEST_MS = Number(process.env['WORKER_DIGEST_MS'] ?? 60 * 60_000)
 const NUDGE_MS = Number(process.env['WORKER_NUDGE_MS'] ?? 5 * 60_000)
 // Schedules are minute-granular, so the sweep has to be too. Claiming is cheap: one
-// indexed query per organization that returns nothing almost every time.
+// indexed query per organization that returns nothing almost every time. Workflows and
+// watchers share the sweep because they share the mechanism.
 const SCHEDULE_MS = Number(process.env['WORKER_SCHEDULE_MS'] ?? 60_000)
 
 let stopping = false
@@ -105,11 +105,7 @@ async function dispatchEmail(
 }
 
 async function main(): Promise<void> {
-  console.log(
-    `Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms · ` +
-      `watchers every ${WATCHER_MS}ms`,
-  )
-  let lastWatcherRun = 0
+  console.log(`Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms`)
   let lastBriefingRun = 0
   let lastDigestRun = 0
   let lastNudgeRun = 0
@@ -125,23 +121,6 @@ async function main(): Promise<void> {
         if (dispatched > 0) console.log(`[outbox] ${org.id}: dispatched ${dispatched}`)
       } catch (error) {
         console.error(`[outbox] ${org.id} failed:`, error instanceof Error ? error.message : error)
-      }
-    }
-
-    if (Date.now() - lastWatcherRun > WATCHER_MS) {
-      lastWatcherRun = Date.now()
-      for (const org of organizations) {
-        if (!org.ownerId) continue
-        try {
-          const result = await runWatchers({ organizationId: org.id, userId: org.ownerId, timezone: org.timezone })
-          if (result.created || result.suppressed) {
-            console.log(
-              `[watchers] ${org.id}: ${result.created} new, ${result.deduped} deduped, ${result.suppressed} held back by the daily cap`,
-            )
-          }
-        } catch (error) {
-          console.error(`[watchers] ${org.id} failed:`, error instanceof Error ? error.message : error)
-        }
       }
     }
 
@@ -186,19 +165,29 @@ async function main(): Promise<void> {
       }
     }
 
-    // Workflow schedules (§10.2). A firing that did not happen — late, or held back because
-    // the last batch is still waiting for a person — is logged with its reason; a workflow
-    // that has quietly stopped working is worse than one that visibly stopped.
+    // Schedules (§9.1, §10.2). A firing that did not happen — late, muted, or held back
+    // because the last batch is still waiting for a person — is logged with its reason; an
+    // automation that has quietly stopped working is worse than one that visibly stopped.
     if (Date.now() - lastScheduleSweep > SCHEDULE_MS) {
       lastScheduleSweep = Date.now()
       for (const org of organizations) {
         if (!org.ownerId) continue
+        const session = { organizationId: org.id, userId: org.ownerId, timezone: org.timezone }
         try {
-          const sweep = await runDueWorkflows({
-            organizationId: org.id,
-            userId: org.ownerId,
-            timezone: org.timezone,
-          })
+          const watchers = await runDueWatchers(session)
+          if (watchers.claimed > 0) {
+            console.log(
+              `[watchers] ${org.id}: ${watchers.claimed} due · ran ${watchers.ran.join(', ') || 'none'} · ` +
+                `${watchers.created} new, ${watchers.deduped} already known, ${watchers.suppressed} held back by the daily cap`,
+            )
+            for (const note of watchers.skipped) console.log(`[watchers] ${org.id}: ${note}`)
+          }
+        } catch (error) {
+          console.error(`[watchers] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+
+        try {
+          const sweep = await runDueWorkflows(session)
           if (sweep.claimed > 0) {
             console.log(
               `[workflows] ${org.id}: ${sweep.claimed} due · ${sweep.ran} ran ` +
