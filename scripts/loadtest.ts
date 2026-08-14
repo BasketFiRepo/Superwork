@@ -149,8 +149,16 @@ async function build(): Promise<{ organizationId: string; ownerId: string; userI
       if (index % 50 === 0) process.stdout.write(`\r  documents: ${index}`)
     }
     process.stdout.write(`\r  documents: ${scale.documents}\n`)
-    await ctx.sql`ANALYZE`
   })
+
+  // ANALYZE has to run as the role that owns the tables. Inside `withTenant` it runs as
+  // `superwork_app`, which owns nothing — so PostgreSQL skipped every table with a warning
+  // and left the planner working from whatever statistics happened to exist. That made the
+  // timings below measurements of a stale plan, which is the one thing this harness must
+  // not report. Run it as the migration role, over the tables the generator just filled.
+  await adminSql().unsafe(
+    'ANALYZE users, memberships, departments, tasks, documents, document_chunks, notifications, agent_runs, organizations',
+  )
 
   return { organizationId, ownerId, userIds }
 }
