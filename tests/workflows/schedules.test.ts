@@ -5,14 +5,20 @@ import { compileWorkflow } from '@superwork/ai'
 import {
   activateWorkflow,
   claimDueSchedules,
+  CRON_ALIASES,
+  cronProblem,
   describeCron,
   getWorkflow,
   nextOccurrence,
+  normalizeCron,
   occurrencesBetween,
   parseCron,
+  previewSchedule,
   saveCompiled,
   scheduleFor,
+  setWorkflowSchedule,
   setWorkflowStatus,
+  ValidationError,
 } from '@superwork/core'
 import { runDueWorkflows, simulateWorkflow } from '@superwork/agent'
 import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixtures.js'
@@ -86,6 +92,56 @@ describe('cron, in a timezone', () => {
   it('describes itself in words, because a cron string is not an explanation', () => {
     expect(describeCron('0 9 * * 1-5', 'Europe/London')).toBe('every weekday at 09:00 Europe/London')
     expect(describeCron('30 6 * * *', 'UTC')).toBe('every day at 06:30 UTC')
+  })
+})
+
+describe('the traditional aliases', () => {
+  it('expands every one of them to the fields it stands for', () => {
+    expect(normalizeCron('@daily')).toBe('0 0 * * *')
+    expect(normalizeCron('@midnight')).toBe('0 0 * * *')
+    expect(normalizeCron('@hourly')).toBe('0 * * * *')
+    expect(normalizeCron('@weekly')).toBe('0 0 * * 0')
+    expect(normalizeCron('@monthly')).toBe('0 0 1 * *')
+    expect(normalizeCron('@yearly')).toBe('0 0 1 1 *')
+    expect(normalizeCron('@annually')).toBe('0 0 1 1 *')
+    // Case and surrounding space are not a reason to reject somebody's schedule.
+    expect(normalizeCron('  @Daily  ')).toBe('0 0 * * *')
+  })
+
+  it('schedules from an alias exactly as it would from the fields', () => {
+    for (const [alias, fields] of Object.entries(CRON_ALIASES)) {
+      const after = new Date('2026-08-14T05:00:00Z')
+      expect(nextOccurrence(alias, 'Europe/London', after)?.toISOString()).toBe(
+        nextOccurrence(fields, 'Europe/London', after)?.toISOString(),
+      )
+    }
+  })
+
+  it('fires an alias in the company timezone, not UTC', () => {
+    // Midnight in London during BST is 23:00 UTC the day before.
+    const next = nextOccurrence('@daily', 'Europe/London', new Date('2026-07-01T12:00:00Z'))
+    expect(next?.toISOString()).toBe('2026-07-01T23:00:00.000Z')
+  })
+
+  it('describes an alias in the same words as the fields', () => {
+    expect(describeCron('@daily', 'UTC')).toBe('every day at 00:00 UTC')
+    expect(describeCron('@weekly', 'UTC')).toBe('every Sunday at 00:00 UTC')
+    expect(describeCron('@monthly', 'UTC')).toBe('on day 1 of the month at 00:00 UTC')
+    expect(describeCron('@yearly', 'UTC')).toBe('on 1 January at 00:00 UTC')
+    expect(describeCron('@hourly', 'UTC')).toBe('hourly at :00 UTC')
+  })
+
+  it('refuses @reboot by name, because it is not a promise about a time', () => {
+    expect(cronProblem('@reboot')).toMatch(/not a schedule/i)
+    expect(parseCron('@reboot')).toBeNull()
+  })
+
+  it('names what is wrong rather than failing a regex', () => {
+    expect(cronProblem('@fortnightly')).toMatch(/not one of the aliases/i)
+    expect(cronProblem('0 9 * *')).toMatch(/five fields/i)
+    expect(cronProblem('0 9 L * *')).toMatch(/L`, `W` and `#` do not/i)
+    expect(cronProblem('@daily')).toBeNull()
+    expect(cronProblem('0 9 * * 1-5')).toBeNull()
   })
 })
 
@@ -288,5 +344,82 @@ describe('the sweep', () => {
     )
     expect(capacity.allow).toBe(false)
     expect(capacity.reason).toMatch(/waiting for somebody to approve/i)
+  })
+})
+
+describe('changing when it runs', () => {
+  async function activeWorkflow(sentence: string): Promise<string> {
+    const workflowId = await withTenant(session, async (ctx) => {
+      const saved = await saveCompiled(ctx, await loadActor(ctx), {
+        description: sentence,
+        compiled: compileWorkflow(sentence),
+      })
+      return saved.id
+    })
+    await simulateWorkflow(session, { workflowId, windowDays: 7 })
+    await withTenant(session, async (ctx) =>
+      activateWorkflow(ctx, await loadActor(ctx), { workflowId, ownerUserId: org.ownerId }),
+    )
+    return workflowId
+  }
+
+  it('shows the next firings before anything is committed to a clock', () => {
+    const preview = previewSchedule('@daily', 'Europe/London')
+    expect(preview.cron).toBe('0 0 * * *')
+    expect(preview.description).toBe('every day at 00:00 Europe/London')
+    expect(preview.next).toHaveLength(3)
+    expect(preview.next[0]!.getTime()).toBeGreaterThan(Date.now())
+    // Consecutive, a day apart.
+    expect(preview.next[1]!.getTime() - preview.next[0]!.getTime()).toBe(86_400_000)
+  })
+
+  it('refuses to preview a schedule it cannot honour', () => {
+    expect(() => previewSchedule('@reboot', 'UTC')).toThrow(/not a schedule/i)
+    expect(() => previewSchedule('every tuesday-ish', 'UTC')).toThrow()
+  })
+
+  it('accepts an alias and stores the fields it stands for', async () => {
+    const workflowId = await activeWorkflow('Each morning at 8, find overdue tasks and create a task.')
+    const schedule = await withTenant(session, async (ctx) =>
+      setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@daily' }),
+    )
+    expect(schedule?.cron).toBe('0 0 * * *')
+    expect(schedule?.timezone).toBe('Europe/London')
+    expect(schedule?.nextRunAt?.getTime()).toBeGreaterThan(Date.now())
+  })
+
+  it('records the catch-up policy the owner chose', async () => {
+    const workflowId = await activeWorkflow('Each morning at 12, find overdue tasks and create a task.')
+    const schedule = await withTenant(session, async (ctx) =>
+      setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@hourly', catchUpPolicy: 'skip_missed' }),
+    )
+    expect(schedule?.cron).toBe('0 * * * *')
+    expect(schedule?.catchUpPolicy).toBe('skip_missed')
+  })
+
+  it('refuses a schedule that would never fire, rather than storing it', async () => {
+    const workflowId = await activeWorkflow('Each morning at 13, find overdue tasks and create a task.')
+    await expect(
+      withTenant(session, async (ctx) =>
+        setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@reboot' }),
+      ),
+    ).rejects.toBeInstanceOf(ValidationError)
+    const schedule = await withTenant(session, (ctx) => scheduleFor(ctx, 'workflow', workflowId))
+    // Still the schedule activation gave it, untouched.
+    expect(schedule?.cron).toBe('0 13 * * *')
+  })
+
+  it('will not put a draft on a clock', async () => {
+    const sentence = 'Each morning at 14, find overdue tasks and create a task.'
+    const workflowId = await withTenant(session, async (ctx) => {
+      const saved = await saveCompiled(ctx, await loadActor(ctx), {
+        description: sentence,
+        compiled: compileWorkflow(sentence),
+      })
+      return saved.id
+    })
+    await expect(
+      withTenant(session, async (ctx) => setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@daily' })),
+    ).rejects.toThrow(/only an active workflow has a clock/i)
   })
 })

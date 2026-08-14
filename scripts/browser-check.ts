@@ -32,8 +32,13 @@ page.on('console', (message: ConsoleMessage) => {
   if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) errors.push(message.text())
 })
 page.on('pageerror', (error) => errors.push(String(error)))
+// A check that deliberately exercises a refusal will see the 4xx that proves it worked.
+// Those are announced rather than counted as breakage.
+let expectingRefusal = false
 page.on('response', (response) => {
-  if (response.status() >= 400) errors.push(`${response.status()} ${response.url()}`)
+  if (response.status() >= 400 && !(expectingRefusal && response.status() === 400)) {
+    errors.push(`${response.status()} ${response.url()}`)
+  }
 })
 
 try {
@@ -249,6 +254,35 @@ try {
   const scheduleText = await page.locator('[data-testid="workflow-schedule"]').innerText()
   ok('Activating puts it on the clock', /every weekday at 09:00/i.test(scheduleText), scheduleText.split('\n')[0])
   ok('The schedule names the timezone it is evaluated in', /Europe\/London|UTC/.test(scheduleText))
+
+  // An alias, typed by a person, through the same rules as anything else.
+  await page.locator('[data-testid="change-schedule"]').click()
+  await page.waitForSelector('[data-testid="schedule-editor"]', { timeout: 15_000 })
+  expectingRefusal = true
+  await page.fill('#schedule-cron', '@reboot')
+  await page.getByRole('button', { name: 'Show me the next three' }).click()
+  const refusal = page.locator('[data-testid="schedule-editor"] [role="alert"]')
+  await refusal.waitFor({ timeout: 15_000 }).catch(() => undefined)
+  const refusalText = (await refusal.count()) ? await refusal.innerText() : '(no message shown)'
+  ok('A schedule that is not a promise about a time is refused with the reason',
+    /not a schedule/i.test(refusalText), refusalText.slice(0, 90))
+  expectingRefusal = false
+
+  await page.fill('#schedule-cron', '@daily')
+  await page.getByRole('button', { name: 'Show me the next three' }).click()
+  await page.waitForSelector('[data-testid="schedule-preview"]', { timeout: 15_000 })
+  const previewText = await page.locator('[data-testid="schedule-preview"]').innerText()
+  ok('@daily previews as three real dates before anything is saved',
+    /every day at 00:00/i.test(previewText) && previewText.split('\n').length >= 4, previewText.split('\n')[0])
+
+  await page.locator('[data-testid="save-schedule"]').click()
+  await page.waitForSelector('[data-testid="schedule-editor"]', { state: 'detached', timeout: 15_000 })
+  await page.waitForFunction(
+    () => /every day at 00:00/i.test(document.querySelector('[data-testid="workflow-schedule"]')?.textContent ?? ''),
+    undefined,
+    { timeout: 15_000 },
+  )
+  ok('Saving an alias stores a schedule described the same way as any other', true)
   await page.getByRole('button', { name: 'Run it now' }).click()
   // The panel already holds the dry-run result, so wait for the text to change rather
   // than for the element to appear.

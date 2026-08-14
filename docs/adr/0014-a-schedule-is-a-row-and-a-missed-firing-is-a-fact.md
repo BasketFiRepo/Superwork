@@ -61,6 +61,27 @@ than only in a log.
   than unbounded and silent.
 - Schedules are minute-granular and the worker sweeps every minute by default
   (`WORKER_SCHEDULE_MS`). Sub-minute schedules are not supported and are not wanted.
-- The cron grammar is the five standard fields with `*`, lists, ranges and steps. Nothing
-  parses `@daily`, `L`, `W` or `#`; a spec that does not parse is refused when the schedule
-  is written rather than silently never firing.
+- The cron grammar is the five standard fields with `*`, lists, ranges and steps, plus the
+  traditional aliases. Nothing parses `L`, `W` or `#`; a spec that does not parse is refused
+  when the schedule is written rather than silently never firing.
+
+## Addendum — aliases (2026-08-14)
+
+`@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`, `@yearly` and `@annually` are
+**normalized to five fields on the way in**, at `upsertSchedule`. One grammar reaches the
+database however it was typed, so a query against `schedules.cron`, the scheduler and the
+description all deal with the same thing, and there is no second code path to keep correct.
+
+`@reboot` is **refused by name**. A schedule row is a promise about wall-clock time, and
+"whenever the process happens to start" is not one — accepting it would mean a workflow
+that fires on deploys, which is not what anybody typing it into this box wants.
+
+Rejection explains itself. `cronProblem()` returns the reason and what to do instead —
+not one of the aliases, wrong number of fields, an unsupported construct — because the
+alternative is a field that goes red and a person who guesses.
+
+**Nothing reaches a clock without a preview.** `previewSchedule()` returns the English
+description and the next three firings as real instants, and the save button stays disabled
+until they have been shown. It is the same rule as the dry run, one level down: you see what
+it will do before it can do it.
+

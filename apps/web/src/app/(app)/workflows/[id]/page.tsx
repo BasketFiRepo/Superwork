@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
+import { ScheduleEditor } from '@/components/ScheduleEditor'
 import { WorkflowControls } from '@/components/WorkflowControls'
 import { WorkflowGraphView, type CompiledView } from '@/components/WorkflowGraphView'
 
@@ -55,7 +56,7 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
         </section>
       ) : null}
 
-      {workflow.scheduleCron ? (
+      {workflow.status === 'active' || workflow.scheduleCron ? (
         <section className="panel" data-testid="workflow-schedule">
           <div className="panel-header">
             <h2>On the clock</h2>
@@ -63,10 +64,11 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
               {workflow.scheduleEnabled ? 'firing' : 'stopped'}
             </span>
           </div>
-          <div className="panel-body stack stack-3">
+          <div className="panel-body stack stack-5">
             <p className="prose" style={{ margin: 0 }}>
-              Runs {describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')} — the company's
-              timezone, not the server's, and the same on the morning the clocks change.
+              {workflow.scheduleCron
+                ? `Runs ${describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')} — the company's timezone, not the server's, and the same on the morning the clocks change.`
+                : 'It runs when somebody runs it. Give it a schedule and the worker will fire it.'}
             </p>
             <div className="row wrap small secondary">
               <span>
@@ -82,6 +84,20 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
                 <span>Last skipped firing: {workflow.lastSkippedReason}</span>
               </div>
             ) : null}
+
+            {workflow.status === 'active' ? (
+              <ScheduleEditor
+                workflowId={workflow.id}
+                cron={workflow.scheduleCron}
+                timezone={workflow.scheduleTimezone ?? 'UTC'}
+                catchUpPolicy={workflow.scheduleCatchUp ?? 'run_once'}
+                enabled={workflow.scheduleEnabled ?? false}
+              />
+            ) : (
+              <p className="small muted" style={{ margin: 0 }}>
+                Only an active workflow has a clock. Dry-run this version and activate it to choose when it runs.
+              </p>
+            )}
           </div>
         </section>
       ) : null}

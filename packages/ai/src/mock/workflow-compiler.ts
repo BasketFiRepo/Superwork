@@ -48,7 +48,7 @@ export interface CompiledWorkflow {
   unsupported: string | null
 }
 
-const SCHEDULE = /\b(every|each)\s+(weekday|day|monday|tuesday|wednesday|thursday|friday|week|morning)\b/i
+const SCHEDULE = /\b(every|each)\s+(weekday|day|hour|month|monday|tuesday|wednesday|thursday|friday|week|morning)\b/i
 const TIME = /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i
 const QUIET = /\b(no reply|not replied|gone quiet|went quiet|no response|unanswered)\b/i
 const OVERDUE = /\b(overdue|past due|late|slipping)\b/i
@@ -65,6 +65,11 @@ const SEND = /\b(send|email them|reply to them)\b/i
 const DAYS = /\b(\d+)\s*(day|days|business days|working days)\b/i
 
 function cron(text: string): { spec: string; description: string } {
+  // "Every hour" and "every month" have no time of day to read, so they are matched first.
+  if (/\b(every|each)\s+hour\b|\bhourly\b/i.test(text)) {
+    return { spec: '0 * * * *', description: 'every hour, on the hour' }
+  }
+
   const time = TIME.exec(text)
   let hour = 9
   if (time) {
@@ -73,13 +78,18 @@ function cron(text: string): { spec: string; description: string } {
     if (meridiem === 'pm' && hour < 12) hour += 12
     if (meridiem === 'am' && hour === 12) hour = 0
   }
+  const at = `${String(hour).padStart(2, '0')}:00`
+
+  if (/\b(every|each)\s+month\b|\bmonthly\b/i.test(text)) {
+    return { spec: `0 ${hour} 1 * *`, description: `on the first of the month at ${at}` }
+  }
   if (/\bweekday|monday to friday\b/i.test(text)) {
-    return { spec: `0 ${hour} * * 1-5`, description: `every weekday at ${String(hour).padStart(2, '0')}:00` }
+    return { spec: `0 ${hour} * * 1-5`, description: `every weekday at ${at}` }
   }
   if (/\bweek\b/i.test(text) && !/\bweekday\b/i.test(text)) {
-    return { spec: `0 ${hour} * * 1`, description: `every Monday at ${String(hour).padStart(2, '0')}:00` }
+    return { spec: `0 ${hour} * * 1`, description: `every Monday at ${at}` }
   }
-  return { spec: `0 ${hour} * * *`, description: `every day at ${String(hour).padStart(2, '0')}:00` }
+  return { spec: `0 ${hour} * * *`, description: `every day at ${at}` }
 }
 
 /**
@@ -101,7 +111,9 @@ export function compileWorkflow(description: string): CompiledWorkflow {
   // What it looks for.
   const days = DAYS.exec(text)
   const threshold = days ? Number(days[1]) : null
-  let query: { ref: string; label: string; subject: string }
+  // `qualifier` is how the subject is narrowed, in the readback's own words. An overdue
+  // task is already narrowed by the word "overdue"; a customer thread is not.
+  let query: { ref: string; label: string; subject: string; qualifier: string }
   if (QUIET.test(text)) {
     query = {
       ref: 'stale_customer_threads',
@@ -109,9 +121,10 @@ export function compileWorkflow(description: string): CompiledWorkflow {
         ? `Find customer threads with no reply for ${threshold} days`
         : 'Find customer threads past their reply SLA',
       subject: 'customer thread',
+      qualifier: threshold ? ` with no reply for ${threshold} days` : ' past its agreed reply time',
     }
   } else if (OVERDUE.test(text)) {
-    query = { ref: 'tasks_overdue', label: 'Find overdue tasks', subject: 'overdue task' }
+    query = { ref: 'tasks_overdue', label: 'Find overdue tasks', subject: 'overdue task', qualifier: '' }
   } else if (RENEWAL.test(text)) {
     return {
       name: title(text),
@@ -230,7 +243,7 @@ export function compileWorkflow(description: string): CompiledWorkflow {
   return {
     name: title(text),
     graph: { trigger, nodes },
-    readback: readbackFor({ trigger, nodes }, query.subject, threshold),
+    readback: readbackFor({ trigger, nodes }, query.subject, query.qualifier),
     risks,
     unsupported: null,
   }
@@ -246,7 +259,7 @@ function title(text: string): string {
  * so it has to describe the graph that will actually run, including the approval step the
  * compiler inserted whether or not it was asked for.
  */
-export function readbackFor(graph: WorkflowGraph, subject: string, thresholdDays: number | null): string {
+export function readbackFor(graph: WorkflowGraph, subject: string, qualifier = ''): string {
   const parts: string[] = []
   parts.push(
     graph.trigger.kind === 'schedule'
@@ -254,12 +267,10 @@ export function readbackFor(graph: WorkflowGraph, subject: string, thresholdDays
       : 'When somebody runs it,',
   )
   const query = graph.nodes.find((node) => node.type === 'query')
-  parts.push(
-    `for every ${subject}${thresholdDays ? ` with no reply for ${thresholdDays} days` : ' past its agreed reply time'}`,
-  )
+  parts.push(`for every ${subject}${qualifier}`)
   const actions = graph.nodes.filter((node) => node.type === 'action')
   const described = actions.map((node) =>
-    node.ref === 'create_task@v1' ? 'create a dated task for the account owner' : 'draft a reply',
+    node.ref === 'create_task@v1' ? 'create a dated task for its owner' : 'draft a reply',
   )
   parts.push(described.join(' and '))
 

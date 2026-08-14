@@ -34,7 +34,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 546 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 558 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -269,6 +269,16 @@ workflow's page. Before a scheduled run starts, its unfinished runs are counted 
 cannot pile up while nobody decides them, and a run held back appears in the run list with
 its reason. See ADR 0014.
 
+**And you can say when, in the words people use.** The schedule editor on a workflow's page
+takes the traditional aliases — `@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`,
+`@yearly`, `@annually` — or five cron fields. An alias is expanded on the way in, so one
+grammar reaches the database however it was typed, and the same English description is shown
+either way. Nothing is committed to a clock without showing the next three firings as real
+dates. What cannot be honoured is refused by name with what to do instead: `@reboot` is
+"whenever the process happens to start", which is not a promise about a time; `@fortnightly`
+is not one of the aliases; `L`, `W` and `#` are not supported. A cron expression that would
+never fire is never stored as a schedule.
+
 **Approve with edits** (`/approvals`) — the fields a tool marked editable can be corrected
 in place on the card. The edited plan is then re-gated on the server: arguments re-validated,
 permissions re-checked, previews re-rendered, and if the edit made the plan riskier than the
@@ -300,8 +310,10 @@ around it — review, permissions, previews, approvals, audit — is real. Every
 ships as a simulated implementation too, and connecting one says so on the row. The workflow
 compiler understands the sentences it understands and refuses the rest; new shapes need a
 named query in the safe query layer, not a cleverer prompt. The cron grammar is the five
-standard fields — nothing parses `@daily` or `L`, and a spec that does not parse is refused
-when the schedule is written rather than silently never firing. The scale budgets
+standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
+that does not parse is refused when the schedule is written rather than silently never
+firing. Schedules are minute-granular; sub-minute schedules are not supported. The scale
+budgets
 are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.

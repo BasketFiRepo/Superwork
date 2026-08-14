@@ -31,6 +31,8 @@ import {
   saveCompiled,
   saveCustomTool,
   scheduleFor,
+  previewSchedule,
+  setWorkflowSchedule,
   trustLedger,
 } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -198,6 +200,35 @@ try {
     schedule?.timezone ?? '—')
   ok('It knows when it next fires', Boolean(schedule?.nextRunAt && schedule.nextRunAt.getTime() > Date.now()),
     schedule?.nextRunAt?.toISOString() ?? '—')
+
+  // An alias is a schedule like any other: it is expanded on the way in and the fields it
+  // stands for are what the scheduler sees.
+  const previewed = previewSchedule('@daily', session.timezone)
+  console.log(`  Preview of @daily: ${previewed.description}`)
+  for (const instant of previewed.next) console.log(`    · ${instant.toISOString()}`)
+  console.log()
+  ok('@daily previews before it is committed to anything', previewed.next.length === 3, previewed.cron)
+
+  const rescheduled = await withTenant(session, async (ctx) =>
+    setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@daily', catchUpPolicy: 'run_once' }),
+  )
+  ok('An alias is stored as the fields it stands for', rescheduled?.cron === '0 0 * * *', rescheduled?.cron ?? '—')
+  ok('And it is described in the same English as any other schedule',
+    describeCron(rescheduled!.cron, rescheduled!.timezone) === 'every day at 00:00 Europe/London',
+    describeCron(rescheduled!.cron, rescheduled!.timezone))
+
+  const refusedCron = await withTenant(session, async (ctx) =>
+    setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: '@reboot' }).then(
+      () => null,
+      (error: Error) => error.message,
+    ),
+  )
+  ok('A spec that is not a promise about a time is refused by name', Boolean(refusedCron), refusedCron ?? 'it was allowed')
+
+  // Put it back on the schedule the sentence asked for.
+  await withTenant(session, async (ctx) =>
+    setWorkflowSchedule(ctx, await loadActor(ctx), { workflowId, cron: schedule!.cron }),
+  )
 
   // Everything else in the demo organization comes off the clock so this sweep is about
   // one workflow, and this one is made due a minute ago.

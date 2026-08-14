@@ -1,5 +1,6 @@
 import type { TenantContext } from '@superwork/db'
-import { nextOccurrence, occurrencesBetween } from '../cron.js'
+import { cronProblem, describeCron, nextOccurrence, normalizeCron, occurrencesBetween } from '../cron.js'
+import { ValidationError } from '../errors.js'
 import { writeAudit } from '../audit.js'
 
 /**
@@ -78,14 +79,21 @@ export async function upsertSchedule(
     enabled?: boolean
   },
 ): Promise<ScheduleView | null> {
-  const next = nextOccurrence(input.cron, input.timezone)
+  // Aliases are normalized here, so one grammar reaches the database however it was
+  // written. A spec that cannot be parsed is refused with the reason rather than stored as
+  // a schedule that silently never fires.
+  const problem = cronProblem(input.cron)
+  if (problem) throw new ValidationError(problem)
+  const cron = normalizeCron(input.cron)
+
+  const next = nextOccurrence(cron, input.timezone)
   if (!next) return null
 
   await ctx.sql`
     INSERT INTO schedules (
       organization_id, kind, target_id, cron, timezone, enabled, catch_up_policy, next_run_at, created_by
     ) VALUES (
-      ${ctx.organizationId}, ${input.kind}, ${input.targetId}, ${input.cron}, ${input.timezone},
+      ${ctx.organizationId}, ${input.kind}, ${input.targetId}, ${cron}, ${input.timezone},
       ${input.enabled ?? true}, ${input.catchUpPolicy ?? 'run_once'}, ${next}, ${ctx.userId}
     )
     ON CONFLICT (organization_id, kind, target_id) WHERE deleted_at IS NULL AND target_id IS NOT NULL
@@ -98,7 +106,7 @@ export async function upsertSchedule(
     action: 'schedule.set',
     entityType: input.kind,
     entityId: input.targetId,
-    after: { cron: input.cron, timezone: input.timezone, nextRunAt: next.toISOString() },
+    after: { cron, timezone: input.timezone, nextRunAt: next.toISOString() },
   })
   return scheduleFor(ctx, input.kind, input.targetId)
 }
@@ -210,4 +218,32 @@ export async function claimDueSchedules(
     })
   }
   return claimed
+}
+
+export interface SchedulePreview {
+  cron: string
+  description: string
+  /** The next few firings, as instants. Shown before anything is saved. */
+  next: Date[]
+}
+
+/**
+ * What a schedule would do, before it is one. Somebody about to put an automation on a
+ * clock should see the first firings, not a cron string they have to trust — the same
+ * reason a workflow cannot be activated without a dry run.
+ */
+export function previewSchedule(spec: string, timeZone: string, count = 3): SchedulePreview {
+  const problem = cronProblem(spec)
+  if (problem) throw new ValidationError(problem)
+  const cron = normalizeCron(spec)
+
+  const next: Date[] = []
+  let cursor = new Date()
+  for (let index = 0; index < count; index += 1) {
+    const occurrence = nextOccurrence(cron, timeZone, cursor)
+    if (!occurrence) break
+    next.push(occurrence)
+    cursor = occurrence
+  }
+  return { cron, description: describeCron(cron, timeZone), next }
 }

@@ -5,7 +5,7 @@ import type { CompiledWorkflow, DetectedRisk, WorkflowGraph } from '@superwork/a
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { describeCron } from '../cron.js'
-import { setScheduleEnabled, upsertSchedule, type ScheduleView } from './schedules.js'
+import { setScheduleEnabled, upsertSchedule, type CatchUpPolicy, type ScheduleView } from './schedules.js'
 
 /**
  * Workflows (§10).
@@ -40,6 +40,7 @@ export interface WorkflowView {
   scheduleCron: string | null
   scheduleTimezone: string | null
   scheduleEnabled: boolean | null
+  scheduleCatchUp: string | null
   nextRunAt: Date | null
   lastRunAt: Date | null
   skippedTotal: number | null
@@ -54,6 +55,7 @@ const SELECT_WORKFLOW = (ctx: TenantContext) => ctx.sql`
          w.max_concurrent_runs AS "maxConcurrentRuns", w.daily_action_cap AS "dailyActionCap",
          w.created_at AS "createdAt",
          s.cron AS "scheduleCron", s.timezone AS "scheduleTimezone", s.enabled AS "scheduleEnabled",
+         s.catch_up_policy AS "scheduleCatchUp",
          s.next_run_at AS "nextRunAt", s.last_run_at AS "lastRunAt",
          s.skipped_total AS "skippedTotal", s.last_skipped_reason AS "lastSkippedReason"
   FROM workflows w
@@ -368,4 +370,49 @@ export async function listWorkflowRuns(
     out.push({ ...run, steps })
   }
   return out
+}
+
+/**
+ * Changes when an active workflow runs (§10.2).
+ *
+ * Only an active workflow has a clock, so this is the one place a person can re-time
+ * something that is already running without going back through the dry run — the *when*
+ * changed, not the *what*. Changing what it does is `saveCompiled`, and that returns it to
+ * draft and takes it off the clock.
+ */
+export async function setWorkflowSchedule(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { workflowId: string; cron: string; timezone?: string; catchUpPolicy?: CatchUpPolicy; enabled?: boolean },
+): Promise<ScheduleView | null> {
+  guard(ctx, actor, 'workflow:activate')
+  const workflow = await getWorkflow(ctx, actor, input.workflowId)
+  if (workflow.status !== 'active') {
+    throw new ValidationError(
+      'Only an active workflow has a clock. Dry-run this version and activate it, then choose when it runs.',
+    )
+  }
+
+  const schedule = await upsertSchedule(ctx, {
+    kind: 'workflow',
+    targetId: input.workflowId,
+    cron: input.cron,
+    timezone: input.timezone ?? workflow.scheduleTimezone ?? ctx.timezone,
+    ...(input.catchUpPolicy ? { catchUpPolicy: input.catchUpPolicy } : {}),
+    ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+  })
+
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'rescheduled',
+    entityType: 'workflow',
+    entityId: input.workflowId,
+    entityLabel: workflow.name,
+    summary: schedule
+      ? `${workflow.name} now runs ${describeCron(schedule.cron, schedule.timezone)}.`
+      : `${workflow.name} has no next firing for that schedule.`,
+  })
+  return schedule
 }
