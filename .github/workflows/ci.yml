@@ -45,11 +45,11 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -138,11 +138,11 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -196,9 +196,13 @@ jobs:
           SHOT_DIR: screenshots
 
       # The screenshots are the evidence for anything the check asserts about a screen.
+      #
+      # v6 is the first major of this one that runs on Node 24 — its v5 is still Node 20,
+      # unlike checkout and setup-node, where v5 made the jump. Bumping it in step with the
+      # others would have left the deprecation warning in place and looked like a fix.
       - name: Keep the screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screens
           path: screenshots
