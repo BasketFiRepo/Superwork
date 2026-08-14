@@ -134,6 +134,17 @@ const PLAN: {
       WHERE organization_id = ${ctx.organizationId} AND principal_user_id = ${id}`),
   },
   {
+    table: 'memory_facts',
+    label: 'Facts the assistant holds about them',
+    disposition: 'delete',
+    basis:
+      'A remembered fact scoped to one person is about that person. It goes, and the document it came ' +
+      'from stays — anybody can read that again.',
+    count: (ctx, id) => tally(ctx, ctx.sql`SELECT count(*)::text AS count FROM memory_facts
+      WHERE organization_id = ${ctx.organizationId} AND scope = 'user' AND scope_id = ${id}
+        AND state <> 'forgotten' AND deleted_at IS NULL`),
+  },
+  {
     table: 'audit_logs',
     label: 'Decisions they took',
     disposition: 'keep',
@@ -296,6 +307,7 @@ export async function erasePerson(
   await sql`DELETE FROM notifications WHERE organization_id = ${org} AND user_id = ${id}`
   await sql`DELETE FROM briefings WHERE organization_id = ${org} AND user_id = ${id}`
   await sql`DELETE FROM notification_preferences WHERE organization_id = ${org} AND user_id = ${id}`
+  await sql`DELETE FROM memory_facts WHERE organization_id = ${org} AND scope = 'user' AND scope_id = ${id}`
   await adminSql()`DELETE FROM sessions WHERE user_id = ${id}`
 
   await sql`UPDATE tasks SET assignee_id = ${tombstoneId} WHERE organization_id = ${org} AND assignee_id = ${id}`

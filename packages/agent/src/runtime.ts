@@ -9,10 +9,12 @@ import {
   createApproval,
   enqueueRun,
   personaForKey,
+  proposeMemories,
   record as recordUsageRecord,
   writeActivity,
   writeAudit,
   type EvidenceItem,
+  type MemoryCandidate,
   type PreviewLine,
 } from '@superwork/core'
 import { completeWithFallback, loadPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
@@ -910,7 +912,11 @@ async function answerAndFinish(
     grounding: grounded.grounding as unknown as Record<string, unknown>,
   })
 
-  const answer = (response.json ?? {}) as { text?: string; citations?: { claim: string; knowledgeIndex: number }[] }
+  const answer = (response.json ?? {}) as {
+    text?: string
+    citations?: { claim: string; knowledgeIndex: number }[]
+    memories?: MemoryCandidate[]
+  }
   const text = answer.text ?? response.text
 
   for (const word of text.split(/(\s+)/)) publish(runId, { type: 'text', delta: word })
@@ -929,6 +935,25 @@ async function answerAndFinish(
       })
     }
     const citations = await persistCitations(ctx, runId, grounded, answer.citations)
+
+    // Reflect (§9.3): what did this run learn that is worth keeping? Candidates only —
+    // nothing here is recalled until a person agrees with it, and anything whose citation
+    // does not resolve to a passage this run actually retrieved is refused outright.
+    if ((answer.memories ?? []).length > 0) {
+      const proposed = await proposeMemories(ctx, {
+        runId,
+        knowledge: grounded.grounding.knowledge,
+        candidates: answer.memories ?? [],
+      })
+      if (proposed.stored > 0) {
+        await emitStep(ctx, runId, phase, {
+          phase: 'reflect',
+          label: `Noticed ${proposed.stored} ${proposed.stored === 1 ? 'fact' : 'facts'} worth remembering`,
+          status: 'succeeded',
+        })
+      }
+    }
+
     const built: RunReport = {
       narrative: text,
       outcome: { created: 0, updated: 0, drafted: 0, sent: 0, skipped: [], failed: [] },
@@ -1057,6 +1082,25 @@ function buildBlocks(
       label: `Aggregate: ${name}`,
       data: { basis: agg.basis, rows: agg.rows },
       sourceId: name,
+    })
+  }
+
+  // Agreed facts come before retrieved passages inside the knowledge zone: they are
+  // shorter, a person has stood behind each one, and if the zone has to yield tokens it
+  // should give up a passage before it gives up something the organization has settled.
+  if ((grounded.grounding.memories ?? []).length > 0) {
+    blocks.push({
+      zone: 'knowledge',
+      trust: 'org_data',
+      label: 'What this organization has agreed is true',
+      data: (grounded.grounding.memories ?? []).map((memory) => ({
+        fact: `${memory.subject} ${memory.predicate} ${memory.object}`,
+        about: memory.scopeLabel,
+        agreedOn: memory.agreedOn.slice(0, 10),
+        source: memory.documentTitle,
+        // Said out loud rather than left for the reader to infer from a date.
+        note: memory.stale ? 'This kind of figure moves and has not been checked recently.' : undefined,
+      })),
     })
   }
 
