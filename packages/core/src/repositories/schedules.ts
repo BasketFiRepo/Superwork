@@ -13,6 +13,10 @@ import { writeAudit } from '../audit.js'
  *
  * Claiming is `FOR UPDATE SKIP LOCKED` and advances `next_run_at` in the same transaction,
  * so two workers cannot both decide it is their turn.
+ *
+ * A schedule addresses exactly one thing: a row (`targetId`, for a workflow) or a name
+ * (`targetKey`, for a watcher, which is code rather than a row). A constraint enforces the
+ * exclusive-or, so a schedule can never point at two things or at none.
  */
 
 export type CatchUpPolicy = 'skip_missed' | 'run_once' | 'run_all'
@@ -21,6 +25,7 @@ export interface ScheduleView {
   id: string
   kind: string
   targetId: string | null
+  targetKey: string | null
   cron: string
   timezone: string
   enabled: boolean
@@ -39,7 +44,7 @@ const GRACE_MS = 10 * 60_000
 const MAX_CATCH_UP = 5
 
 const SELECT = (ctx: TenantContext) => ctx.sql`
-  SELECT id, kind, target_id AS "targetId", cron, timezone, enabled,
+  SELECT id, kind, target_id AS "targetId", target_key AS "targetKey", cron, timezone, enabled,
          catch_up_policy AS "catchUpPolicy", last_run_at AS "lastRunAt", next_run_at AS "nextRunAt",
          last_skipped_at AS "lastSkippedAt", last_skipped_reason AS "lastSkippedReason",
          skipped_total AS "skippedTotal"
@@ -53,6 +58,19 @@ export async function scheduleFor(
   const [row] = await ctx.sql<ScheduleView[]>`
     ${SELECT(ctx)}
     WHERE organization_id = ${ctx.organizationId} AND kind = ${kind} AND target_id = ${targetId}
+      AND deleted_at IS NULL`
+  return row ?? null
+}
+
+/** The same, for the schedules that address code rather than a row. */
+export async function scheduleForKey(
+  ctx: TenantContext,
+  kind: string,
+  targetKey: string,
+): Promise<ScheduleView | null> {
+  const [row] = await ctx.sql<ScheduleView[]>`
+    ${SELECT(ctx)}
+    WHERE organization_id = ${ctx.organizationId} AND kind = ${kind} AND target_key = ${targetKey}
       AND deleted_at IS NULL`
   return row ?? null
 }
@@ -72,13 +90,20 @@ export async function upsertSchedule(
   ctx: TenantContext,
   input: {
     kind: string
-    targetId: string
+    /** Exactly one of these. A workflow is a row; a watcher is a name. */
+    targetId?: string
+    targetKey?: string
     cron: string
     timezone: string
     catchUpPolicy?: CatchUpPolicy
     enabled?: boolean
+    /** When true an existing row is left exactly as it is. Used for seeding defaults. */
+    onlyIfMissing?: boolean
   },
 ): Promise<ScheduleView | null> {
+  if ((input.targetId === undefined) === (input.targetKey === undefined)) {
+    throw new ValidationError('A schedule points at exactly one thing — a workflow row or a watcher key.')
+  }
   // Aliases are normalized here, so one grammar reaches the database however it was
   // written. A spec that cannot be parsed is refused with the reason rather than stored as
   // a schedule that silently never fires.
@@ -89,38 +114,59 @@ export async function upsertSchedule(
   const next = nextOccurrence(cron, input.timezone)
   if (!next) return null
 
-  await ctx.sql`
-    INSERT INTO schedules (
-      organization_id, kind, target_id, cron, timezone, enabled, catch_up_policy, next_run_at, created_by
-    ) VALUES (
-      ${ctx.organizationId}, ${input.kind}, ${input.targetId}, ${cron}, ${input.timezone},
-      ${input.enabled ?? true}, ${input.catchUpPolicy ?? 'run_once'}, ${next}, ${ctx.userId}
-    )
-    ON CONFLICT (organization_id, kind, target_id) WHERE deleted_at IS NULL AND target_id IS NOT NULL
-    DO UPDATE SET cron = EXCLUDED.cron, timezone = EXCLUDED.timezone, enabled = EXCLUDED.enabled,
-                  catch_up_policy = EXCLUDED.catch_up_policy, next_run_at = EXCLUDED.next_run_at`
+  const sql = ctx.sql
+  const update = input.onlyIfMissing
+    ? sql`DO NOTHING`
+    : sql`DO UPDATE SET cron = EXCLUDED.cron, timezone = EXCLUDED.timezone, enabled = EXCLUDED.enabled,
+                        catch_up_policy = EXCLUDED.catch_up_policy, next_run_at = EXCLUDED.next_run_at`
+  const conflict = input.targetId
+    ? sql`(organization_id, kind, target_id) WHERE deleted_at IS NULL AND target_id IS NOT NULL`
+    : sql`(organization_id, kind, target_key) WHERE deleted_at IS NULL AND target_key IS NOT NULL`
 
-  await writeAudit(ctx, {
-    actorType: 'user',
-    actorId: ctx.userId,
-    action: 'schedule.set',
-    entityType: input.kind,
-    entityId: input.targetId,
-    after: { cron, timezone: input.timezone, nextRunAt: next.toISOString() },
-  })
-  return scheduleFor(ctx, input.kind, input.targetId)
+  await sql`
+    INSERT INTO schedules (
+      organization_id, kind, target_id, target_key, cron, timezone, enabled, catch_up_policy,
+      next_run_at, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${input.kind}, ${input.targetId ?? null}, ${input.targetKey ?? null},
+      ${cron}, ${input.timezone}, ${input.enabled ?? true}, ${input.catchUpPolicy ?? 'run_once'},
+      ${next}, ${ctx.userId}
+    )
+    ON CONFLICT ${conflict} ${update}`
+
+  const stored = input.targetId
+    ? await scheduleFor(ctx, input.kind, input.targetId)
+    : await scheduleForKey(ctx, input.kind, input.targetKey!)
+
+  // A seeding call that changed nothing is not a decision worth an audit line.
+  if (!input.onlyIfMissing) {
+    await writeAudit(ctx, {
+      actorType: 'user',
+      actorId: ctx.userId,
+      action: 'schedule.set',
+      entityType: input.kind,
+      entityId: input.targetId ?? null,
+      after: { target: input.targetId ?? input.targetKey, cron, timezone: input.timezone, nextRunAt: next.toISOString() },
+    })
+  }
+  return stored
 }
 
-/** Stops a schedule without forgetting it — pausing and deleting are different decisions. */
+/**
+ * Stops a schedule without forgetting it — pausing and deleting are different decisions.
+ * `target` is a workflow's id or a watcher's key; comparing the id as text lets one
+ * function serve both without the caller having to say which kind of target it holds.
+ */
 export async function setScheduleEnabled(
   ctx: TenantContext,
   kind: string,
-  targetId: string,
+  target: string,
   enabled: boolean,
 ): Promise<void> {
   const [updated] = await ctx.sql<{ id: string }[]>`
     UPDATE schedules SET enabled = ${enabled}
-    WHERE organization_id = ${ctx.organizationId} AND kind = ${kind} AND target_id = ${targetId}
+    WHERE organization_id = ${ctx.organizationId} AND kind = ${kind}
+      AND (target_id::text = ${target} OR target_key = ${target})
       AND deleted_at IS NULL AND enabled <> ${enabled}
     RETURNING id`
   if (!updated) return
@@ -129,13 +175,15 @@ export async function setScheduleEnabled(
     actorId: ctx.userId,
     action: enabled ? 'schedule.enabled' : 'schedule.disabled',
     entityType: kind,
-    entityId: targetId,
+    entityId: null,
+    after: { target },
   })
 }
 
 export interface ClaimedSchedule {
   scheduleId: string
-  targetId: string
+  targetId: string | null
+  targetKey: string | null
   cron: string
   timezone: string
   /** How many times to run now: 1 normally, more only under `run_all`. */
@@ -158,8 +206,18 @@ export async function claimDueSchedules(
   limit = 20,
   now = new Date(),
 ): Promise<ClaimedSchedule[]> {
-  const due = await ctx.sql<{ id: string; target_id: string; cron: string; timezone: string; catch_up_policy: CatchUpPolicy; next_run_at: Date }[]>`
-    SELECT id, target_id, cron, timezone, catch_up_policy, next_run_at
+  const due = await ctx.sql<
+    {
+      id: string
+      target_id: string | null
+      target_key: string | null
+      cron: string
+      timezone: string
+      catch_up_policy: CatchUpPolicy
+      next_run_at: Date
+    }[]
+  >`
+    SELECT id, target_id, target_key, cron, timezone, catch_up_policy, next_run_at
     FROM schedules
     WHERE organization_id = ${ctx.organizationId} AND kind = ${kind}
       AND deleted_at IS NULL AND enabled = true
@@ -208,6 +266,7 @@ export async function claimDueSchedules(
     claimed.push({
       scheduleId: row.id,
       targetId: row.target_id,
+      targetKey: row.target_key,
       cron: row.cron,
       timezone: row.timezone,
       runs,

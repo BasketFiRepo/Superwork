@@ -131,6 +131,13 @@ describe('the traditional aliases', () => {
     expect(describeCron('@hourly', 'UTC')).toBe('hourly at :00 UTC')
   })
 
+  it('reads an evenly spaced list as the interval it is, rather than truncating it', () => {
+    expect(describeCron('0 */4 * * *', 'UTC')).toBe('every day, every 4 hours on the hour UTC')
+    expect(describeCron('30 */6 * * *', 'UTC')).toBe('every day, every 6 hours at 30 past UTC')
+    // A short, uneven list is still listed in full — no cap, silent or otherwise.
+    expect(describeCron('0 8,17 * * 1-5', 'UTC')).toBe('every weekday at 08:00, 17:00 UTC')
+  })
+
   it('refuses @reboot by name, because it is not a promise about a time', () => {
     expect(cronProblem('@reboot')).toMatch(/not a schedule/i)
     expect(parseCron('@reboot')).toBeNull()

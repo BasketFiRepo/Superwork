@@ -206,9 +206,16 @@ export function describeCron(spec: string, timeZone: string): string {
     return `${everyDayPart(fields)}, hourly ${minutes} ${timeZone}`.replace('every day, ', '')
   }
 
+  // An evenly spaced list is an interval, and reads like one. Saying "at 00:00, 04:00,
+  // 08:00, 12:00" and stopping would be a silent truncation of somebody's schedule.
+  const stride = evenStride(fields.hour)
+  if (stride && fields.hour.length > 3 && fields.minute.length === 1) {
+    const past = fields.minute[0] === 0 ? 'on the hour' : `at ${pad(fields.minute[0]!)} past`
+    return `${everyDayPart(fields)}, every ${stride} hours ${past} ${timeZone}`
+  }
+
   const at = fields.hour
     .flatMap((hour) => fields.minute.map((minute) => `${pad(hour)}:${pad(minute)}`))
-    .slice(0, 4)
     .join(', ')
   return `${everyDayPart(fields)} at ${at} ${timeZone}`
 }
@@ -236,4 +243,14 @@ function everyDayPart(fields: CronFields): string {
 
 function pad(value: number): string {
   return String(value).padStart(2, '0')
+}
+
+/** The gap between values when they are evenly spaced from the start of the day, else null. */
+function evenStride(values: number[]): number | null {
+  if (values.length < 2 || values[0] !== 0) return null
+  const stride = values[1]! - values[0]!
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index]! - values[index - 1]! !== stride) return null
+  }
+  return stride
 }

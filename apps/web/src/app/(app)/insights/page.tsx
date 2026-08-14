@@ -1,13 +1,16 @@
+import { can } from '@superwork/auth'
+import { watcherSchedules } from '@superwork/agent'
 import { requireSession, withActor } from '@/lib/session'
 import { InsightCard } from '@/components/InsightCard'
 import { RunWatchersButton } from '@/components/RunWatchersButton'
+import { WatcherSchedules } from '@/components/WatcherSchedules'
 
 export const dynamic = 'force-dynamic'
 
 /** Insights (§17). The entire screen is agent output. */
 export default async function InsightsPage() {
   const session = await requireSession()
-  const { open, closed, dismissalRate } = await withActor(session, async (ctx) => {
+  const { open, closed, dismissalRate, watchers, canEdit } = await withActor(session, async (ctx, actor) => {
     const rows = await ctx.sql<
       {
         id: string
@@ -35,6 +38,12 @@ export default async function InsightsPage() {
       open: rows.filter((r) => ['new', 'acknowledged', 'in_progress'].includes(r.status)),
       closed: rows.filter((r) => !['new', 'acknowledged', 'in_progress'].includes(r.status)),
       dismissalRate: stats && stats.total > 0 ? stats.dismissed / stats.total : 0,
+      watchers: await watcherSchedules(ctx),
+      canEdit: can(actor, 'settings:update', {
+        type: 'settings',
+        organizationId: ctx.organizationId,
+        riskTier: 'low',
+      }).allow,
     }
   })
 
@@ -58,6 +67,21 @@ export default async function InsightsPage() {
           over twenty insights are muted automatically and the admin is told why.
         </div>
       ) : null}
+
+      <WatcherSchedules
+        canEdit={canEdit}
+        watchers={watchers.map((watcher) => ({
+          key: watcher.key,
+          title: watcher.title,
+          description: watcher.description,
+          cron: watcher.cron,
+          declaredCron: watcher.declaredCron,
+          enabled: watcher.enabled,
+          muted: watcher.muted,
+          lastRunAt: watcher.lastRunAt ? watcher.lastRunAt.toISOString() : null,
+          nextRunAt: watcher.nextRunAt ? watcher.nextRunAt.toISOString() : null,
+        }))}
+      />
 
       <section className="stack stack-5">
         {open.length === 0 ? (
