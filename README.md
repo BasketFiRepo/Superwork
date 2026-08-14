@@ -49,6 +49,12 @@ pnpm check:browser     # walks every screen in a real browser, including authori
 `pnpm check:browser` expects the app already running (`pnpm dev`, or `pnpm build && pnpm
 --filter @superwork/web start`); point it elsewhere with `BASE_URL`.
 
+There is one `.env`, at the repository root. The scripts read it with
+`node --env-file=.env`; the web app reads it through `apps/web/next.config.mjs`, because
+Next resolves its own env files relative to `apps/web` and would otherwise start a server
+that answers every request with `DATABASE_URL: Required`. Real environment variables always
+win over the file, so a platform that injects its own configuration is unaffected.
+
 Every one of those runs on each pull request — `.github/workflows/ci.yml` builds the schema
 against a real PostgreSQL 16 with pgvector, rolls the newest migration back and forward to
 prove its rollback is real, then runs the types, the tests, the evals, all five acceptance
