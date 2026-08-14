@@ -1,0 +1,210 @@
+name: CI
+
+# What the green tick is allowed to mean.
+#
+# Until now the only check on a pull request was the preview deployment, which proves the
+# app compiles and nothing else. These jobs run what the repository actually claims: the
+# test suite, the agent evals with their adversarial pack, every acceptance loop, and a
+# real browser walking every screen. A tick that does not stand for those is worse than no
+# tick, because people stop reading the pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer commit supersedes an older run on the same branch; main is never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  checks:
+    name: Types, tests, evals and acceptance loops
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      # pgvector, pg_trgm and pgcrypto are all required by migration 0001. The service
+      # block cannot read the `env` context, so the image is written out in each job.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: superwork_dev
+          POSTGRES_DB: superwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The scripts run under `node --env-file=.env`, so the file has to exist. The app
+      # role's password is set by migration 0008; nothing here is a real credential.
+      - name: Write the CI environment
+        run: |
+          cat > .env <<'ENV'
+          NODE_ENV=test
+          DATABASE_URL=postgres://superwork_app:superwork_dev@127.0.0.1:5432/superwork
+          DATABASE_ADMIN_URL=postgres://postgres:superwork_dev@127.0.0.1:5432/superwork
+          APP_URL=http://localhost:3000
+          SESSION_SECRET=ci-session-secret-not-a-real-one
+          AI_MODE=mock
+          EMAIL_MODE=mock
+          CALENDAR_MODE=mock
+          STORAGE_MODE=mock
+          BILLING_MODE=mock
+          HTTP_TOOLS_MODE=mock
+          AUTOPILOT_ENABLED=false
+          AGENT_KILL_SWITCH=false
+          LOG_LEVEL=error
+          ENV
+
+      - run: pnpm typecheck
+
+      - name: Build the schema and the demo organization
+        run: pnpm db:bootstrap
+
+      # Rolling the newest migration back and forward proves the down script is real.
+      # A migration without a working rollback is half a migration (§2.2).
+      - name: Roll the newest migration back and forward
+        run: |
+          pnpm db:rollback
+          pnpm db:migrate
+
+      - run: pnpm test
+
+      - name: Agent evals — the adversarial pack must pass at 100%
+        run: |
+          pnpm db:bootstrap
+          pnpm eval
+
+      - name: Phase 1 acceptance loop
+        run: pnpm loop
+
+      - name: Phase 2 acceptance loop
+        run: pnpm loop:phase2
+
+      - name: Phase 3 acceptance loop
+        run: pnpm loop:phase3
+
+      - name: Phase 4 acceptance loop
+        run: pnpm loop:phase4
+
+      - name: The debts loop — workflows, schedules, edits, custom tools
+        run: pnpm loop:phase5
+
+      # Measured, not asserted: the harness prints the scale it reached beside the scale
+      # each budget assumes, and fails only if something is over budget at that scale.
+      - name: Scale budgets
+        run: SCALE=small pnpm loadtest
+
+  browser:
+    name: Every screen, in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      # pgvector, pg_trgm and pgcrypto are all required by migration 0001. The service
+      # block cannot read the `env` context, so the image is written out in each job.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: superwork_dev
+          POSTGRES_DB: superwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write the CI environment
+        run: |
+          cat > .env <<'ENV'
+          NODE_ENV=production
+          DATABASE_URL=postgres://superwork_app:superwork_dev@127.0.0.1:5432/superwork
+          DATABASE_ADMIN_URL=postgres://postgres:superwork_dev@127.0.0.1:5432/superwork
+          APP_URL=http://localhost:3000
+          SESSION_SECRET=ci-session-secret-not-a-real-one
+          AI_MODE=mock
+          EMAIL_MODE=mock
+          CALENDAR_MODE=mock
+          STORAGE_MODE=mock
+          BILLING_MODE=mock
+          HTTP_TOOLS_MODE=mock
+          AUTOPILOT_ENABLED=false
+          AGENT_KILL_SWITCH=false
+          LOG_LEVEL=error
+          ENV
+
+      - run: pnpm db:bootstrap
+
+      - run: pnpm build
+
+      - run: pnpm exec playwright install --with-deps chromium
+
+      # nohup, so the server survives the end of this step's shell rather than taking a
+      # SIGHUP with it and failing the next step for a reason nobody can see.
+      - name: Start the app
+        run: |
+          nohup pnpm --filter @superwork/web start > /tmp/web.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl -sf -o /dev/null http://localhost:3000/login; then
+              echo "The app is up after ${attempt} attempts."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "The app never became ready. Its log:"
+          cat /tmp/web.log
+          exit 1
+
+      - name: Walk every screen
+        run: pnpm check:browser
+        env:
+          SHOT_DIR: screenshots
+
+      # The screenshots are the evidence for anything the check asserts about a screen.
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens
+          path: screenshots
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: The app's log, when something failed
+        if: failure()
+        run: cat /tmp/web.log

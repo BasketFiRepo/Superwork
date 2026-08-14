@@ -49,6 +49,14 @@ pnpm check:browser     # walks every screen in a real browser, including authori
 `pnpm check:browser` expects the app already running (`pnpm dev`, or `pnpm build && pnpm
 --filter @superwork/web start`); point it elsewhere with `BASE_URL`.
 
+Every one of those runs on each pull request — `.github/workflows/ci.yml` builds the schema
+against a real PostgreSQL 16 with pgvector, rolls the newest migration back and forward to
+prove its rollback is real, then runs the types, the tests, the evals, all five acceptance
+loops and the scale budgets in one job, and the browser walk over every screen in another.
+The screenshots the browser check takes are kept as an artifact, because they are the
+evidence for what it asserts about a screen. A green tick means those passed; it is not a
+statement that the app merely compiles.
+
 ## The acceptance criterion, and how to see it
 
 > A new user can, in under ten minutes and with no external credentials: onboard → upload

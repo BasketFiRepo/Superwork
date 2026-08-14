@@ -5,6 +5,7 @@ dist/
 *.log
 .DS_Store
 coverage/
+screenshots/
 .env.local
 ui-check.mjs
 *.tsbuildinfo
