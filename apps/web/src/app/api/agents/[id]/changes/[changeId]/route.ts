@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { decideChange } from '@superwork/core'
+import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
@@ -18,9 +19,6 @@ export async function POST(
     )
     return NextResponse.json(change)
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'That decision could not be recorded.' },
-      { status: 400 },
-    )
+    return errorResponse(error, 'That decision could not be recorded.')
   }
 }

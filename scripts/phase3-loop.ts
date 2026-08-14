@@ -116,17 +116,31 @@ try {
   ok('The change names what it widens', change.diff.some((field) => field.widens),
     change.diff.filter((f) => f.widens).map((f) => String(f.field)).join(', '))
 
-  let selfApprovalRefused = false
-  try {
-    await withTenant(session, async (ctx) =>
-      decideChange(ctx, await loadActor(ctx), { changeRequestId: change.id, decision: 'approve' }),
-    )
-  } catch {
-    selfApprovalRefused = true
-  }
-  ok('The requester cannot approve their own change', selfApprovalRefused)
+  // Two separate rules, asserted separately. Catching "any error" would let either pass
+  // while the other did the refusing.
+  //
+  // The self-approval rule is checked before step-up on purpose: asking somebody for their
+  // password and *then* telling them they were never allowed is the wrong order to
+  // discover that in. So the step-up refusal is tested on the person who may approve.
+  const withoutProof = await withTenant({ ...session, userId: second.id }, async (ctx) =>
+    decideChange(ctx, await loadActor(ctx, second.id), { changeRequestId: change.id, decision: 'approve' }).then(
+      () => null,
+      (error: Error) => error.message,
+    ),
+  )
+  ok('Publishing without re-confirming who you are is refused', /confirm your password/i.test(withoutProof ?? ''),
+    withoutProof ?? 'it was allowed')
 
-  const published = await withTenant({ ...session, userId: second.id }, async (ctx) =>
+  const selfApproval = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+    decideChange(ctx, await loadActor(ctx), { changeRequestId: change.id, decision: 'approve' }).then(
+      () => null,
+      (error: Error) => error.message,
+    ),
+  )
+  ok('The requester cannot approve their own change', /somebody else has to approve/i.test(selfApproval ?? ''),
+    selfApproval ?? 'it was allowed')
+
+  const published = await withTenant({ ...session, userId: second.id, steppedUpAt: new Date() }, async (ctx) =>
     decideChange(ctx, await loadActor(ctx, second.id), {
       changeRequestId: change.id,
       decision: 'approve',

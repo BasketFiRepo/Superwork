@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useStepUp } from './StepUp'
 
 /**
  * Authoring a custom tool (§22).
@@ -39,6 +40,7 @@ const PERMISSIONS = ['integration:read:org', 'integration:update:org', 'company:
 
 export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: HostRow[] }) {
   const router = useRouter()
+  const stepUp = useStepUp()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -56,13 +58,18 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
   async function post(body: Record<string, unknown>) {
     setBusy(true)
     setError(null)
-    const response = await fetch('/api/tools', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    const payload = await response.json().catch(() => ({ error: 'That could not be read.' }))
+    // Activating a tool and reviewing a host need fresh proof of identity. `run` holds the
+    // call, asks, and replays it — so the person presses their button once (§4.1).
+    const response = await stepUp.run(() =>
+      fetch('/api/tools', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
     setBusy(false)
+    if (!response) return false
+    const payload = await response.json().catch(() => ({ error: 'That could not be read.' }))
     if (!response.ok) {
       setError(payload.error)
       return false
@@ -96,6 +103,7 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
 
   return (
     <div className="stack stack-8">
+      {stepUp.prompt}
       {error ? (
         <div className="banner banner-critical" role="alert">
           {error}

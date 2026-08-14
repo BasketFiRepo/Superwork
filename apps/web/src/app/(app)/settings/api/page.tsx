@@ -55,18 +55,19 @@ export default async function ApiSettingsPage() {
       <section className="panel">
         <div className="panel-header">
           <h2>Custom tools</h2>
-          <span className="chip">Coming soon</span>
+          <span className="chip chip-positive">built</span>
         </div>
         <div className="panel-body stack stack-2">
           <p className="small secondary">
-            Admin-authored tools — an HTTP endpoint of your own, described by a schema and
-            callable by an agent — need a reviewed host allowlist and a sandbox to run in.
-            Both land in Phase 4.
+            An HTTP endpoint of your own, described by a schema and callable by an agent —
+            through the same registry, the same permission check, the same approval card and
+            the same audit trail as a built-in tool. A tool cannot be activated until a named
+            person has reviewed its host.
           </p>
           <div>
-            <button className="btn btn-sm" disabled title="Not built yet — lands in Phase 4.">
+            <a className="btn btn-sm" href="/settings/tools">
               Define a tool
-            </button>
+            </a>
           </div>
         </div>
       </section>

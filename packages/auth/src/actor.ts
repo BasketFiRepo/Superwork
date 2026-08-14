@@ -59,6 +59,9 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
     teamIds,
     extraPermissions: row.extra_permissions ?? [],
     relations: new Set(tuples.map((tuple) => `${tuple.relation}:${tuple.object_type}:${tuple.object_id}`)),
+    // Only the actor for *this* request carries the session's proof. Loading somebody
+    // else's actor must never hand them this request's step-up.
+    steppedUpAt: userId === ctx.userId ? ctx.steppedUpAt : null,
   }
 }
 

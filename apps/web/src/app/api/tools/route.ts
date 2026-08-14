@@ -10,6 +10,7 @@ import {
   saveCustomTool,
   setCustomToolStatus,
 } from '@superwork/core'
+import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
@@ -89,9 +90,6 @@ export async function POST(request: Request) {
     })
     return NextResponse.json(result)
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'That could not be done.' },
-      { status: 400 },
-    )
+    return errorResponse(error)
   }
 }

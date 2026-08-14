@@ -309,7 +309,19 @@ try {
 
   // ---- 5. Custom tools -----------------------------------------------------
   console.log('\nTeaching Superwork to call one of the company’s own systems…\n')
-  const tools = await withTenant(session, async (ctx) => {
+  // Reviewing a host and activating a tool require step-up authentication (§4.1). The loop
+  // runs them on a session that has just re-authenticated, and checks below that a session
+  // which has not is refused.
+  const refusedWithoutProof = await withTenant(session, async (ctx) =>
+    reviewHost(ctx, await loadActor(ctx), { host: 'erp.northwind.example', reason: 'No proof of identity.' }).then(
+      () => null,
+      (error: Error) => error.message,
+    ),
+  )
+  ok('A system nobody re-confirmed their identity for is not added', Boolean(refusedWithoutProof),
+    refusedWithoutProof ?? 'it was allowed')
+
+  const tools = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) => {
     const actor = await loadActor(ctx)
     await ctx.sql`
       UPDATE custom_tools SET deleted_at = now()

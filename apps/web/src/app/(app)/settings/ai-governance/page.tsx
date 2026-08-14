@@ -160,9 +160,12 @@ export default async function AiGovernancePage() {
           </table>
         </div>
         <div className="panel-body hairline-top small muted">
-          Publishing an agent, or granting it high-risk capability, requires a second approver and
-          step-up authentication. That flow lands in Phase 3 — today agents are seeded and read-only
-          from this screen.
+          Publishing an agent, or granting it high-risk capability, requires a second approver
+          <em> and</em> step-up authentication: the person proposing a change cannot be the one who
+          signs it off, and the one who signs it off re-enters their password first. Both are
+          enforced where the change is written, not where the button is drawn. Create, permission,
+          simulate and publish an agent on the{' '}
+          <a href="/settings/agents">agents screen</a>.
         </div>
       </section>
 

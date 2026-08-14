@@ -36,7 +36,8 @@ page.on('pageerror', (error) => errors.push(String(error)))
 // Those are announced rather than counted as breakage.
 let expectingRefusal = false
 page.on('response', (response) => {
-  if (response.status() >= 400 && !(expectingRefusal && response.status() === 400)) {
+  // While a check is deliberately exercising a refusal, any 4xx is the proof it worked.
+  if (response.status() >= 400 && !(expectingRefusal && response.status() < 500)) {
     errors.push(`${response.status()} ${response.url()}`)
   }
 })
@@ -325,13 +326,45 @@ try {
     ok('An approval can be corrected in place', false, 'no pending approval offered an editable field')
   }
 
-  // ---- Custom tools -------------------------------------------------------
+  // ---- Custom tools, and step-up ------------------------------------------
   await page.goto(`${BASE}/settings/tools`)
   await page.waitForSelector('[data-testid="reviewed-hosts"]', { timeout: 15_000 })
   const toolsText = await page.locator('main').innerText()
   ok('Custom tools explains the rule it enforces', /same permission check/i.test(toolsText))
   ok('It says outbound HTTP is simulated here', /simulated/i.test(toolsText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/custom-tools.png`, fullPage: true })
+
+  // Reviewing a host is irreversible enough to need fresh proof of identity (§4.1). The
+  // 401 that triggers the prompt is expected, not breakage.
+  expectingRefusal = true
+  await page.fill('input[placeholder="erp.example.com"]', 'erp.northwind.example')
+  await page.fill('input[placeholder^="Our order system"]', 'Order system, read-only.')
+  await page.getByRole('button', { name: 'Review this host' }).click()
+  await page.waitForSelector('[data-testid="step-up"]', { timeout: 15_000 })
+  const stepUpText = await page.locator('[data-testid="step-up"]').innerText()
+  ok('An irreversible change asks you to confirm it is still you', /confirm your password/i.test(stepUpText))
+  ok('And says why, and for how long', /cannot be undone/i.test(stepUpText) && /five minutes/i.test(stepUpText))
+
+  await page.fill('#step-up-password', 'not-the-password')
+  await page.locator('[data-testid="step-up-confirm"]').click()
+  await page.waitForSelector('[data-testid="step-up"] [role="alert"]', { timeout: 15_000 })
+  ok('A wrong password is refused',
+    /not right/i.test(await page.locator('[data-testid="step-up"] [role="alert"]').innerText()))
+
+  await page.fill('#step-up-password', 'superwork')
+  await page.locator('[data-testid="step-up-confirm"]').click()
+  expectingRefusal = false
+  // Confirming replays the held action, so the host appears without pressing again.
+  await page
+    .locator('[data-testid="reviewed-hosts"]')
+    .getByText('erp.northwind.example')
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .catch(() => undefined)
+  const hostsText = await page.locator('[data-testid="reviewed-hosts"]').innerText()
+  ok('Confirming carries out the action you asked for, without asking again',
+    /erp\.northwind\.example/.test(hostsText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/step-up.png`, fullPage: true })
 
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {

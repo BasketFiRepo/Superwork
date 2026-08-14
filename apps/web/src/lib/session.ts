@@ -14,6 +14,8 @@ export interface AppSession {
   email: string
   flags: FlagSet
   killSwitch: boolean
+  /** When this session last re-proved its identity (§4.1), or null. */
+  steppedUpAt: Date | null
 }
 
 /** Resolves the signed-in user, or sends them to the sign-in page. */
@@ -49,6 +51,7 @@ export async function requireSession(): Promise<AppSession> {
         email: identity.email,
         flags: resolveFlags(orgOverrides, userOverrides),
         killSwitch: org?.agent_kill_switch ?? false,
+        steppedUpAt: identity.steppedUpAt,
       }
     },
   )
@@ -60,7 +63,12 @@ export async function withActor<T>(
   fn: (ctx: TenantContext, actor: Actor) => Promise<T>,
 ): Promise<T> {
   return withTenant(
-    { organizationId: session.organizationId, userId: session.userId, timezone: session.timezone },
+    {
+      organizationId: session.organizationId,
+      userId: session.userId,
+      timezone: session.timezone,
+      steppedUpAt: session.steppedUpAt,
+    },
     async (ctx) => fn(ctx, await loadActor(ctx)),
   )
 }

@@ -29,6 +29,12 @@ import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixt
 let org: TenantFixture
 let other: TenantFixture
 let session: { organizationId: string; userId: string; timezone: string }
+/**
+ * Reviewing a host and activating a tool require step-up authentication (§4.1), so the
+ * admin flows below run on a session that has just re-authenticated. `session` stays
+ * un-stepped-up, which is what the rest of the suite reads from.
+ */
+let confirmed: { organizationId: string; userId: string; timezone: string; steppedUpAt: Date }
 
 const DEFINITION: SaveCustomToolInput = {
   name: 'lookup_order@v1',
@@ -48,6 +54,7 @@ beforeAll(async () => {
   org = await createTenant('ctools')
   other = await createTenant('ctools2')
   session = { organizationId: org.organizationId, userId: org.ownerId, timezone: 'Europe/London' }
+  confirmed = { ...session, steppedUpAt: new Date() }
 })
 
 afterAll(async () => {
@@ -93,21 +100,21 @@ describe('what a definition may say', () => {
 
 describe('the reviewed host list', () => {
   it('will not activate a tool whose host nobody reviewed', async () => {
-    const id = await withTenant(session, async (ctx) => {
+    const id = await withTenant(confirmed, async (ctx) => {
       const tool = await saveCustomTool(ctx, await loadActor(ctx), DEFINITION)
       return tool.id
     })
 
     await expect(
-      withTenant(session, async (ctx) => activateCustomTool(ctx, await loadActor(ctx), id)),
+      withTenant(confirmed, async (ctx) => activateCustomTool(ctx, await loadActor(ctx), id)),
     ).rejects.toThrow(/nobody has reviewed/i)
 
-    const active = await withTenant(session, (ctx) => activeCustomTools(ctx))
+    const active = await withTenant(confirmed, (ctx) => activeCustomTools(ctx))
     expect(active).toHaveLength(0)
   })
 
   it('activates once a named person has reviewed the host, and records who', async () => {
-    const tool = await withTenant(session, async (ctx) => {
+    const tool = await withTenant(confirmed, async (ctx) => {
       const actor = await loadActor(ctx)
       await reviewHost(ctx, actor, { host: 'erp.example.com', reason: 'Our order system. Read-only lookups.' })
       const [existing] = await listCustomTools(ctx, actor)
@@ -119,12 +126,12 @@ describe('the reviewed host list', () => {
   })
 
   it('disables every tool on a host the moment the host is revoked', async () => {
-    const disabled = await withTenant(session, async (ctx) => revokeHost(ctx, await loadActor(ctx), 'erp.example.com'))
+    const disabled = await withTenant(confirmed, async (ctx) => revokeHost(ctx, await loadActor(ctx), 'erp.example.com'))
     expect(disabled).toBe(1)
-    expect(await withTenant(session, (ctx) => activeCustomTools(ctx))).toHaveLength(0)
+    expect(await withTenant(confirmed, (ctx) => activeCustomTools(ctx))).toHaveLength(0)
 
     // Put it back for the tests below.
-    await withTenant(session, async (ctx) => {
+    await withTenant(confirmed, async (ctx) => {
       const actor = await loadActor(ctx)
       await reviewHost(ctx, actor, { host: 'erp.example.com', reason: 'Re-reviewed.' })
       const [existing] = await listCustomTools(ctx, actor)
@@ -134,10 +141,10 @@ describe('the reviewed host list', () => {
 
   it('refuses a wildcard or an internal name outright', async () => {
     await expect(
-      withTenant(session, async (ctx) => reviewHost(ctx, await loadActor(ctx), { host: '*.example.com', reason: 'x' })),
+      withTenant(confirmed, async (ctx) => reviewHost(ctx, await loadActor(ctx), { host: '*.example.com', reason: 'x' })),
     ).rejects.toBeInstanceOf(ValidationError)
     await expect(
-      withTenant(session, async (ctx) =>
+      withTenant(confirmed, async (ctx) =>
         reviewHost(ctx, await loadActor(ctx), { host: 'db.internal', reason: 'internal db' }),
       ),
     ).rejects.toThrow(/private network/i)
@@ -146,7 +153,7 @@ describe('the reviewed host list', () => {
 
 describe('the tool the registry builds', () => {
   it('is an ordinary tool, gated by the same policy engine', async () => {
-    const { tool, allowedForOwner, allowedForViewer } = await withTenant(session, async (ctx) => {
+    const { tool, allowedForOwner, allowedForViewer } = await withTenant(confirmed, async (ctx) => {
       const built = (await customToolsFor(ctx)).get('lookup_order@v1')!
       const owner = await loadActor(ctx, org.ownerId)
       const viewer = await loadActor(ctx, org.viewerId)
@@ -167,13 +174,13 @@ describe('the tool the registry builds', () => {
   })
 
   it('drops an argument the definition never declared', async () => {
-    const tool = await withTenant(session, async (ctx) => (await customToolsFor(ctx)).get('lookup_order@v1')!)
+    const tool = await withTenant(confirmed, async (ctx) => (await customToolsFor(ctx)).get('lookup_order@v1')!)
     const parsed = tool.inputSchema.safeParse({ orderNumber: 'A-1', callbackUrl: 'https://evil.example/steal' })
     expect(parsed.success).toBe(false)
   })
 
   it('encodes arguments as data at every position', async () => {
-    const definition = await withTenant(session, async (ctx) => {
+    const definition = await withTenant(confirmed, async (ctx) => {
       const [existing] = await listCustomTools(ctx, await loadActor(ctx))
       return existing!
     })
@@ -184,7 +191,7 @@ describe('the tool the registry builds', () => {
   })
 
   it('runs credential-free, and says the response was simulated', async () => {
-    const result = await withTenant(session, async (ctx) => {
+    const result = await withTenant(confirmed, async (ctx) => {
       const actor = await loadActor(ctx)
       const agent = await asAgent(ctx, actor, {
         agentId: 'test',
