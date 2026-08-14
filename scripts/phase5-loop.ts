@@ -35,7 +35,10 @@ import {
   applyRetention,
   deleteDocument,
   ingestDocument,
+  listHolds,
+  placeHold,
   previewErasure,
+  releaseHold,
   retentionPolicies,
   saveCustomTool,
   scheduleFor,
@@ -466,14 +469,72 @@ try {
   ok('Erasing needs the person to re-confirm who they are', /confirm your password/i.test(withoutConfirming ?? ''),
     withoutConfirming ?? 'it was allowed')
 
+  // ---- And what may not be deleted, however old it is -----------------------
+  console.log('\nA matter is opened, and the deleting stops…\n')
+
+  const hold = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    // The demo organization is younger than any retention window, so nothing in it is at
+    // risk yet. Without something actually past its window there is nothing for a hold to
+    // save, and the assertion below would pass by having nothing to measure.
+    const [atRisk] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO agent_runs (
+        organization_id, principal_user_id, mode, status, request, trace_id, created_by,
+        finished_at, created_at
+      ) VALUES (
+        ${ctx.organizationId}, ${erasure.subjectUserId}, 'ask', 'succeeded',
+        'A run from long enough ago to be deleted', ${`trace-hold-${Date.now()}`}, ${session.userId},
+        ${new Date(Date.now() - 400 * 86_400_000)}, ${new Date(Date.now() - 400 * 86_400_000)}
+      ) RETURNING id`
+
+    // Deliberately the plain session: placing a hold asks for no password, because
+    // preserving in a hurry is the point.
+    const placed = await placeHold(ctx, actor, {
+      matter: 'Ahlgren v. Northwind',
+      basis: 'Preservation notice received 2026-03-02 from outside counsel.',
+      custodianIds: [erasure.subjectUserId],
+      coversFrom: new Date(Date.now() - 900 * 86_400_000),
+    })
+    const swept = await applyRetention(ctx)
+    const blocked = await previewErasure(ctx, actor, erasure.subjectUserId)
+    const released = await releaseHold(ctx, actor, {
+      holdId: placed.id,
+      reason: 'The loop is finished with it.',
+    }).then(() => null, (error: Error) => error.message)
+    const [survived] = await ctx.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM agent_runs
+      WHERE organization_id = ${ctx.organizationId} AND id = ${atRisk!.id}`
+    return { placed, swept, blocked, released, survived: survived!.count, all: await listHolds(ctx, actor) }
+  })
+
+  ok('A hold is placed without anybody being asked for a password', hold.placed.live, hold.placed.matter)
+  ok('It names the matter, the basis, and whose records', hold.placed.basis.length >= 12 && hold.placed.custodianNames.length === 1,
+    hold.placed.custodianNames.join(', '))
+  ok('The custodian is told, in the record they can already read',
+    await withTenant({ ...session, userId: erasure.subjectUserId }, async (ctx) => {
+      const { listDisclosures } = await import('@superwork/core')
+      const seen = await listDisclosures(ctx, await loadActor(ctx), erasure.subjectUserId)
+      return seen.some((entry) => entry.kind === 'legal_hold' && /Ahlgren/.test(entry.summary))
+    }))
+  ok('A record old enough to be deleted survives the sweep', hold.survived === 1)
+  ok('And the sweep says so, rather than keeping it silently',
+    hold.swept.some((outcome) => outcome.held > 0),
+    `${hold.swept.reduce((sum, o) => sum + o.held, 0)} records kept past their window`)
+  ok('Erasing somebody the matter covers is refused, and the matter is named',
+    hold.blocked.blockers.some((blocker) => /Ahlgren v\. Northwind/.test(blocker)),
+    hold.blocked.blockers[0]?.slice(0, 80) ?? 'it was allowed')
+  ok('Letting the deleting resume does need a password', /confirm your password/i.test(hold.released ?? ''),
+    hold.released ?? 'it was allowed')
+  ok('And the hold is on the record while it stands', hold.all.some((entry) => entry.id === hold.placed.id && entry.live))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
       ? '\nThe debts loop failed.\n'
       : `\nPassed: “${workflow.name}” was described, read back, dry-run and activated; a real run stopped for a ` +
         'person; a correction was applied and counted; a company’s own tool went through the same gate as ' +
-        'everything else; and what Superwork keeps has a stated window, a purge that runs, and a way out for ' +
-        'one document and one person.\n',
+        'everything else; what Superwork keeps has a stated window, a purge that runs, and a way out for one ' +
+        'document and one person; and a matter can stop all of it, in the open.\n',
   )
 } catch (error) {
   console.error(error)

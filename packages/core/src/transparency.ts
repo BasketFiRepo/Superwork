@@ -266,7 +266,10 @@ export interface DisclosureInput {
   subjectUserId: string
   recipientUserId?: string | null
   recipientLabel: string
-  kind: 'weekly_digest' | 'department_report' | 'export' | 'manager_rollup' | 'api_read'
+  // `legal_hold` is not a disclosure to a recipient — it is the notice that records
+  // concerning the person are being preserved. It belongs in this log because this is the
+  // one place a person already looks to find out what is being done with what is theirs.
+  kind: 'weekly_digest' | 'department_report' | 'export' | 'manager_rollup' | 'api_read' | 'legal_hold'
   summary: string
   fields?: string[]
   authorizedBy?: string | null

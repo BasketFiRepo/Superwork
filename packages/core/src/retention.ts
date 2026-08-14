@@ -1,9 +1,10 @@
-import { adminSql, type TenantContext } from '@superwork/db'
+import { adminSql, type Fragment, type Sql, type TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
 import { writeAudit } from './audit.js'
 import { assertSteppedUp } from './step-up.js'
 import { jurisdiction } from './compliance.js'
+import { heldBy } from './legal-hold.js'
 
 /**
  * Retention (§21).
@@ -106,6 +107,8 @@ export interface RetentionPolicyView {
   setAt: Date | null
   lastAppliedAt: Date | null
   lastPurged: number
+  /** What the last sweep left alone because a hold covered it. */
+  lastHeld: number
 }
 
 export async function retentionPolicies(ctx: TenantContext, actor: Actor): Promise<RetentionPolicyView[]> {
@@ -122,10 +125,11 @@ export async function retentionPolicies(ctx: TenantContext, actor: Actor): Promi
       set_at: Date
       last_applied_at: Date | null
       last_purged: number
+      last_held: number
     }[]
   >`
     SELECT p.data_class, p.keep_days, p.reason, u.name AS set_by_name, p.set_at,
-           p.last_applied_at, p.last_purged
+           p.last_applied_at, p.last_purged, p.last_held
     FROM retention_policies p
     LEFT JOIN users u ON u.id = p.set_by
     WHERE p.organization_id = ${ctx.organizationId} AND p.deleted_at IS NULL`
@@ -145,6 +149,7 @@ export async function retentionPolicies(ctx: TenantContext, actor: Actor): Promi
       setAt: row?.set_at ?? null,
       lastAppliedAt: row?.last_applied_at ?? null,
       lastPurged: row?.last_purged ?? 0,
+      lastHeld: row?.last_held ?? 0,
     }
   })
 }
@@ -211,6 +216,8 @@ export interface PurgeOutcome {
   dataClass: string
   keepDays: number
   purged: number
+  /** Rows past their window that a live legal hold kept. Counted so the hold is visible. */
+  held: number
 }
 
 /**
@@ -237,16 +244,165 @@ export async function applyRetention(
   for (const entry of RETENTION_CLASSES) {
     const keepDays = configured.get(entry.key) ?? entry.defaultDays[profile]
     const cutoff = new Date(now.getTime() - keepDays * 86_400_000)
+    // Counted before the delete, because after it the rows that were purged are gone and
+    // the rows that were held look no different from rows that were never due.
+    const held = await countHeld(ctx, entry, cutoff)
     const purged = await purgeClass(ctx, entry, cutoff, batch)
-    outcomes.push({ dataClass: entry.key, keepDays, purged })
+    outcomes.push({ dataClass: entry.key, keepDays, purged, held })
 
-    if (purged > 0 || configured.has(entry.key)) {
+    if (purged > 0 || held > 0 || configured.has(entry.key)) {
       await ctx.sql`
-        UPDATE retention_policies SET last_applied_at = ${now}, last_purged = ${purged}
+        UPDATE retention_policies SET last_applied_at = ${now}, last_purged = ${purged}, last_held = ${held}
         WHERE organization_id = ${ctx.organizationId} AND data_class = ${entry.key} AND deleted_at IS NULL`
     }
   }
   return outcomes
+}
+
+/**
+ * One class's worth of rows that are past their window, described once.
+ *
+ * The purge deletes `NOT held`; the sweep counts `held`. Writing the pair as one scope is
+ * what stops the two from drifting into different ideas of which rows they are talking
+ * about — the count is the only evidence a hold did anything, so a count that disagrees
+ * with the delete is worse than no count.
+ */
+interface ClassScope {
+  /** The connection to run on: `audit_logs` needs the owner, everything else must not have it. */
+  exec: Sql
+  table: string
+  /** Alias-qualified primary key, as selected by `source`. */
+  id: Fragment
+  /** `FROM … WHERE …` selecting rows of this class that are past the cutoff. */
+  source: Fragment
+  /** True when a live hold covers the row. */
+  hold: Fragment
+}
+
+function classScopes(ctx: TenantContext, entry: RetentionClass, cutoff: Date): ClassScope[] {
+  const sql = ctx.sql
+  const org = ctx.organizationId
+
+  switch (entry.key) {
+    case 'agent_runs':
+      return [
+        {
+          exec: sql,
+          table: 'agent_runs',
+          id: sql`r.id`,
+          // Only finished runs. A run still waiting for somebody's approval is not old, it
+          // is outstanding, however long it has been there.
+          source: sql`FROM agent_runs r
+            WHERE r.organization_id = ${org} AND r.finished_at IS NOT NULL AND r.finished_at < ${cutoff}`,
+          hold: heldBy(sql, org, sql`r.finished_at`, sql`r.principal_user_id = ANY(h.custodian_ids)`),
+        },
+      ]
+    case 'tool_calls':
+      return [
+        {
+          exec: sql,
+          table: 'tool_calls',
+          id: sql`c.id`,
+          // A tool call belongs to whoever the run was acting for, which is on the run.
+          source: sql`FROM tool_calls c JOIN agent_runs r ON r.id = c.run_id
+            WHERE c.organization_id = ${org} AND c.created_at < ${cutoff}`,
+          hold: heldBy(sql, org, sql`c.created_at`, sql`r.principal_user_id = ANY(h.custodian_ids)`),
+        },
+      ]
+    case 'transcripts':
+      return [
+        {
+          exec: sql,
+          table: 'transcripts',
+          id: sql`t.id`,
+          // Segments go with their transcript by cascade; deleting the parent is the whole act.
+          source: sql`FROM transcripts t JOIN meetings m ON m.id = t.meeting_id
+            WHERE t.organization_id = ${org} AND m.starts_at < ${cutoff}`,
+          // A transcript belongs to everybody who spoke in it, so one custodian's line is
+          // enough to hold the whole record. Splitting it would leave a transcript with
+          // gaps where the other participants were, which is not preservation.
+          hold: heldBy(
+            sql,
+            org,
+            sql`m.starts_at`,
+            sql`EXISTS (SELECT 1 FROM transcript_segments s
+                        WHERE s.transcript_id = t.id AND s.speaker_user_id = ANY(h.custodian_ids))`,
+          ),
+        },
+      ]
+    case 'notifications':
+      return [
+        {
+          exec: sql,
+          table: 'notifications',
+          id: sql`n.id`,
+          source: sql`FROM notifications n WHERE n.organization_id = ${org} AND n.created_at < ${cutoff}`,
+          hold: heldBy(sql, org, sql`n.created_at`, sql`n.user_id = ANY(h.custodian_ids)`),
+        },
+        {
+          exec: sql,
+          table: 'nudges',
+          id: sql`g.id`,
+          source: sql`FROM nudges g WHERE g.organization_id = ${org} AND g.created_at < ${cutoff}`,
+          hold: heldBy(sql, org, sql`g.created_at`, sql`g.recipient_user_id = ANY(h.custodian_ids)`),
+        },
+      ]
+    case 'insights':
+      return [
+        {
+          exec: sql,
+          table: 'insights',
+          id: sql`i.id`,
+          // Open insights are never purged: an unanswered observation is not stale, it is
+          // unanswered, and deleting it would hide work rather than tidy it.
+          source: sql`FROM insights i
+            WHERE i.organization_id = ${org} AND i.created_at < ${cutoff}
+              AND i.status NOT IN ('new', 'acknowledged', 'in_progress')`,
+          // No person to attribute an insight to — it is an observation about the
+          // organization. A hold over the period therefore holds all of them. Preserving
+          // too much is the safe direction, and the screen says so rather than leaving it
+          // to be discovered.
+          hold: heldBy(sql, org, sql`i.created_at`, null),
+        },
+      ]
+    case 'api_requests':
+      return [
+        {
+          exec: sql,
+          table: 'api_requests',
+          id: sql`q.id`,
+          // Every key acts as a person (ADR 0009), so that person is who the request is
+          // attributable to.
+          source: sql`FROM api_requests q LEFT JOIN api_keys k ON k.id = q.api_key_id
+            WHERE q.organization_id = ${org} AND q.occurred_at < ${cutoff}`,
+          hold: heldBy(sql, org, sql`q.occurred_at`, sql`k.principal_user_id = ANY(h.custodian_ids)`),
+        },
+      ]
+    case 'audit_logs': {
+      // The application role is refused by the trigger from 0009. This is the one path
+      // history may leave by, and it is explicitly scoped to this organization because the
+      // owner connection has no RLS to fall back on.
+      const owner = adminSql()
+      return [
+        {
+          exec: owner,
+          table: 'audit_logs',
+          id: sql`a.id`,
+          source: owner`FROM audit_logs a WHERE a.organization_id = ${org} AND a.occurred_at < ${cutoff}`,
+          // Held by who did it or who it was done for: an audit row about a custodian is
+          // as much part of a matter as one they wrote themselves.
+          hold: heldBy(
+            owner,
+            org,
+            owner`a.occurred_at`,
+            owner`(a.actor_id = ANY(h.custodian_ids) OR a.principal_user_id = ANY(h.custodian_ids))`,
+          ),
+        },
+      ]
+    }
+    default:
+      return []
+  }
 }
 
 async function purgeClass(
@@ -255,80 +411,28 @@ async function purgeClass(
   cutoff: Date,
   batch: number,
 ): Promise<number> {
-  const sql = ctx.sql
-  const org = ctx.organizationId
-
-  switch (entry.key) {
-    case 'agent_runs': {
-      // Only finished runs. A run still waiting for somebody's approval is not old, it is
-      // outstanding, however long it has been there.
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM agent_runs WHERE id IN (
-          SELECT id FROM agent_runs
-          WHERE organization_id = ${org} AND finished_at IS NOT NULL AND finished_at < ${cutoff}
-          LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    case 'tool_calls': {
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM tool_calls WHERE id IN (
-          SELECT id FROM tool_calls WHERE organization_id = ${org} AND created_at < ${cutoff} LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    case 'transcripts': {
-      // Segments go with their transcript by cascade; deleting the parent is the whole act.
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM transcripts WHERE id IN (
-          SELECT t.id FROM transcripts t
-          JOIN meetings m ON m.id = t.meeting_id
-          WHERE t.organization_id = ${org} AND m.starts_at < ${cutoff}
-          LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    case 'notifications': {
-      const notifications = await sql<{ id: string }[]>`
-        DELETE FROM notifications WHERE id IN (
-          SELECT id FROM notifications WHERE organization_id = ${org} AND created_at < ${cutoff} LIMIT ${batch}
-        ) RETURNING id`
-      const nudges = await sql<{ id: string }[]>`
-        DELETE FROM nudges WHERE id IN (
-          SELECT id FROM nudges WHERE organization_id = ${org} AND created_at < ${cutoff} LIMIT ${batch}
-        ) RETURNING id`
-      return notifications.length + nudges.length
-    }
-    case 'insights': {
-      // Open insights are never purged: an unanswered observation is not stale, it is
-      // unanswered, and deleting it would hide work rather than tidy it.
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM insights WHERE id IN (
-          SELECT id FROM insights
-          WHERE organization_id = ${org} AND created_at < ${cutoff}
-            AND status NOT IN ('new', 'acknowledged', 'in_progress')
-          LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    case 'api_requests': {
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM api_requests WHERE id IN (
-          SELECT id FROM api_requests WHERE organization_id = ${org} AND created_at < ${cutoff} LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    case 'audit_logs': {
-      // The application role is refused by the trigger from 0009. This is the one path
-      // history may leave by, and it is explicitly scoped to this organization because the
-      // owner connection has no RLS to fall back on.
-      const rows = await adminSql()<{ id: string }[]>`
-        DELETE FROM audit_logs WHERE id IN (
-          SELECT id FROM audit_logs WHERE organization_id = ${org} AND occurred_at < ${cutoff} LIMIT ${batch}
-        ) RETURNING id`
-      return rows.length
-    }
-    default:
-      return 0
+  let removed = 0
+  for (const scope of classScopes(ctx, entry, cutoff)) {
+    const rows = await scope.exec<{ id: string }[]>`
+      DELETE FROM ${scope.exec(scope.table)} WHERE id IN (
+        SELECT ${scope.id} ${scope.source} AND NOT ${scope.hold} LIMIT ${batch}
+      ) RETURNING id`
+    removed += rows.length
   }
+  return removed
+}
+
+/**
+ * How many rows of this class a live hold is keeping past their window. Counted before the
+ * delete, and reported per class, because a hold that works silently is indistinguishable
+ * from one that does not work at all.
+ */
+async function countHeld(ctx: TenantContext, entry: RetentionClass, cutoff: Date): Promise<number> {
+  let held = 0
+  for (const scope of classScopes(ctx, entry, cutoff)) {
+    const [row] = await scope.exec<{ count: number }[]>`
+      SELECT count(*)::int AS count ${scope.source} AND ${scope.hold}`
+    held += row?.count ?? 0
+  }
+  return held
 }

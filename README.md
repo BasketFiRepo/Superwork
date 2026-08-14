@@ -10,9 +10,10 @@ verified → everyone can see what occurred and why.
 This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
 (the nervous system: inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust
 and depth) and Phase 4 (enterprise scale) of the build specification, end to end, **with
-zero external credentials** — and then the three things the build itself had listed as not
-yet true: natural-language workflow authoring, approve-with-edits, and admin-authored HTTP
-tools.
+zero external credentials** — then the three things the build itself had listed as not yet
+true (natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools),
+and then the controls the interface had been claiming and the product did not have: step-up
+authentication, retention and erasure, and legal holds.
 
 ---
 
@@ -34,7 +35,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 594 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 605 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -422,6 +423,50 @@ both. A cascade nobody can see is indistinguishable from one that did not happen
 
 Both live on **Settings → Retention**, behind `owner`. See ADR 0016.
 
+## Legal holds
+
+Retention deletes on a schedule. This stops it. The two failures are not symmetric: keeping
+data too long is a privacy cost argued about in advance and defensible with a stated basis,
+while deleting what a matter required be kept is spoliation — found afterwards, and not
+undone by having meant well. A product that automates the deletion and offers no way to
+suspend it has automated the worse of the two.
+
+A hold names a matter, a basis, a set of custodians and a period, and while it stands nothing
+it covers is purged by a retention window, erased on request, or deleted from the library.
+The refusals name the matter rather than failing quietly, because an erasure that stops
+without saying why sends somebody looking for a bug instead of looking for counsel.
+
+**It is a row the purge consults, not a flag on the records.** A flag could only ever cover
+what existed the moment the hold was placed, and most of what a matter covers arrives
+afterwards. One predicate is built once and used by every class; each class supplies which
+timestamp the period is measured against and what makes a row attributable to a custodian —
+a run belongs to its principal, an API request to the person its key acts as, an audit row to
+whoever did it or whoever it was done for, and a transcript to everybody who spoke in it, so
+one custodian's line holds the whole record. The timestamp is always the same column the
+purge compares against its cutoff, which is what makes "held ⇒ never purged" structural
+rather than something to remember.
+
+Naming no custodians means everybody — the ordinary case when a regulator opens a file, and
+it keeps covering people who join later. Leaving the end date blank means "and everything
+since", because a live matter has no end date.
+
+**Placing needs no password; releasing does.** The same asymmetry as the kill switch:
+somebody has usually just been told to stop deleting, and friction there buys nothing, while
+releasing is the half that cannot be taken back — the next sweep deletes what the hold was
+keeping and does not ask first.
+
+**Every named custodian is told, and it cannot be turned off.** The notice goes into the
+disclosure log, where the never-covert constraint applies to it for free. A hold nobody is
+told about is indefinite retention of one person's records on somebody's private say-so,
+which is the thing §29.5 makes unconfigurable everywhere else here.
+
+**The sweep says what it left alone**, per class, counted before the delete — afterwards a
+held row looks identical to one that was never due. And the retention screen says a hold is
+in force from the moment it exists rather than from the next sweep, because a window that
+looks unenforced is a support call.
+
+**Settings → Legal holds**, behind `owner`. See ADR 0017.
+
 ## What is deliberately not true yet
 
 Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
@@ -433,8 +478,11 @@ named query in the safe query layer, not a cleverer prompt. The cron grammar is 
 standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
 that does not parse is refused when the schedule is written rather than silently never
 firing. Schedules are minute-granular; sub-minute schedules are not supported. Retention
-windows are per class, not per record: a single meeting cannot be pinned and a legal hold on
-one matter is not expressible. Erasure is an admin action only — there is no self-service
+windows are per class, not per record: a single meeting still cannot be pinned on its own —
+a legal hold is the coarser instrument that covers a matter. A hold notice cannot be
+suppressed, so there is no covert hold: the kind a fraud investigation would want, where
+telling the custodian tips them off, is not expressible here and has to be taken outside this
+product under a court order. Erasure is an admin action only — there is no self-service
 route, because verifying that a request came from the person it names is a problem this
 product does not solve, and a self-service endpoint with a weak identity check is worse than
 none. The scale
@@ -477,6 +525,10 @@ disabled with the reason named. Nothing in the interface pretends to work.
 - **Everything kept has a stated window and a purge that runs.** Seven classes, each with a
   floor no configuration can go under, swept daily by the worker, with what it removed written
   back where anyone can see it.
+- **A matter can stop the deleting, and cannot do it quietly.** A legal hold suspends the
+  purge, refuses erasure and refuses document deletion for what it covers, naming the matter
+  each time; every named custodian gets a disclosure they can read, and there is no setting
+  that turns that off.
 
 ## Configuration
 

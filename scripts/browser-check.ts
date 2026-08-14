@@ -415,6 +415,64 @@ try {
     await page.locator('[data-testid="erasure-execute"]').isDisabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/retention.png`, fullPage: true })
 
+  // ---- Legal holds --------------------------------------------------------
+  await page.goto(`${BASE}/settings/holds`)
+  await page.waitForSelector('[data-testid="holds"]', { timeout: 15_000 })
+  const holdsIntro = await page.locator('main').innerText()
+  ok('Holds explains what it stops', /erased on request/i.test(holdsIntro) && /retention window/i.test(holdsIntro))
+
+  await page.locator('[data-testid="hold-place-open"]').click()
+  await page.waitForSelector('[data-testid="hold-place"]', { timeout: 15_000 })
+  ok('A hold will not be placed without a matter and a basis',
+    await page.locator('[data-testid="hold-place"]').isDisabled())
+  await page.fill('#hold-matter', 'Ahlgren v. Northwind')
+  await page.fill('#hold-basis', 'Preservation notice received 2026-03-02 from outside counsel.')
+  await page.fill('#hold-from', '2024-01-01')
+  await page.locator('[data-testid="hold-custodian"]').first().click()
+  // No step-up here on purpose: preserving in a hurry is the point, and this is the one
+  // admin action of this weight that does not ask.
+  await page.locator('[data-testid="hold-place"]').click()
+  await page.waitForSelector('[data-testid="hold-row"]', { timeout: 20_000 })
+  const holdText = await page.locator('[data-testid="holds"]').innerText()
+  ok('Placing one asks for no password', (await page.locator('[data-testid="step-up"]').count()) === 0)
+  ok('It lists the matter, whose records, and the period',
+    /Ahlgren v\. Northwind/.test(holdText) && /2024-01-01/.test(holdText) && /ongoing/.test(holdText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/legal-hold.png`, fullPage: true })
+
+  // The retention screen says the windows are suspended from the moment the hold exists,
+  // not from the next sweep. A window that looks unenforced is a support call.
+  await page.goto(`${BASE}/settings/retention`)
+  await page.waitForSelector('[data-testid="retention-holds"]', { timeout: 15_000 })
+  const suspended = await page.locator('[data-testid="retention-holds"]').innerText()
+  ok('The retention screen says which matter is suspending it',
+    /legal hold is in force/i.test(suspended) && /Ahlgren v\. Northwind/.test(suspended))
+
+  // Releasing is the irreversible half and goes through the step-up path. Whether the
+  // prompt appears here depends on how long ago the custom-tools screen confirmed, and this
+  // whole check runs inside the five-minute window — so the *requirement* is asserted where
+  // it can be made deterministic (the test pack and the Phase 5 loop), and what is checked
+  // here is that the release lands and is recorded.
+  await page.goto(`${BASE}/settings/holds`)
+  await page.waitForSelector('[data-testid="hold-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="hold-release"]').first().click()
+  await page.waitForSelector('[data-testid="hold-release-editor"]', { timeout: 15_000 })
+  ok('A hold will not be released without a reason',
+    await page.locator('[data-testid="hold-release-confirm"]').isDisabled())
+  await page.fill('#hold-release-reason', 'Settled 2026-05-04; counsel withdrew the notice.')
+  expectingRefusal = true
+  await page.locator('[data-testid="hold-release-confirm"]').click()
+  const holdStepUp = page.locator('[data-testid="step-up"]')
+  await holdStepUp.waitFor({ timeout: 5_000 }).catch(() => undefined)
+  if (await holdStepUp.count()) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  expectingRefusal = false
+  await page.waitForSelector('[data-testid="holds-released"]', { timeout: 20_000 })
+  const releasedText = await page.locator('[data-testid="holds-released"]').innerText()
+  ok('A released hold stays on the record with who released it and why',
+    /Ahlgren v\. Northwind/.test(releasedText) && /counsel withdrew/i.test(releasedText))
+
   // ---- Deleting a document, and everything derived from it ----------------
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })

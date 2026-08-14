@@ -85,6 +85,7 @@ export function Sidebar({
         { href: '/settings/identity', label: 'Identity' },
         { href: '/settings/compliance', label: 'Jurisdiction' },
         { href: '/settings/retention', label: 'Retention and erasure' },
+        { href: '/settings/holds', label: 'Legal holds' },
         { href: '/settings/queue', label: 'Agent queue' },
         { href: '/settings/billing', label: 'Usage and cost' },
         { href: '/settings/ai-governance', label: 'AI governance' },

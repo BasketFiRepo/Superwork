@@ -3,6 +3,7 @@ import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
+import { holdsCoveringDocument } from '../legal-hold.js'
 
 export interface DocumentView {
   id: string
@@ -220,6 +221,16 @@ export async function deleteDocument(
   if (!decision.allow) throw new PermissionError(decision.reason)
   if (input.reason.trim().length < 4) {
     throw new ValidationError('Say why it is being deleted. It goes in the audit trail beside what was removed.')
+  }
+
+  // A live hold outranks any reason somebody can type here. Deleting a document inside a
+  // matter is the textbook case of spoliation, so it is refused rather than warned about.
+  const holds = await holdsCoveringDocument(ctx, input.documentId)
+  if (holds.length > 0) {
+    throw new ValidationError(
+      `This document is preserved for “${holds[0]!.matter}” and cannot be deleted while that hold stands. ` +
+        'Release the hold first, if the matter is closed.',
+    )
   }
 
   // Counted before, because after the purge there is nothing left to count — and the
