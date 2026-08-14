@@ -24,6 +24,15 @@ export interface Actor {
    * §26.9 budget for a check is 10 ms, and a query per check would not make it.
    */
   relations?: ReadonlySet<string>
+  /**
+   * When this actor's session last re-proved its identity (§4.1), or null.
+   *
+   * Deliberately *not* an input to `can()`. A permission answers "may this person do this
+   * at all"; step-up answers "is the person who may do it still the one at the keyboard".
+   * Folding the second into the first would make a clean, synchronous, cacheable decision
+   * depend on the freshness of a cookie.
+   */
+  steppedUpAt?: Date | null
   /** Present when the actor is an agent acting on behalf of `userId`. */
   agent?: AgentActorFacet
 }

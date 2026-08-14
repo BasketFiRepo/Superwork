@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { can } from '@superwork/auth'
-import { writeActivity, writeAudit } from '@superwork/core'
+import { assertSteppedUp, writeActivity, writeAudit } from '@superwork/core'
+import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
@@ -22,6 +23,11 @@ export async function POST(request: Request) {
     await withActor(session, async (ctx, actor) => {
       const decision = can(actor, 'settings:update', { type: 'settings', organizationId: ctx.organizationId })
       if (!decision.allow) throw new Error(decision.reason)
+
+      // Engaging it is always allowed — stopping the agents in a hurry is the point, and
+      // asking for a password first would be the wrong side to put friction on. Releasing
+      // it lets everything run again, so that half asks who is there (§4.1).
+      if (!parsed.data.engaged) assertSteppedUp(actor, 'kill_switch.release')
 
       await ctx.sql`
         UPDATE organizations SET agent_kill_switch = ${parsed.data.engaged} WHERE id = ${ctx.organizationId}`
@@ -57,9 +63,6 @@ export async function POST(request: Request) {
     })
     return NextResponse.json({ engaged: parsed.data.engaged })
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Could not change the setting.' },
-      { status: 403 },
-    )
+    return errorResponse(error, 'Could not change the setting.')
   }
 }

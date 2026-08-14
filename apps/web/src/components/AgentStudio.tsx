@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useStepUp } from './StepUp'
 
 /**
  * Create → permission → simulate → publish, on one screen (§27, §24 Phase 3).
@@ -110,6 +111,7 @@ export function AgentStudio({
   const [error, setError] = useState<string | null>(null)
   const [simulation, setSimulation] = useState<SimulationSummary | null>(simulations[0] ?? null)
 
+  const stepUp = useStepUp()
   const dirty = JSON.stringify(draft) !== JSON.stringify(snapshot)
   const open = changes.find((change) => change.status === 'awaiting_approval') ?? null
 
@@ -117,12 +119,17 @@ export function AgentStudio({
     setBusy(label)
     setError(null)
     setNote(null)
-    const response = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
+    // Approving a change publishes it, which is the half that needs fresh proof of
+    // identity. `run` holds the call, asks for it, and replays it (§4.1).
+    const response = await stepUp.run(() =>
+      fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
     setBusy(null)
+    if (!response) return null
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'That did not work.' }))
       setError(payload.error)
@@ -188,6 +195,7 @@ export function AgentStudio({
 
   return (
     <div className="stack stack-8">
+      {stepUp.prompt}
       {note ? <div className="banner banner-accent">{note}</div> : null}
       {error ? <div className="banner banner-critical">{error}</div> : null}
 

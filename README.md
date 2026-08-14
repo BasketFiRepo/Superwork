@@ -34,7 +34,7 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 571 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 581 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
@@ -330,6 +330,45 @@ a sub-agent's registry is a structural guarantee, and an admin-authored tool mus
 way to hand the Researcher a write. They are built per tenant and never registered globally,
 so one organization's tool cannot appear in another's registry. See ADR 0013.
 
+## Step-up authentication
+
+The AI-governance screen claimed from Phase 3 that publishing an agent "requires a second
+approver and step-up authentication". The second approver was real. Step-up authentication
+was not — the interface described a control the product did not have, which is the most
+expensive kind of wrong, because somebody reads it and stops worrying.
+
+It exists now. Before the handful of things nobody can take back — publishing an agent or
+widening what it may do, rolling one back to an earlier configuration, letting a tool call a
+system outside the company, adding a system tools may call, releasing the kill switch — the
+person re-enters their password. What it defends against is a *session*, not a password: an
+unlocked laptop, a cookie lifted from a machine, a tab left open in a shared room.
+
+The design choices worth knowing:
+
+- **It is not a permission, and it is not folded into `can()`.** A permission answers "may
+  this person do this at all"; step-up answers "is the person who may do it still the one at
+  the keyboard". Mixing them would make a synchronous, cacheable decision depend on the
+  freshness of a cookie.
+- **It is enforced in the repository, beside the permission check** — not at the API. A rule
+  the API asks for politely is not a control.
+- **Signing in is not a step-up.** They are proofs about different moments; treating one as
+  the other would make the first action after login free, which is exactly the unlocked-laptop
+  case.
+- **It belongs to one session.** The same person in another tab has not re-authenticated
+  because this one did.
+- **An agent can never satisfy it**, however it was configured — it has no keyboard to be
+  sitting at, and change control exists for precisely that reason.
+- **A stolen session cannot become a password oracle.** Five failures lock that session out
+  of stepping up for fifteen minutes. The lock is deliberately narrow: the session keeps
+  everything it could already do.
+- **The proof is recorded.** `audit_logs.stepped_up_at` is taken from the request context,
+  never from an argument a caller could forget, and it is stamped on every row the session
+  writes — a fact about the request, not a restatement of which rule applied.
+- **Confirming carries out what you asked for.** The action is held, the question is asked,
+  and then it runs. You press your button once.
+
+See ADR 0015.
+
 ## What is deliberately not true yet
 
 Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
@@ -341,8 +380,7 @@ named query in the safe query layer, not a cleverer prompt. The cron grammar is 
 standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
 that does not parse is refused when the schedule is written rather than silently never
 firing. Schedules are minute-granular; sub-minute schedules are not supported. The scale
-budgets
-are measured at the scale this machine can build, and the harness prints that scale next to
+budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
 
@@ -367,7 +405,13 @@ disabled with the reason named. Nothing in the interface pretends to work.
   disclosure the subject sees at the same moment the recipient does — enforced by a `CHECK`
   that makes an invisible disclosure unstorable.
 - **The kill switch is real.** It halts every run in the organization, marks in-flight runs
-  `aborted_by_admin`, and is two clicks from any screen for an admin.
+  `aborted_by_admin`, and is two clicks from any screen for an admin. Engaging it needs
+  nothing but the click — stopping the agents in a hurry is the point, and friction belongs
+  on the other side. *Releasing* it asks who is there.
+- **Nothing irreversible happens on a session alone.** Publishing or widening an agent,
+  rolling one back, activating a custom tool, reviewing a host it may call, and releasing the
+  kill switch all require the person to re-enter their password within the last five minutes,
+  and the proof is stamped on the audit row.
 
 ## Configuration
 

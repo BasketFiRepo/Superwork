@@ -121,7 +121,8 @@ describe('change control', () => {
   })
 
   it('publishes when a second person approves, and records both names', async () => {
-    await withTenant({ ...session, userId: org.memberId }, async (ctx) => {
+    // Approving publishes, so the approver's session must have re-authenticated (§4.1).
+    await withTenant({ ...session, userId: org.memberId, steppedUpAt: new Date() }, async (ctx) => {
       const approver = await loadActor(ctx, org.memberId)
       const published = await decideChange(ctx, approver, {
         changeRequestId: changeId,
@@ -144,7 +145,7 @@ describe('change control', () => {
   })
 
   it('rolls back to a version that was already approved', async () => {
-    await withTenant(session, async (ctx) => {
+    await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) => {
       const actor = await loadActor(ctx, org.ownerId)
       const versions = await listAgentVersions(ctx, actor, agentId)
       const agent = await rollbackAgent(ctx, actor, {

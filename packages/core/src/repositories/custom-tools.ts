@@ -1,6 +1,7 @@
 import { asJson, type RiskTier, type TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
+import { assertSteppedUp } from '../step-up.js'
 import { writeActivity, writeAudit } from '../audit.js'
 
 /**
@@ -147,6 +148,9 @@ export async function reviewHost(
   input: { host: string; reason: string },
 ): Promise<CustomToolHost> {
   admin(ctx, actor, 'integration:update')
+  // Reviewing a host is the decision every tool on it rests on, so it carries the same
+  // requirement as activating one.
+  assertSteppedUp(actor, 'custom_tool_host.review')
   const host = input.host.trim().toLowerCase()
   if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host) || host.includes('*')) {
     throw new ValidationError(
@@ -289,6 +293,9 @@ export async function saveCustomTool(
 /** Activation. Needs a reviewed host and a named approver; the schema enforces the second. */
 export async function activateCustomTool(ctx: TenantContext, actor: Actor, id: string): Promise<CustomToolView> {
   admin(ctx, actor, 'integration:update')
+  // From here the tool can reach a system Superwork knows nothing about, and Superwork
+  // cannot undo what it does there.
+  assertSteppedUp(actor, 'custom_tool.activate')
   const tool = await getCustomTool(ctx, actor, id)
   if (!tool.hostReviewed) {
     throw new ValidationError(

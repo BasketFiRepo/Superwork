@@ -2,6 +2,7 @@ import type { AgentMode, Sensitivity, TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
+import { assertSteppedUp } from '../step-up.js'
 import { writeActivity, writeAudit } from '../audit.js'
 
 /**
@@ -344,6 +345,9 @@ export async function decideChange(
       'Somebody else has to approve this. The person proposing a change to an agent cannot also be the one who signs it off.',
     )
   }
+  // Rejecting needs no fresh proof — it changes nothing. Approving publishes a new
+  // version and widens what an agent may do, and that is what step-up is for (§4.1).
+  if (input.decision === 'approve') assertSteppedUp(actor, 'agent.publish')
   if (input.decision === 'approve' && agent.currentVersion !== request.baseVersion) {
     throw new ValidationError(
       'The agent changed after this request was raised. Re-open it against the current configuration so you approve what you are reading.',
@@ -480,6 +484,10 @@ export async function rollbackAgent(
 ): Promise<AgentPersona> {
   const agent = await getAgent(ctx, actor, input.agentId)
   guard(actor, ctx, 'agent:update', agent.scopeDepartmentId)
+  // "Previously approved" is not the same as "no wider than now": an earlier version can
+  // be the *more* permissive one, so a rollback is another way to widen an agent and
+  // carries the same requirement as publishing (§4.1).
+  assertSteppedUp(actor, 'agent.rollback')
   if (!input.reason.trim()) throw new ValidationError('Say why you are rolling back — it goes in the agent’s history.')
 
   const [version] = await ctx.sql<{ snapshot: PersonaDraft; ordinal: number }[]>`

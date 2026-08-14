@@ -14,6 +14,12 @@ export interface TenantContext {
   readonly timezone: string
   readonly requestId: string
   readonly traceId: string
+  /**
+   * When the request's session last re-proved its identity (§4.1), or null. Carried on the
+   * context because it is a property of *this request*, not of the person: the same user in
+   * another tab has not re-authenticated just because this one did.
+   */
+  readonly steppedUpAt: Date | null
   readonly sql: Sql
 }
 
@@ -23,6 +29,7 @@ export interface TenantContextInput {
   timezone?: string
   requestId?: string
   traceId?: string
+  steppedUpAt?: Date | null
 }
 
 /**
@@ -49,6 +56,7 @@ export async function withTenant<T>(
       timezone: input.timezone ?? 'UTC',
       requestId,
       traceId,
+      steppedUpAt: input.steppedUpAt ?? null,
       sql: tx as unknown as Sql,
     }
     return fn(ctx)

@@ -54,12 +54,15 @@ export async function writeAudit(ctx: TenantContext, input: AuditInput): Promise
   await ctx.sql`
     INSERT INTO audit_logs (
       organization_id, actor_type, actor_id, principal_user_id, action, entity_type, entity_id,
-      diff, redacted_fields, ip, user_agent, request_id, trace_id, agent_run_id
+      diff, redacted_fields, ip, user_agent, request_id, trace_id, agent_run_id, stepped_up_at
     ) VALUES (
       ${ctx.organizationId}, ${input.actorType}, ${input.actorId ?? null},
       ${input.principalUserId ?? ctx.userId}, ${input.action}, ${input.entityType}, ${input.entityId ?? null},
       ${ctx.sql.json(asJson(diff))}, ${redacted}, ${input.ip ?? null}, ${input.userAgent ?? null},
-      ${ctx.requestId}, ${ctx.traceId}, ${input.agentRunId ?? null}
+      ${ctx.requestId}, ${ctx.traceId}, ${input.agentRunId ?? null},
+      -- Taken from the context, never from the caller: an argument can be forgotten or
+      -- fabricated, and this is the field an auditor leans on (§4.1).
+      ${ctx.steppedUpAt}
     )`
 }
 
