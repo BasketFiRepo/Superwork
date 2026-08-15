@@ -1,6 +1,7 @@
 import { asJson, type ApprovalStatus, type RiskTier, type Role, type TenantContext } from '@superwork/db'
 import { can, grantedScope, type Actor } from '@superwork/auth'
 import { DEFAULT_SLA_HOURS, roleAtLeast } from '../approval-policy.js'
+import { managersOf } from '../org-chart.js'
 
 const ROLES: Role[] = ['owner', 'admin', 'manager', 'member', 'viewer', 'guest', 'service']
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
@@ -122,8 +123,27 @@ export async function createApproval(
   // is how "external mail needs a manager" became "the member who asked may approve it".
   const approverRole = input.approverRole ?? null
   const explicit = input.approverUserId ?? null
+
+  // When a policy names a role the requester does not hold, the person answerable for them
+  // is their manager — not "whoever in the company holds that role", which is what a
+  // role-only route means and which ADR 0026 left as a stated gap. The chain is consulted
+  // only when the requester cannot decide it themselves.
+  let routed: string | null = null
+  if (!explicit && approverRole && !roleAtLeast(actor.role, approverRole)) {
+    for (const candidate of await managersOf(ctx, actor.userId)) {
+      const [row] = await ctx.sql<{ role: Role }[]>`
+        SELECT role FROM memberships
+        WHERE organization_id = ${ctx.organizationId} AND user_id = ${candidate}
+          AND deleted_at IS NULL AND status = 'active'`
+      if (row && roleAtLeast(row.role, approverRole)) {
+        routed = candidate
+        break
+      }
+    }
+  }
+
   const approverUserId =
-    explicit ?? (approverRole && !roleAtLeast(actor.role, approverRole) ? null : actor.userId)
+    explicit ?? routed ?? (approverRole && !roleAtLeast(actor.role, approverRole) ? null : actor.userId)
 
   const [row] = await ctx.sql<{ id: string }[]>`
     INSERT INTO approvals (

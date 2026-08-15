@@ -46,6 +46,7 @@ import {
   createTeam,
   correctMemory,
   deleteDocument,
+  deliverDueNudges,
   documentAudience,
   getDocument,
   getRun,
@@ -58,9 +59,12 @@ import {
   listMemories,
   listProjects,
   listSpaces,
+  listDisclosures,
   listShares,
   listTasks,
+  managerOf,
   openDocumentToEveryone,
+  orgChart,
   recallMemories,
   share,
   sharedWith,
@@ -71,6 +75,7 @@ import {
   releaseHold,
   retentionPolicies,
   saveCustomTool,
+  scheduleLadder,
   setFlag,
   setPolicyEnabled,
   updateTask,
@@ -79,6 +84,7 @@ import {
   setWorkflowSchedule,
   trustLedger,
 } from '@superwork/core'
+import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
 import {
   checkCapacity,
@@ -1195,6 +1201,173 @@ try {
   })
   ok('Turning a rule off asks for a password first', disabling === 'StepUpRequiredError', disabling)
 
+  // ---- Who is answerable, and what that is allowed to mean ------------------
+  console.log('\nThe seeded org chart is read by something at last…\n')
+
+  const chart = await withTenant(session, async (ctx) => orgChart(ctx, await loadActor(ctx)))
+  ok('The reporting lines seeded in migration 0001 are loaded', chart.length >= 10, `${chart.length} lines`)
+  ok('Including the dotted one, kept separate from the escalation path',
+    chart.some((line) => line.type === 'dotted'))
+
+  const subject = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ personId: string; personName: string; managerId: string; managerName: string }[]>`
+      SELECT r.person_id AS "personId", u.name AS "personName",
+             r.manager_id AS "managerId", m.name AS "managerName"
+      FROM reporting_relationships r
+      JOIN users u ON u.id = r.person_id
+      JOIN users m ON m.id = r.manager_id
+      WHERE r.organization_id = ${ctx.organizationId} AND r.type = 'functional'
+        AND r.valid_to IS NULL AND r.deleted_at IS NULL
+      ORDER BY u.name LIMIT 1`
+    return row!
+  })
+  ok('And a person’s escalation path resolves to one person',
+    (await withTenant(session, async (ctx) => managerOf(ctx, subject.personId))) === subject.managerId,
+    `${subject.personName} → ${subject.managerName}`)
+
+  // The demo runs a works-council profile, which forbids manager escalation entirely.
+  const lateTaskId = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${'The escalation subject'}, 'todo', 'high',
+              ${subject.personId}, now() - interval '10 days', true, ${session.userId})
+      RETURNING id`
+    // They have been contacted about it, three days ago.
+    await ctx.sql`
+      INSERT INTO nudges (organization_id, recipient_user_id, subject_type, subject_id, stage,
+                          channel, message, scheduled_for, delivered_at, created_by)
+      VALUES (${ctx.organizationId}, ${subject.personId}, 'task', ${row!.id}, 2, 'in_app',
+              'Still open — mark it done, or set a new date.', now() - interval '3 days',
+              now() - interval '3 days', ${session.userId})`
+    return row!.id
+  })
+
+  const underWorksCouncil = await withTenant(session, async (ctx) =>
+    scheduleLadder(ctx, {
+      recipientUserId: subject.personId,
+      subjectType: 'task',
+      subjectId: lateTaskId,
+      subjectLabel: 'The escalation subject',
+      dueAt: new Date(Date.now() - 10 * 86_400_000),
+      ownerName: subject.personName,
+    }),
+  )
+  // The manager rung is skipped before a recipient is even considered, so the ladder falls
+  // to the waiter rung and finds nobody waiting. Nothing reaches a manager either way.
+  ok('Under a works-council profile nothing escalates to a manager at all',
+    underWorksCouncil.scheduled === 0, underWorksCouncil.skipped ?? 'something was scheduled')
+
+  // Switch to the profile that permits it, and watch the two rules that were never enforced.
+  //
+  // The effective profile is the *strictest* across every legal entity, so adding a
+  // permissive one changes nothing while a works-council entity is present — and whether
+  // one is present depends on whether the phase 4 loop has run first. Every entity is
+  // relaxed and every one restored to exactly what it was.
+  const entitiesBefore = await withTenant(session, async (ctx) => {
+    const rows = await ctx.sql<{ id: string; profile: string }[]>`
+      SELECT id, jurisdiction_profile AS profile FROM legal_entities
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+    if (rows.length === 0) {
+      await ctx.sql`
+        INSERT INTO legal_entities (organization_id, name, country, jurisdiction_profile, is_demo, created_by)
+        VALUES (${ctx.organizationId}, 'Loop GmbH', 'DE', 'gdpr', true, ${session.userId})`
+    } else {
+      await ctx.sql`
+        UPDATE legal_entities SET jurisdiction_profile = 'gdpr'
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+    }
+    return rows
+  })
+
+  const tooSoonId = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${'Not seen yet'}, 'todo', 'high',
+              ${subject.personId}, now() - interval '10 days', true, ${session.userId})
+      RETURNING id`
+    return row!.id
+  })
+  const tooSoon = await withTenant(session, async (ctx) =>
+    scheduleLadder(ctx, {
+      recipientUserId: subject.personId,
+      subjectType: 'task',
+      subjectId: tooSoonId,
+      subjectLabel: 'Not seen yet',
+      dueAt: new Date(Date.now() - 10 * 86_400_000),
+      ownerName: subject.personName,
+    }),
+  )
+  // Matched on the specific refusal, not merely on "nothing was scheduled": the waiter rung
+  // also schedules nothing when nobody is waiting, and a loose assertion would pass on it.
+  ok('Nothing goes past somebody who has not been told first',
+    tooSoon.scheduled === 0 && /have not been contacted/i.test(tooSoon.skipped ?? ''),
+    tooSoon.skipped ?? 'it was scheduled anyway')
+
+  const escalated = await withTenant(session, async (ctx) =>
+    scheduleLadder(ctx, {
+      recipientUserId: subject.personId,
+      subjectType: 'task',
+      subjectId: lateTaskId,
+      subjectLabel: 'The escalation subject',
+      dueAt: new Date(Date.now() - 10 * 86_400_000),
+      ownerName: subject.personName,
+    }),
+  )
+  ok('Once they have been told and given the window, it escalates', escalated.scheduled === 1,
+    escalated.skipped ?? '')
+
+  const routed = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ recipient: string; about: string | null; stage: number }[]>`
+      SELECT recipient_user_id AS recipient, about_user_id AS about, stage FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND subject_id = ${lateTaskId}
+        AND delivered_at IS NULL ORDER BY created_at DESC LIMIT 1`
+    return row
+  })
+  ok('And it goes to their manager rather than to them about themselves',
+    routed?.recipient === subject.managerId && routed?.about === subject.personId,
+    `stage ${routed?.stage} → ${subject.managerName}`)
+
+  // Only this subject. The relaxed profile raises the contact budget for *everybody*, and
+  // delivering the whole queue under it would push somebody else's held-back reminders
+  // through at a limit their organization does not actually run on.
+  await withTenant(session, async (ctx) => deliverDueNudges(ctx, { subjectId: lateTaskId }))
+  const told = await withTenant({ ...session, userId: subject.personId }, async (ctx) =>
+    listDisclosures(ctx, await loadActor(ctx), subject.personId),
+  )
+  ok('And the person it was about sees that it happened, on their own record',
+    told.some((entry) => entry.kind === 'manager_rollup'),
+    told.filter((entry) => entry.kind === 'manager_rollup').length + ' recorded')
+
+  // Put the demo back the way it was found. Both halves matter: the entity goes, and so do
+  // the escalations this beat manufactured — the compliance review counts a delivered
+  // escalation against the profile in force *now*, so leaving them behind would make the
+  // works-council review fail for something that was permitted when it happened.
+  const profileAfter = await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM disclosures
+      WHERE organization_id = ${ctx.organizationId} AND source_type = 'task'
+        AND source_id IN (${lateTaskId}, ${tooSoonId})`
+    await ctx.sql`
+      DELETE FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND subject_id IN (${lateTaskId}, ${tooSoonId})`
+    await ctx.sql`
+      DELETE FROM tasks
+      WHERE organization_id = ${ctx.organizationId} AND id IN (${lateTaskId}, ${tooSoonId})`
+    for (const entity of entitiesBefore) {
+      await ctx.sql`
+        UPDATE legal_entities SET jurisdiction_profile = ${entity.profile}
+        WHERE organization_id = ${ctx.organizationId} AND id = ${entity.id}`
+    }
+    await ctx.sql`
+      DELETE FROM legal_entities
+      WHERE organization_id = ${ctx.organizationId} AND name = 'Loop GmbH'`
+    const rows = await ctx.sql<{ jurisdictionProfile: JurisdictionProfile }[]>`
+      SELECT jurisdiction_profile AS "jurisdictionProfile" FROM legal_entities
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+    return strictestProfile(rows)
+  })
+  ok('The demo is left on the profile it started on', profileAfter === 'works_council', profileAfter)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1210,7 +1383,9 @@ try {
         'colleague and taken back; and a whole project was handed over with the work inside it, which came \n' +
         'back when it did; and a shelf of knowledge was lent with what is on it while an account was lent \n' +
         'without what is filed against it; and the rules that decide what stops for a person are read \n' +
-        'from the rows that always stated them, and cannot be configured to let a change through.\n',
+        'from the rows that always stated them, and cannot be configured to let a change through; and an \n' +
+        'escalation reached a manager instead of the person it was written about, after they had been \n' +
+        'asked themselves and told that it happened.\n',
   )
 } catch (error) {
   console.error(error)

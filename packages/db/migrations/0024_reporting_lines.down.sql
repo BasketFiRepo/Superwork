@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS nudges_about_idx;
+ALTER TABLE nudges DROP COLUMN IF EXISTS about_user_id;
+DROP TRIGGER IF EXISTS reporting_same_org ON reporting_relationships;
+DROP FUNCTION IF EXISTS sw_reporting_same_org();
+DROP TRIGGER IF EXISTS reporting_no_cycle ON reporting_relationships;
+DROP FUNCTION IF EXISTS sw_reporting_no_cycle();
+DROP INDEX IF EXISTS reporting_one_functional_manager;
+DROP INDEX IF EXISTS reporting_manager_idx;
+ALTER TABLE reporting_relationships DROP CONSTRAINT IF EXISTS reporting_type_known;
+ALTER TABLE reporting_relationships DROP COLUMN IF EXISTS set_by;
+ALTER TABLE reporting_relationships DROP COLUMN IF EXISTS reason;
