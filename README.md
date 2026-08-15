@@ -19,8 +19,8 @@ true — natural-language workflow authoring, approve-with-edits, admin-authored
 Then a longer list, found by asking a blunter question: **which tables does live code read
 from that nothing has ever written to?** Each answer was a control the interface was
 claiming and the product did not have — step-up authentication, retention, erasure, legal
-holds, the agent's memory, document circulation lists, task dependencies, teams, and
-feature-flag overrides. Several were worse than gaps. The circulation-list check had been
+holds, the agent's memory, document circulation lists, task dependencies, teams,
+feature-flag overrides, and sharing. Several were worse than gaps. The circulation-list check had been
 running inside both arms of retrieval since Phase 1 and had never matched a row; the daily
 briefing had been reporting on task dependencies that could not exist; and the `guest` role
 could read nothing at all, because every permission it holds is team-scoped and no team
@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 659 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 668 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -404,6 +404,35 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Sharing one thing with one person
+
+`share`, `unshare`, `listShares` and `sharedWith` were written for Phase 4 and reachable from
+nothing but the acceptance loops — no route, no screen. Nobody could share anything, see what
+had been shared with them, or revoke a share.
+
+By the time that surfaced, two features had shipped on top of it: circulation lists union
+tuples into retrieval, and the scoped task list unions shared rows into a narrow role's view.
+**Both had a branch no user could populate.**
+
+- **A share only ever adds.** One subject, one relation, one object, and nobody's role
+  changes. That is the difference from a circulation list, which *narrows* who may reach a
+  document, and from a team, which is a standing group. Only one of the three takes access
+  away, so the panel says which.
+- **You can only share what you already hold**, checked against the granter's own permission
+  with the verb the relation implies. A tuple can never manufacture reach.
+- **A task is shareable** — it was missing from the type while the task list already looked
+  for shared tasks, so that branch could never match.
+- **"Why can I see this?" is answerable**, on your own record, including the grants that
+  reach you through a team or department rather than only those naming you.
+- **An expired share is shown, not hidden.** It stops working the moment it lapses, and stays
+  on the object's list marked as lapsed, because "they lost it on Tuesday" is the question
+  being asked.
+
+Reading the module to build the interface turned up that `sharedWith` guarded on
+`member:read` — which every role holds down to `guest` — so any colleague could list what
+somebody else had been given. It is self-only now, like `personalRecord` and
+`listDisclosures` beside it. See ADR 0023.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -732,6 +761,11 @@ away. They are evidence about query shape, not a 100,000-user result.
 
 ### What is declared and inert
 
+- The share panel is on tasks and documents. Projects, companies and knowledge spaces are
+  shareable in the type and have no panel yet.
+- There is no organization-wide view of every share. `sharedWith` is self-only, so an access
+  review is done object by object — the honest substitute until the roll-up is worth the
+  permission it would need.
 - Four of the ten feature flags — `reports`, `autopilot`, `chat_presence`, `public_api` —
   are read by nothing. They are listed on the Features screen as inert rather than given a
   switch, because a control that changes nothing is worse than an absent one.
@@ -776,6 +810,9 @@ away. They are evidence about query shape, not a 100,000-user result.
   and memories go in the same transaction, and the count of each is reported to the caller and
   written to the audit trail (§25.13). The memory count is now a real number rather than a
   fact about an empty table.
+- **Sharing adds and never subtracts.** A grant is checked against what the granter already
+  holds, is answerable from both the object and the person, and stops counting the moment it
+  expires without being deleted.
 - **A feature can be turned off for one tenant, and kept by one person.** Three layers
   resolved per request, the organization layer audited with a reason, and no switch offered
   for a flag that controls nothing.
@@ -829,6 +866,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0020](docs/adr/0020-a-dependency-that-can-be-walked-past-is-a-comment.md) | A dependency that can be walked past is a comment |
 | [0021](docs/adr/0021-a-scope-is-what-a-list-asks-about.md) | A scope is what a list asks about |
 | [0022](docs/adr/0022-a-switch-that-changes-nothing.md) | A switch that changes nothing |
+| [0023](docs/adr/0023-a-share-only-ever-adds.md) | A share only ever adds |
 
 ## Configuration
 

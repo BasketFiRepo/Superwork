@@ -1,9 +1,18 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { getTask, listTasks, listTeams, NotFoundError, PermissionError, taskDependencies } from '@superwork/core'
+import {
+  getTask,
+  listShares,
+  listTasks,
+  listTeams,
+  NotFoundError,
+  PermissionError,
+  taskDependencies,
+} from '@superwork/core'
 import { TaskDependencies } from '@/components/TaskDependencies'
 import { TaskTeam } from '@/components/TaskTeam'
+import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,7 +25,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -29,6 +38,12 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
       return {
         task: loaded,
         dependencies: deps,
+        shares: await listShares(ctx, actor, 'task', id),
+        people: await ctx.sql<{ id: string; name: string }[]>`
+          SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+          WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+            AND m.user_id <> ${actor.userId}
+          ORDER BY u.name`,
         teams: visibleTeams.map((team) => ({
           id: team.id,
           name: team.name,
@@ -66,6 +81,23 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           {task.description ? <p className="prose secondary">{task.description}</p> : null}
         </header>
+
+        <ShareObject
+          objectType="task"
+          objectId={task.id}
+          shares={shares.map((entry) => ({
+            id: entry.id,
+            subjectType: entry.subjectType,
+            subjectName: entry.subjectName,
+            relation: entry.relation,
+            reason: entry.reason,
+            grantedByName: entry.grantedByName,
+            expiresAt: entry.expiresAt ? entry.expiresAt.toISOString() : null,
+            expired: entry.expired,
+          }))}
+          people={people}
+          teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
 
         {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
 

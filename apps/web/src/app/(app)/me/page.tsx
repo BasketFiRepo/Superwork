@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { personalRecord } from '@superwork/core'
+import { personalRecord, sharedWith } from '@superwork/core'
 import { PersonalExportButton } from '@/components/PersonalExportButton'
 
 export const dynamic = 'force-dynamic'
@@ -14,7 +14,11 @@ export const dynamic = 'force-dynamic'
  */
 export default async function MePage() {
   const session = await requireSession()
-  const record = await withActor(session, (ctx, actor) => personalRecord(ctx, actor, actor.userId))
+  const { record, shares } = await withActor(session, async (ctx, actor) => ({
+    record: await personalRecord(ctx, actor, actor.userId),
+    // The other half of "what is known about you": what you were *given*, and by whom.
+    shares: await sharedWith(ctx, actor, actor.userId),
+  }))
 
   const when = (date: Date) =>
     new Intl.DateTimeFormat('en-GB', {
@@ -37,6 +41,60 @@ export default async function MePage() {
           for you — not your manager, not an admin.
         </p>
       </header>
+
+      <section className="panel" data-testid="shared-with-you">
+        <div className="panel-header">
+          <h2>Shared with you</h2>
+          <span className="small muted">
+            {shares.length === 0 ? 'Nothing beyond your role' : `${shares.length} beyond your role`}
+          </span>
+        </div>
+        {shares.length === 0 ? (
+          <div className="empty small secondary">
+            Nothing has been shared with you individually. Everything you can reach, you reach
+            through your role, your department or a team.
+          </div>
+        ) : (
+          <div className="panel-body-flush table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>What</th>
+                  <th style={{ width: 110 }}>You may</th>
+                  <th style={{ width: 140 }}>Reached through</th>
+                  <th>Why, and who gave it</th>
+                  <th style={{ width: 120 }}>Until</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shares.map((entry) => (
+                  <tr key={entry.id} data-testid="shared-row">
+                    <td>
+                      {entry.objectLabel ?? entry.objectType}
+                      <div className="small muted">{entry.objectType.replace(/_/g, ' ')}</div>
+                    </td>
+                    <td className="small secondary">{entry.relation}</td>
+                    <td className="small secondary">
+                      {entry.via === 'you' ? 'you, by name' : `your ${entry.via} · ${entry.subjectName ?? ''}`}
+                    </td>
+                    <td className="small secondary">
+                      {entry.reason ?? '—'}
+                      {entry.grantedByName ? <div className="small muted">{entry.grantedByName}</div> : null}
+                    </td>
+                    <td className="small secondary">
+                      {entry.expiresAt ? when(entry.expiresAt).slice(0, 12) : 'no end date'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="panel-body hairline-top small muted">
+          A share adds access to one specific thing and changes nothing about your role. This
+          list is the answer to “why can I see that?”.
+        </div>
+      </section>
 
       <section className="panel" data-testid="tracked">
         <div className="panel-header">

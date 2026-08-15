@@ -613,6 +613,33 @@ try {
     ))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/task-dependencies.png`, fullPage: true })
 
+  // ---- Sharing one thing with one person ------------------------------------
+  // Stays on the task opened above, which has the share panel beside its dependencies.
+  await page.locator('[data-testid="share-add"]').click()
+  await page.waitForSelector('[data-testid="share-editor"]', { timeout: 15_000 })
+  ok('Nothing is shared until somebody is chosen',
+    await page.locator('[data-testid="share-confirm"]').isDisabled())
+  const shareText = await page.locator('[data-testid="share-object"]').innerText()
+  ok('It says a share only ever adds, and cannot exceed what you hold',
+    /only ever adds/i.test(shareText) && /share what you can already do yourself/i.test(shareText))
+
+  await page.selectOption('#share-subject', { index: 1 })
+  await page.fill('#share-reason', 'Covering the renewal while I am away.')
+  await page.locator('[data-testid="share-confirm"]').click()
+  await page.waitForSelector('[data-testid="share-row"]', { timeout: 20_000 })
+  const shared = await page.locator('[data-testid="share-object"]').innerText()
+  ok('A share lands, naming who, what they may do, and why',
+    /can read it/i.test(shared) && /Covering the renewal/i.test(shared))
+
+  // The other end of the same question: the person can see why they can see it.
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="shared-with-you"]', { timeout: 15_000 })
+  ok('The personal record answers “why can I see that?”',
+    /A share adds access to one specific thing/i.test(
+      await page.locator('[data-testid="shared-with-you"]').innerText(),
+    ))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/sharing.png`, fullPage: true })
+
   // ---- Who can find a document --------------------------------------------
   // The seed restricts the Coldstore agreement, so the populated state is on screen.
   await page.goto(`${BASE}/knowledge`)
