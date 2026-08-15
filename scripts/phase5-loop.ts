@@ -123,6 +123,8 @@ import {
   saveView,
   listSavedViews,
   documentIngestions,
+  setRecurrence,
+  taskRecurrence,
   listRunMessages,
   ledgerReport,
   monthPeriod,
@@ -2483,6 +2485,75 @@ try {
     spend.report.models.length > 0,
     spend.report.models.map((m) => `${m.taskClass}@${m.model}`).slice(0, 3).join(', '))
 
+
+  // ---- Work that comes back -----------------------------------------------
+  console.log('\nAn obligation that repeats…\n')
+
+  const repeat = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const made = await createTask(ctx, actor, {
+      title: 'loop recurring — file the temperature logs',
+      assigneeId: actor.userId,
+      dueAt: new Date(Date.now() + 2 * 86_400_000),
+    })
+
+    const refused = await setRecurrence(ctx, actor, { taskId: made.id, rule: '@reboot' }).then(
+      () => null,
+      (error: Error) => error.message,
+    )
+    const set = await setRecurrence(ctx, actor, { taskId: made.id, rule: '0 9 * * 1' })
+
+    await updateTask(ctx, actor, { id: made.id, status: 'completed' })
+
+    const series = await ctx.sql<{ id: string; status: string; dueAt: Date; rule: string | null }[]>`
+      SELECT id, status::text AS status, due_at AS "dueAt", recurrence_rule AS rule FROM tasks
+      WHERE organization_id = ${ctx.organizationId} AND title = 'loop recurring — file the temperature logs'
+        AND deleted_at IS NULL
+      ORDER BY due_at`
+    const open = series.filter((row) => !['completed', 'cancelled'].includes(row.status))
+
+    const [seriesId] = await ctx.sql<{ sid: string }[]>`
+      SELECT recurrence_series_id AS sid FROM tasks WHERE id = ${open[0]!.id}`
+    const view = await taskRecurrence(ctx, actor, open[0]!.id)
+    return { refused, set, series, open, view, seriesId: seriesId!.sid }
+  })
+
+  // Probed on the owner connection rather than inside a transaction: a failed statement puts
+  // its transaction into an aborted state, so catching the error would still take the block
+  // down at COMMIT — and the claim under test is that the database refuses this to *anybody*,
+  // which the owner connection is the strongest form of.
+  const doubled = await adminSql()`
+    INSERT INTO tasks (organization_id, title, status, priority, due_at,
+                       recurrence_rule, recurrence_series_id, is_demo, created_by)
+    VALUES (${session.organizationId}, 'loop recurring — a second open one', 'todo', 'medium', now(),
+            '@weekly', ${repeat.seriesId}, true, ${session.userId})`.then(
+    () => null,
+    (error: Error) => error.message,
+  )
+
+  // Put the demo back.
+  await withTenant(session, async (ctx) => {
+    const ids = repeat.series.map((row) => row.id)
+    await ctx.sql`
+      DELETE FROM links WHERE organization_id = ${ctx.organizationId} AND from_id = ANY(${ids}::uuid[])`
+    await ctx.sql`
+      DELETE FROM activities WHERE organization_id = ${ctx.organizationId} AND entity_id = ANY(${ids}::uuid[])`
+    await ctx.sql`
+      DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop recurring —%'`
+  })
+
+  ok('A repeat is refused in the same words the automations screen uses',
+    /not a schedule/i.test(repeat.refused ?? ''), (repeat.refused ?? 'it was allowed').slice(0, 60))
+  ok('And a good one is read back in English, with the date it would next fall',
+    /monday/i.test(repeat.set?.description ?? '') && repeat.set?.nextDueAt !== null,
+    repeat.set?.description ?? '')
+  ok('Finishing one makes the next, carrying the same owner rather than inventing one',
+    repeat.series.length === 2 && repeat.open.length === 1 && repeat.open[0]!.dueAt.getTime() > Date.now())
+  ok('The rule moves to the open occurrence, so a finished one cannot be stopped',
+    repeat.series.filter((row) => row.rule !== null).length === 1)
+  ok('And the database refuses a second open occurrence, whatever writes it',
+    /one_open_occurrence/i.test(doubled ?? ''), (doubled ?? 'it was allowed').slice(0, 50))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2519,7 +2590,8 @@ try {
         'that will not index says so, is retried on a widening delay, gives up out loud rather \n' +
         'than for ever, and can be put back into memory by a person; and nobody is chased on a \n' +
         'day they do not work — not at a weekend, and not on Christmas Day; and what the model \n' +
-        'was asked, what it answered and what that cost is on the record, counted once.\n',
+        'was asked, what it answered and what that cost is on the record, counted once; and work \n' +
+        'that comes back does, one occurrence at a time, without anybody retyping it.\n',
   )
 } catch (error) {
   console.error(error)

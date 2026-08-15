@@ -103,6 +103,13 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
                       <td>
                         <div className="stack stack-1">
                           <Link href={`/tasks/${task.id}`}>{task.title}</Link>
+                          {task.recurrenceRule ? (
+                            <span className="row-tight small">
+                              <span className="chip" data-testid="task-repeats-chip">
+                                repeats
+                              </span>
+                            </span>
+                          ) : null}
                           {task.blockedByCount > 0 || task.blockingCount > 0 ? (
                             <span className="row-tight small">
                               {task.blockedByCount > 0 ? (

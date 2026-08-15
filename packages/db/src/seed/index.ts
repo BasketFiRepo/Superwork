@@ -519,6 +519,24 @@ async function seedTasks(
     count += 1
   }
 
+  // The obligations that actually come back. `tasks.recurrence_rule` was written by nothing,
+  // so the demo's weekly and monthly work looked like a pile of one-offs somebody had typed
+  // out by hand — which is exactly what it was (ADR 0041).
+  const recurring: { title: string; rule: string; assignee: string; dueInDays: number }[] = [
+    { title: 'File the weekly temperature logs', rule: '0 9 * * 1', assignee: 'priya', dueInDays: 2 },
+    { title: 'Reconcile the month-end carrier invoices', rule: '0 9 1 * *', assignee: 'joe', dueInDays: 9 },
+    { title: 'Review the quarterly cold-chain audit actions', rule: '0 9 1 1,4,7,10 *', assignee: 'nina', dueInDays: 21 },
+  ]
+  for (const template of recurring) {
+    await ctx.sql`
+      INSERT INTO tasks (organization_id, project_id, title, status, priority, assignee_id,
+                         due_at, department_id, recurrence_rule, recurrence_series_id, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${projectIds.get('kestrel-audit')!}, ${template.title},
+              'todo', 'medium', ${userIds.get(template.assignee)!}, ${ahead(template.dueInDays)},
+              ${departmentIds.get('Operations')!}, ${template.rule}, gen_random_uuid(), true, ${ctx.userId})`
+    count += 1
+  }
+
   // Background volume so list views, workload and health scores have realistic mass.
   const verbs = ['Chase', 'Review', 'Confirm', 'Update', 'Prepare', 'Reconcile', 'Book', 'File', 'Check']
   const objects = [

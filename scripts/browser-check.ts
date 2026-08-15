@@ -1323,6 +1323,50 @@ try {
   ok('With a row per model and task class', modelRows > 0, `${modelRows} rows`)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/model-spend.png`, fullPage: true })
 
+  // ---- Work that comes back -----------------------------------------------
+  // `tasks.recurrence_rule` was written by nothing, so every recurring obligation was retyped
+  // by a person each time or forgotten.
+  await page.goto(`${BASE}/tasks?filter=all`)
+  await page.waitForSelector('[data-testid="task-row"]', { timeout: 15_000 })
+  const repeatChips = await page.locator('[data-testid="task-repeats-chip"]').count()
+  ok('The list marks work that repeats, so it is not read as a one-off', repeatChips > 0, `${repeatChips} repeating`)
+
+  const repeatingRow = page.locator('[data-testid="task-row"]', {
+    has: page.locator('[data-testid="task-repeats-chip"]'),
+  })
+  await repeatingRow.first().locator('a').first().click()
+  await page.waitForSelector('[data-testid="task-recurrence"]', { timeout: 15_000 })
+  const recurrence = await page.locator('[data-testid="task-recurrence"]').innerText()
+  // Scoped to the summary: the editor's input holds the raw expression, and the point of the
+  // assertion is that the sentence a person reads carries no cron in it.
+  const summary = await page.locator('[data-testid="recurrence-summary"]').innerText()
+  ok('The task says how often it repeats, in English rather than in cron',
+    // Only the wildcard: the timezone name legitimately contains a slash.
+    /This repeats /i.test(summary) && !summary.split('Finishing')[0]!.includes('*'),
+    summary.slice(0, 70).replace(/\n/g, ' '))
+  ok('And that finishing it is what makes the next one, one at a time',
+    /Finishing it will make the next one/i.test(recurrence) && /Only one is ever open at a time/i.test(recurrence))
+  ok('It says cancelling one occurrence does not stop the series',
+    /is not\s+“stop doing this”/i.test(recurrence))
+
+  await page.locator('[data-testid="recurrence-edit"]').click()
+  await page.waitForSelector('[data-testid="recurrence-editor"]', { timeout: 15_000 })
+  ok('The presets are the same schedules the automations screen accepts',
+    /automations screen accepts/i.test(await page.locator('[data-testid="task-recurrence"]').innerText()))
+  await page.fill('#recurrence-rule', '@reboot')
+  expectingRefusal = true
+  await page.locator('[data-testid="recurrence-confirm"]').click()
+  const refused = await page
+    .waitForFunction(
+      () => /not a schedule/i.test(document.querySelector('[data-testid="task-recurrence"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  expectingRefusal = false
+  ok('A schedule it cannot honour is refused by name, not stored', refused)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/recurring-tasks.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before

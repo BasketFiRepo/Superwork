@@ -1,5 +1,15 @@
 import { z } from 'zod'
-import { createTask, deleteTask, getTask, updateTask, type PreviewLine } from '@superwork/core'
+import {
+  createTask,
+  cronProblem,
+  deleteTask,
+  describeCron,
+  getTask,
+  setRecurrence,
+  taskRecurrence,
+  updateTask,
+  type PreviewLine,
+} from '@superwork/core'
 import { register, type ToolContext } from '../registry.js'
 
 /**
@@ -185,6 +195,64 @@ export const updateTaskTool = register({
         entityType: 'task',
         entityLabel: before.title,
         changes: changes.length ? changes : [{ field: 'No effective change', to: 'none' }],
+        riskTier: 'low',
+        reversible: true,
+      },
+    ]
+  },
+})
+
+/**
+ * Recurrence (ADR 0041).
+ *
+ * The assistant is asked "make this weekly" more often than almost anything else, and until
+ * now the only answer was to create another task by hand each time. The grammar is the one
+ * the workflow schedules use, and the preview reads it back in English before anything is
+ * written — a repeat somebody did not mean is a task that comes back for ever.
+ */
+export const setTaskRecurrence = register({
+  name: 'set_task_recurrence@v1',
+  description:
+    'Make a task repeat on a schedule, or stop it repeating. Uses the same schedules as automations: five cron fields like "0 9 * * 1-5", or an alias like @weekly. Pass rule: null to stop.',
+  inputSchema: z.object({
+    id: z.string().uuid(),
+    rule: z.string().max(120).nullable(),
+  }),
+  outputSchema: z.object({ id: z.string(), repeats: z.string().nullable() }),
+  riskTier: 'low' as const,
+  requiredPermissions: ['task:update:org'],
+  reversible: true,
+  inverse: 'set_task_recurrence@v1',
+  rateLimit: { perRun: 20, perOrgPerHour: 500 },
+  timeoutMs: 8000,
+  idempotent: true,
+  redactions: [],
+  async execute(input, ctx: ToolContext) {
+    const recurrence = await setRecurrence(ctx.tenantDb, ctx.policy, { taskId: input.id, rule: input.rule })
+    return { ok: true as const, value: { id: input.id, repeats: recurrence?.description ?? null } }
+  },
+  async preview(input, ctx: ToolContext): Promise<PreviewLine[]> {
+    const before = await getTask(ctx.tenantDb, ctx.policy, input.id)
+    const current = await taskRecurrence(ctx.tenantDb, ctx.policy, input.id)
+    // Refused here as well as in the repository, so an approver is shown the problem rather
+    // than a diff that will not apply.
+    const problem = input.rule === null ? null : cronProblem(input.rule)
+    return [
+      {
+        operation: input.rule === null ? 'Stop a task repeating' : 'Make a task repeat',
+        entityType: 'task',
+        entityLabel: before.title,
+        changes: [
+          {
+            field: 'Repeats',
+            from: current?.description ?? 'never',
+            to:
+              problem ??
+              (input.rule === null
+                ? 'never — the ones already made stay'
+                : describeCron(input.rule, ctx.tenantDb.timezone)),
+          },
+        ],
         riskTier: 'low',
         reversible: true,
       },

@@ -933,6 +933,32 @@ and task class, read from the same rows the totals are summed from.
 
 **Activity → any run; Analytics.** See ADR 0040.
 
+## Work that comes back
+
+`tasks.recurrence_rule` has existed since migration 0002 and nothing ever wrote to it or read
+it, so every recurring obligation was retyped each time or forgotten. The seed's own task list
+was full of them, sitting there as one-offs.
+
+- **The grammar is the one the product already has** — the same timezone-aware cron the
+  workflow schedules use, read back by the same describer and refusing the same things in the
+  same words (`@reboot` is not a schedule).
+- **One open occurrence at a time**, held by a partial unique index rather than by the code
+  that creates the next one, so a double completion cannot produce two.
+- **Finishing one makes the next, and cancelling counts as finishing** — "nothing to file this
+  week" is not "stop filing". Ending the series is a separate act, and the occurrences already
+  made stay.
+- **Counted from the later of the occurrence's date and now**, so a task completed three weeks
+  late does not produce a next one that is already overdue.
+- **The rule moves to the open occurrence**, so a finished task cannot be used to stop a repeat.
+- **A due date is a promise, not a delivery.** When the next one lands on a non-working day the
+  date is left alone and the screen says so — the chasing already respects the calendar
+  (ADR 0039).
+
+`set_task_recurrence@v1` joins the tool catalogue, with a `preview()` that reads the schedule
+back in English before anything is written.
+
+**Tasks; any task.** See ADR 0041.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1418,6 +1444,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0038](docs/adr/0038-indexing-has-to-survive-the-request-that-asked-for-it.md) | Indexing has to survive the request that asked for it |
 | [0039](docs/adr/0039-a-day-somebody-does-not-work.md) | A day somebody does not work |
 | [0040](docs/adr/0040-one-writer-for-what-the-model-cost.md) | One writer for what the model cost |
+| [0041](docs/adr/0041-work-that-comes-back.md) | Work that comes back |
 
 ## Configuration
 
