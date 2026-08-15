@@ -45,6 +45,10 @@ export interface ShareView {
   expired: boolean
   /** How this reached the person: directly, or through a team or department they belong to. */
   via: 'you' | 'team' | 'department'
+  /** Who granted it, so the granter can take it back again. */
+  grantedById: string | null
+  /** Whether *this* reader may revoke it — the Revoke button is disabled when they cannot. */
+  canRevoke: boolean
 }
 
 /**
@@ -66,6 +70,31 @@ const VERB_FOR_RELATION: Record<Relation, string> = {
   editor: 'update',
   approver: 'update',
   owner: 'update',
+}
+
+/**
+ * Which relations this actor could actually grant on this object.
+ *
+ * The panel used to offer all four to everybody, so a member — who holds `project:read:org`
+ * but not `project:update` — could pick "can change it" and be refused after filling the
+ * form in. Same rule, same table, asked before the button is drawn rather than after it is
+ * pressed (§2, every button does something).
+ */
+export function shareableRelations(
+  actor: Actor,
+  objectType: ShareableType,
+  objectId: string,
+  organizationId: string,
+): Relation[] {
+  return (Object.keys(VERB_FOR_RELATION) as Relation[]).filter(
+    (relation) =>
+      can(actor, `${objectType}:${VERB_FOR_RELATION[relation]}`, {
+        type: objectType,
+        id: objectId,
+        organizationId,
+        riskTier: 'low',
+      }).allow,
+  )
 }
 
 export async function share(
@@ -159,13 +188,29 @@ export async function unshare(
   actor: Actor,
   input: { objectType: ShareableType; objectId: string; tupleId: string },
 ): Promise<void> {
-  const decision = can(actor, `${input.objectType}:update`, {
-    type: input.objectType,
-    id: input.objectId,
-    organizationId: ctx.organizationId,
-    riskTier: 'low',
-  })
-  if (!decision.allow) throw new PermissionError(decision.reason)
+  const [tuple] = await ctx.sql<{ grantedBy: string | null }[]>`
+    SELECT granted_by AS "grantedBy" FROM relation_tuples
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.tupleId} AND deleted_at IS NULL`
+  if (!tuple) throw new NotFoundError()
+
+  // You can always take back what you gave. Revoking only ever narrows, so this cannot
+  // widen anybody's access — and requiring `update` on the object meant a member who could
+  // share a project as a viewer (they hold `project:read`) could not undo it afterwards.
+  // A grant you cannot withdraw is worse than one you cannot make.
+  const mine = tuple.grantedBy === actor.userId
+  if (!mine) {
+    const decision = can(actor, `${input.objectType}:update`, {
+      type: input.objectType,
+      id: input.objectId,
+      organizationId: ctx.organizationId,
+      riskTier: 'low',
+    })
+    if (!decision.allow) {
+      throw new PermissionError(
+        `${decision.reason} You can always revoke a share you granted yourself; this one was granted by somebody else.`,
+      )
+    }
+  }
 
   await ctx.sql`
     UPDATE relation_tuples SET deleted_at = now()
@@ -177,7 +222,7 @@ export async function unshare(
     action: 'sharing.revoked',
     entityType: input.objectType,
     entityId: input.objectId,
-    after: { tupleId: input.tupleId },
+    after: { tupleId: input.tupleId, ...(mine ? { revokedOwnGrant: true } : {}) },
   })
 }
 
@@ -194,16 +239,24 @@ export async function listShares(
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
 
-  return ctx.sql<ShareView[]>`
+  const mayRevokeAny = can(actor, `${objectType}:update`, {
+    type: objectType,
+    id: objectId,
+    organizationId: ctx.organizationId,
+    riskTier: 'low',
+  }).allow
+
+  const rows = await ctx.sql<ShareView[]>`
     SELECT t.id, t.subject_type AS "subjectType", t.subject_id AS "subjectId",
            coalesce(u.name, tm.name, d.name) AS "subjectName",
            t.relation, t.object_type AS "objectType", t.object_id AS "objectId",
-           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt",
+           t.reason, t.granted_by AS "grantedById", g.name AS "grantedByName",
+           t.expires_at AS "expiresAt", t.created_at AS "createdAt",
            ${OBJECT_LABEL(ctx)} AS "objectLabel",
            -- Shown rather than filtered out: "this lapsed on Tuesday" is the answer
            -- somebody is looking for when they ask why a colleague lost access.
            (t.expires_at IS NOT NULL AND t.expires_at <= now()) AS expired,
-           'you' AS via
+           'you' AS via, false AS "canRevoke"
     FROM relation_tuples t
     LEFT JOIN users u ON t.subject_type = 'user' AND u.id = t.subject_id
     LEFT JOIN teams tm ON t.subject_type = 'team' AND tm.id = t.subject_id
@@ -212,6 +265,8 @@ export async function listShares(
     WHERE t.organization_id = ${ctx.organizationId} AND t.deleted_at IS NULL
       AND t.object_type = ${objectType} AND t.object_id = ${objectId}
     ORDER BY t.created_at DESC`
+
+  return rows.map((row) => ({ ...row, canRevoke: mayRevokeAny || row.grantedById === actor.userId }))
 }
 
 /**
@@ -243,10 +298,14 @@ export async function sharedWith(
     SELECT t.id, t.subject_type AS "subjectType", t.subject_id AS "subjectId",
            coalesce(u.name, tm.name, d.name) AS "subjectName",
            t.relation, t.object_type AS "objectType", t.object_id AS "objectId",
-           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt",
+           t.reason, t.granted_by AS "grantedById", g.name AS "grantedByName",
+           t.expires_at AS "expiresAt", t.created_at AS "createdAt",
            ${OBJECT_LABEL(ctx)} AS "objectLabel",
            false AS expired,
-           CASE t.subject_type WHEN 'user' THEN 'you' ELSE t.subject_type END AS via
+           CASE t.subject_type WHEN 'user' THEN 'you' ELSE t.subject_type END AS via,
+           -- Revoking is done from the object's own panel, where the permission is the
+           -- object's. This view is "what have I been given", not a place to give it back.
+           false AS "canRevoke"
     FROM relation_tuples t
     LEFT JOIN users u ON t.subject_type = 'user' AND u.id = t.subject_id
     LEFT JOIN teams tm ON t.subject_type = 'team' AND tm.id = t.subject_id

@@ -433,6 +433,33 @@ Reading the module to build the interface turned up that `sharedWith` guarded on
 somebody else had been given. It is self-only now, like `personalRecord` and
 `listDisclosures` beside it. See ADR 0023.
 
+### Sharing a whole project
+
+A project had no page to put a panel on — only a list. Giving it one exposed the shape of
+the problem: a project tuple opens the project and nothing on it, because the tasks inside
+are separate rows with their own scope. *"I shared the project with you"* and *"you can see
+none of its work"* would both have been true.
+
+- **A container lends a read of what is inside it.** `listTasks` unions the tasks of shared
+  projects into its scope predicate and `getTask` passes the task's project as its
+  container, so the list and the page agree.
+- **Never a say.** Not even `owner` on a project lends `update` on a task in it. The set of
+  rows inside a project changes daily and the granter cannot see what they are handing over,
+  so write access is granted on the row itself, where it can be seen.
+- **A container you cannot open lends nothing.** A project classified above the recipient
+  stayed shut while its tasks — which carry no classification of their own — opened anyway.
+  The acceptance loop found that, not the test pack.
+- **The project list is a permission check now**, not RLS alone. It was a raw query gated on
+  `organization_id`, so a `guest` holding `project:read:team` saw every project in the
+  company.
+- **You can always take back what you gave.** `unshare` needed `update` on the object, so a
+  member who could share a project as a viewer could not undo it. The granter can always
+  revoke their own grant, and each row says whether this reader may.
+- **The panel offers only the relations you could actually grant**, rather than four buttons
+  of which three are refused after the form is filled in.
+
+See ADR 0024.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -743,9 +770,9 @@ away. They are evidence about query shape, not a 100,000-user result.
   a hold is released by somebody deciding to, not by a clock.
 - A task dependency has no type. There is one relation, "cannot be completed until", not a
   scheduling calculus.
-- Only the task and document lists are scope-aware. The other list endpoints still gate at
-  organization level, which is right for every role above `guest` and wrong in the same way
-  for `guest`.
+- Only the task, document and project lists are scope-aware. The other list endpoints still
+  gate at organization level, which is right for every role above `guest` and wrong in the
+  same way for `guest`.
 
 ### Where we refuse on purpose
 
@@ -761,8 +788,17 @@ away. They are evidence about query shape, not a 100,000-user result.
 
 ### What is declared and inert
 
-- The share panel is on tasks and documents. Projects, companies and knowledge spaces are
-  shareable in the type and have no panel yet.
+- The share panel is on tasks, documents and projects. Companies and knowledge spaces are
+  shareable in the type and have no detail page to put a panel on.
+- A container share reaches one level and one relationship: a project's tasks. Documents and
+  meetings belong to things too and are not wired up. A rule with one caller is easier to
+  reason about than one with four and a test pack for one of them.
+- Sharing a project adds nobody to a circulation list, so a restricted document inside a
+  shared project stays restricted. "Shared the project" and "the assistant can cite
+  everything in it" are different statements, deliberately.
+- `project_members` is written by the seed and read by nothing. It carries one row per
+  project — the owner, who is already on the project row — so it says nothing the product
+  does not already know. Sharing is the mechanism that grants project access.
 - There is no organization-wide view of every share. `sharedWith` is self-only, so an access
   review is done object by object — the honest substitute until the roll-up is worth the
   permission it would need.
@@ -867,6 +903,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0021](docs/adr/0021-a-scope-is-what-a-list-asks-about.md) | A scope is what a list asks about |
 | [0022](docs/adr/0022-a-switch-that-changes-nothing.md) | A switch that changes nothing |
 | [0023](docs/adr/0023-a-share-only-ever-adds.md) | A share only ever adds |
+| [0024](docs/adr/0024-a-container-lends-a-read.md) | A container lends a read, never a say |
 
 ## Configuration
 

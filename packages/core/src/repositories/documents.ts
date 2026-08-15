@@ -31,6 +31,10 @@ const SELECT_DOC = (ctx: TenantContext) => ctx.sql`
          d.quarantine_reason AS "quarantineReason", d.citation_count AS "citationCount",
          d.company_id AS "companyId", c.name AS "companyName",
          d.owner_id AS "ownerId", u.name AS "ownerName", d.department_id AS "departmentId",
+         -- Declared on DocumentView and never selected, so it arrived undefined: the
+         -- team-scoped list matched on d.team_id and then getDocument passed an empty
+         -- teamIds and refused the very row the list had just shown.
+         d.team_id AS "teamId",
          (SELECT count(*)::int FROM document_chunks ch
            WHERE ch.document_id = d.id AND ch.version_id = d.current_version_id) AS "chunkCount",
          d.created_at AS "createdAt", d.updated_at AS "updatedAt"

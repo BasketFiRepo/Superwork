@@ -1,5 +1,5 @@
-import type { Priority, TaskStatus, TenantContext } from '@superwork/db'
-import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
+import type { Priority, Sensitivity, TaskStatus, TenantContext } from '@superwork/db'
+import { can, grantedScope, readCeiling, sharedObjectIds, type Actor } from '@superwork/auth'
 import { ConflictError, NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
@@ -16,6 +16,8 @@ export interface TaskView {
   assigneeName: string | null
   projectId: string | null
   projectName: string | null
+  /** The project's classification, so a share of it cannot reach past that classification. */
+  projectSensitivity: Sensitivity | null
   companyId: string | null
   companyName: string | null
   departmentId: string | null
@@ -38,7 +40,7 @@ export interface TaskView {
 const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
   SELECT t.id, t.title, t.description, t.status, t.priority,
          t.assignee_id AS "assigneeId", u.name AS "assigneeName",
-         t.project_id AS "projectId", p.name AS "projectName",
+         t.project_id AS "projectId", p.name AS "projectName", p.sensitivity AS "projectSensitivity",
          p.company_id AS "companyId", c.name AS "companyName",
          t.department_id AS "departmentId", t.team_id AS "teamId",
          t.due_at AS "dueAt", t.waiting_on AS "waitingOn", t.blocked_reason AS "blockedReason",
@@ -90,6 +92,10 @@ export async function listTasks(
   const limit = Math.min(filter.limit ?? 50, 200)
   const sql = ctx.sql
   const shared = sharedObjectIds(actor, 'task')
+  // A project shared with somebody reaches the work inside it, or "I shared the project
+  // with you" and "you can see none of its tasks" are both true (ADR 0024). Read only —
+  // `can()` refuses a container relation for any verb but read.
+  const sharedProjects = sharedObjectIds(actor, 'project')
   // A tuple grants one row regardless of scope, so it is unioned in rather than narrowing.
   const visible =
     scope === 'org'
@@ -103,6 +109,12 @@ export async function listTasks(
                   : sql`(t.assignee_id = ${actor.userId} OR t.created_by = ${actor.userId})`
             }
             ${shared.length ? sql`OR t.id = ANY(${shared}::uuid[])` : sql``}
+            ${
+              sharedProjects.length
+                ? sql`OR (t.project_id = ANY(${sharedProjects}::uuid[])
+                          AND p.sensitivity <= ${readCeiling(actor)}::sw_sensitivity)`
+                : sql``
+            }
           )`
   const assignee =
     filter.assigneeId === 'me' ? actor.userId : filter.assigneeId === 'unassigned' ? null : filter.assigneeId
@@ -149,6 +161,11 @@ export async function getTask(ctx: TenantContext, actor: Actor, id: string): Pro
     assigneeId: task.assigneeId,
     departmentId: task.departmentId,
     teamIds: task.teamId ? [task.teamId] : [],
+    // So the list and the page agree: a project share puts the task in the list, and this
+    // is what lets the same person open it.
+    containers: task.projectId
+      ? [{ type: 'project', id: task.projectId, sensitivity: task.projectSensitivity ?? undefined }]
+      : [],
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
   return task

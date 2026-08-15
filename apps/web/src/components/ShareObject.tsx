@@ -21,6 +21,7 @@ export interface ShareRow {
   grantedByName: string | null
   expiresAt: string | null
   expired: boolean
+  canRevoke: boolean
 }
 
 export interface Candidate {
@@ -35,18 +36,30 @@ const RELATIONS = [
   { id: 'owner', label: 'owns it' },
 ]
 
+/** What a share of this kind of thing reaches beyond the thing itself. */
+const REACH: Partial<Record<string, string>> = {
+  project:
+    'Sharing a project also lets them read the work inside it — its tasks — because a project they cannot see the work of is not much of a share. It lends a read, never a say: changing a task still needs access to that task.',
+}
+
 export function ShareObject({
   objectType,
   objectId,
   shares,
   people,
   teams,
+  relations = ['viewer', 'editor', 'approver', 'owner'],
 }: {
   objectType: 'task' | 'document' | 'project' | 'company' | 'knowledge_space'
   objectId: string
   shares: ShareRow[]
   people: Candidate[]
   teams: Candidate[]
+  /**
+   * The relations this person could actually grant. Offering all four to everybody meant a
+   * member could fill the form in and be refused on submit.
+   */
+  relations?: string[]
 }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
@@ -54,7 +67,7 @@ export function ShareObject({
   const [adding, setAdding] = useState(false)
   const [subjectType, setSubjectType] = useState<'user' | 'team'>('user')
   const [subject, setSubject] = useState('')
-  const [relation, setRelation] = useState('viewer')
+  const [relation, setRelation] = useState(relations[0] ?? 'viewer')
   const [reason, setReason] = useState('')
   const [expires, setExpires] = useState('')
 
@@ -81,6 +94,8 @@ export function ShareObject({
 
   const options = subjectType === 'user' ? people : teams
   const live = shares.filter((entry) => !entry.expired)
+  const offered = RELATIONS.filter((option) => relations.includes(option.id))
+  const reach = REACH[objectType]
 
   return (
     <section className="panel" data-testid="share-object">
@@ -103,6 +118,12 @@ export function ShareObject({
           role. It only ever adds — it cannot take access away from anybody who already has it,
           and you can only share what you can already do yourself.
         </p>
+
+        {reach ? (
+          <p className="prose small secondary" data-testid="share-reach" style={{ margin: 0 }}>
+            {reach}
+          </p>
+        ) : null}
 
         {shares.length === 0 ? (
           <div className="empty small secondary">
@@ -145,7 +166,12 @@ export function ShareObject({
                       <button
                         className="btn btn-ghost small"
                         data-testid="share-revoke"
-                        disabled={busy}
+                        disabled={busy || !entry.canRevoke}
+                        title={
+                          entry.canRevoke
+                            ? undefined
+                            : 'Somebody else granted this, and you cannot change this thing. Ask them, or an admin.'
+                        }
                         onClick={() => post({ action: 'unshare', tupleId: entry.id })}
                       >
                         Revoke
@@ -200,7 +226,7 @@ export function ShareObject({
                   value={relation}
                   onChange={(event) => setRelation(event.target.value)}
                 >
-                  {RELATIONS.map((option) => (
+                  {offered.map((option) => (
                     <option key={option.id} value={option.id}>
                       {option.label}
                     </option>
@@ -256,6 +282,11 @@ export function ShareObject({
                 Cancel
               </button>
             </div>
+          </div>
+        ) : offered.length === 0 ? (
+          <div className="empty small secondary" data-testid="share-not-yours">
+            You can read this but not hand it on. Sharing passes on something you hold, so it
+            needs at least your own access to give.
           </div>
         ) : (
           <div className="row">

@@ -678,6 +678,37 @@ try {
     /everybody else loses the ability to find this document/i.test(firstGrant))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-audience.png`, fullPage: true })
 
+  // ---- A project, and handing the whole of it to somebody -----------------
+  await page.goto(`${BASE}/projects`)
+  await page.waitForSelector('.panel h2 a', { timeout: 15_000 })
+  const projectName = await page.locator('.panel h2 a').first().innerText()
+  await page.locator('.panel h2 a').first().click()
+  await page.waitForSelector('[data-testid="project-tasks"]', { timeout: 15_000 })
+
+  ok('A project opens on a page of its own', (await page.locator('h1').innerText()) === projectName, projectName)
+  ok('The health band is on it, with the number beside it',
+    /\d/.test(await page.locator('[data-testid="project-health-band"]').innerText()))
+  ok('And the arithmetic behind the number, not just the number',
+    /Overdue work/.test(await page.locator('.panel', { hasText: 'Why the score is what it is' }).first().innerText()))
+
+  const projectShareText = await page.locator('[data-testid="share-object"]').innerText()
+  ok('Sharing a project says it reaches the work inside it',
+    /read the work inside it/i.test(projectShareText))
+  ok('And that it lends a read, not a say',
+    /lends a read, never a say/i.test(projectShareText))
+
+  await page.locator('[data-testid="share-add"]').click()
+  await page.waitForSelector('[data-testid="share-editor"]', { timeout: 15_000 })
+  await page.selectOption('#share-subject', { index: 1 })
+  await page.fill('#share-reason', 'Reviewing the delivery plan with us this month.')
+  await page.locator('[data-testid="share-confirm"]').click()
+  await page.waitForSelector('[data-testid="share-row"]', { timeout: 20_000 })
+  ok('A project share lands, with its reason on the row',
+    /Reviewing the delivery plan/i.test(await page.locator('[data-testid="share-object"]').innerText()))
+  ok('And the owner can take it back again',
+    await page.locator('[data-testid="share-revoke"]').first().isEnabled())
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })

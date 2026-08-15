@@ -46,12 +46,14 @@ import {
   deleteDocument,
   documentAudience,
   getRun,
+  getTask,
   grantDocumentAccess,
   hybridSearch,
   ingestDocument,
   listHolds,
   listDocuments,
   listMemories,
+  listProjects,
   listShares,
   listTasks,
   openDocumentToEveryone,
@@ -907,6 +909,104 @@ try {
       (await listTasks(ctx, await loadActor(ctx), { limit: 200 })).tasks.some((t) => t.id === handover.taskId),
     )))
 
+  // ---- A whole project, and the work inside it ------------------------------
+  console.log('\nA project is shared, and the work inside it comes with it…\n')
+
+  const project = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const rows = await listProjects(ctx, actor)
+    // A contractor reads up to `public`, and the demo's projects are `internal`. Reclassify
+    // one rather than pick around it: sharing an internal project with a guest is *supposed*
+    // to leave it shut, and a beat that quietly avoided the case would prove nothing.
+    const target = rows[0]!
+    await ctx.sql`
+      UPDATE projects SET sensitivity = 'public'
+      WHERE organization_id = ${ctx.organizationId} AND id = ${target.id}`
+    return { id: target.id, name: target.name }
+  })
+
+  const beforeShare = await withTenant(asContractor, async (ctx) => {
+    const actor = await loadActor(ctx)
+    return {
+      projects: (await listProjects(ctx, actor)).length,
+      tasks: (await listTasks(ctx, actor, { projectId: project.id, limit: 200 })).tasks.length,
+    }
+  })
+  ok('A contractor sees no project of ours to begin with', beforeShare.projects === 0)
+  ok('And none of the work in this one', beforeShare.tasks === 0)
+
+  const projectShare = await withTenant(session, async (ctx) =>
+    share(ctx, await loadActor(ctx), {
+      subjectType: 'user',
+      subjectId: contractor!.id,
+      relation: 'viewer',
+      objectType: 'project',
+      objectId: project.id,
+      reason: 'Reviewing the delivery plan with us this month.',
+    }),
+  )
+  ok('A project can be shared, and the grant names it', projectShare.objectLabel === project.name,
+    projectShare.objectLabel ?? 'no label')
+
+  const afterShare = await withTenant(asContractor, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const inside = (await listTasks(ctx, actor, { projectId: project.id, limit: 200 })).tasks
+    const first = inside[0]
+    return {
+      projects: (await listProjects(ctx, actor)).map((row) => row.id),
+      tasks: inside.length,
+      // The list and the page have to agree: anything listed has to open.
+      opens: first ? await getTask(ctx, actor, first.id).then(() => true, () => false) : null,
+      changes: first
+        ? await updateTask(ctx, actor, { id: first.id, title: 'Renamed by a contractor' }).then(
+            () => true,
+            () => false,
+          )
+        : null,
+    }
+  })
+  ok('Sharing the project opens the project', afterShare.projects.includes(project.id))
+  ok('And the work inside it, or the share was a page with nothing on it', afterShare.tasks > 0,
+    `${afterShare.tasks} tasks`)
+  ok('Anything they can list, they can open', afterShare.opens !== false)
+  ok('But a project lends a read, never a say over the work in it', afterShare.changes !== true)
+
+  // Classify it above them and the share stops reaching, without being revoked. This is the
+  // check that found the hole: the project itself was already refused on classification
+  // while its tasks — which carry no classification of their own — opened anyway.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE projects SET sensitivity = 'confidential'
+      WHERE organization_id = ${ctx.organizationId} AND id = ${project.id}`
+  })
+  // Read in its own transaction: nested inside the writer, this saw the pre-update row and
+  // reported the hole as closed while it was still open.
+  const classified = await withTenant(asContractor, async (ctx) =>
+    (await listTasks(ctx, await loadActor(ctx), { projectId: project.id, limit: 200 })).tasks.length,
+  )
+  ok('A share cannot reach inside something they are not cleared to open', classified === 0,
+    `${classified} tasks still reachable`)
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE projects SET sensitivity = 'public'
+      WHERE organization_id = ${ctx.organizationId} AND id = ${project.id}`
+  })
+
+  const projectRevoked = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    await unshare(ctx, actor, { objectType: 'project', objectId: project.id, tupleId: projectShare.id })
+    return listShares(ctx, actor, 'project', project.id)
+  })
+  // Assert on our own tuple, not on an empty list: the phase 4 loop shares a project too,
+  // and asserting a global count against shared demo state is how a check passes on a clean
+  // database and fails on a used one.
+  ok('Handing a project back takes the work with it',
+    !projectRevoked.some((entry) => entry.id === projectShare.id))
+  ok('And they are outside again',
+    (await withTenant(asContractor, async (ctx) =>
+      listTasks(ctx, await loadActor(ctx), { projectId: project.id, limit: 200 }),
+    )).tasks.length === 0)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -919,7 +1019,8 @@ try {
         'taken out of circulation, shared back, and reopened on purpose; and one piece of work waited for \n' +
         'another until it was actually done; a contractor saw exactly one team’s work and nothing else; and \n' +
         'one feature was turned off for everybody while one person kept it; and one task was handed to one \n' +
-        'colleague and taken back.\n',
+        'colleague and taken back; and a whole project was handed over with the work inside it, which came \n' +
+        'back when it did.\n',
   )
 } catch (error) {
   console.error(error)

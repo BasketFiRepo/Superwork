@@ -1,23 +1,35 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { computeProjectHealth } from '@superwork/core'
+import { computeProjectHealth, listProjects, PermissionError } from '@superwork/core'
 
 export const dynamic = 'force-dynamic'
+
+async function loadProjects(session: Awaited<ReturnType<typeof requireSession>>) {
+  return withActor(session, async (ctx, actor) => {
+    const rows = await listProjects(ctx, actor)
+    return Promise.all(rows.map(async (row) => ({ ...row, health: await computeProjectHealth(ctx, row.id) })))
+  })
+}
 
 /** Projects (§17). Primary action: unblock. Health is computed, never invented. */
 export default async function ProjectsPage() {
   const session = await requireSession()
 
-  const projects = await withActor(session, async (ctx) => {
-    const rows = await ctx.sql<{ id: string; name: string; status: string; ownerName: string | null; companyName: string | null }[]>`
-      SELECT p.id, p.name, p.status, u.name AS "ownerName", c.name AS "companyName"
-      FROM projects p
-      LEFT JOIN users u ON u.id = p.owner_id
-      LEFT JOIN companies c ON c.id = p.company_id
-      WHERE p.organization_id = ${ctx.organizationId} AND p.deleted_at IS NULL
-      ORDER BY p.status, p.name`
-    return Promise.all(rows.map(async (row) => ({ ...row, health: await computeProjectHealth(ctx, row.id) })))
-  })
+  // This used to be a raw query with no permission check on it — RLS kept it inside the
+  // organization and nothing narrowed it further, so a team-scoped role saw every project
+  // in the company. `listProjects` asks which rows the actor may consider.
+  //
+  // Caught outside `withActor`, not inside: a refusal swallowed inside the callback leaves
+  // the transaction to commit around it, and if it was the database that objected the
+  // commit re-raises what the catch just hid (ADR 0020).
+  let projects: Array<Awaited<ReturnType<typeof loadProjects>>[number]> = []
+  let denied: string | null = null
+  try {
+    projects = await loadProjects(session)
+  } catch (error) {
+    if (!(error instanceof PermissionError)) throw error
+    denied = error.message
+  }
 
   return (
     <div className="stack stack-8">
@@ -30,12 +42,29 @@ export default async function ProjectsPage() {
         </p>
       </header>
 
+      {denied ? (
+        <div className="panel">
+          <div className="empty small secondary">{denied}</div>
+        </div>
+      ) : null}
+
+      {!denied && projects.length === 0 ? (
+        <div className="panel">
+          <div className="empty small secondary" data-testid="projects-empty">
+            No projects you can see. Your access covers your own team&rsquo;s work and anything
+            shared with you directly.
+          </div>
+        </div>
+      ) : null}
+
       <div className="stack stack-5">
         {projects.map((project) => (
           <article className="panel" key={project.id}>
             <div className="panel-header">
               <div className="stack stack-2">
-                <h2>{project.name}</h2>
+                <h2>
+                  <Link href={`/projects/${project.id}`}>{project.name}</Link>
+                </h2>
                 <span className="small muted">
                   {project.companyName ?? 'Internal'} · owner {project.ownerName ?? 'unassigned'} · {project.status}
                 </span>
@@ -79,8 +108,11 @@ export default async function ProjectsPage() {
                 </tbody>
               </table>
             </div>
-            <div className="panel-body hairline-top">
-              <Link className="btn btn-sm" href={`/tasks?filter=all&project=${project.id}`}>
+            <div className="panel-body hairline-top row">
+              <Link className="btn btn-sm" href={`/projects/${project.id}`}>
+                Open it
+              </Link>
+              <Link className="btn btn-sm btn-ghost" href={`/tasks?filter=all&project=${project.id}`}>
                 See its tasks
               </Link>
             </div>
