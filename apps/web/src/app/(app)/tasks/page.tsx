@@ -83,10 +83,24 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
                 {tasks.map((task) => {
                   const overdue = task.dueAt ? task.dueAt.getTime() < today : false
                   return (
-                    <tr key={task.id}>
+                    <tr key={task.id} data-testid="task-row">
                       <td>
                         <div className="stack stack-1">
-                          <span>{task.title}</span>
+                          <Link href={`/tasks/${task.id}`}>{task.title}</Link>
+                          {task.blockedByCount > 0 || task.blockingCount > 0 ? (
+                            <span className="row-tight small">
+                              {task.blockedByCount > 0 ? (
+                                <span className="chip chip-attention" data-testid="task-waiting-chip">
+                                  waiting on {task.blockedByCount}
+                                </span>
+                              ) : null}
+                              {task.blockingCount > 0 ? (
+                                <span className="chip chip-critical" data-testid="task-blocking-chip">
+                                  blocking {task.blockingCount}
+                                </span>
+                              ) : null}
+                            </span>
+                          ) : null}
                           {task.blockedReason ? (
                             <span className="small" style={{ color: 'var(--critical)' }}>
                               Blocked: {task.blockedReason}

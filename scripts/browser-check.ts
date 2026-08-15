@@ -514,6 +514,32 @@ try {
   ok('A released hold stays on the record with who released it and why',
     /Ahlgren v\. Northwind/.test(releasedText) && /counsel withdrew/i.test(releasedText))
 
+  // ---- Work that waits for other work -------------------------------------
+  // The seed puts two tasks behind one of Maya's, so the populated state is on screen.
+  await page.goto(`${BASE}/tasks`)
+  await page.waitForSelector('[data-testid="task-row"]', { timeout: 15_000 })
+  const blockingChips = await page.locator('[data-testid="task-blocking-chip"]').count()
+  ok('The task list says which work is holding other work up', blockingChips > 0, `${blockingChips} blocking`)
+
+  await page.locator('[data-testid="task-blocking-chip"]').first().click({ trial: true }).catch(() => undefined)
+  const blockingRow = page.locator('[data-testid="task-row"]', { has: page.locator('[data-testid="task-blocking-chip"]') })
+  await blockingRow.first().locator('a').first().click()
+  await page.waitForSelector('[data-testid="task-dependencies"]', { timeout: 15_000 })
+  const depsText = await page.locator('[data-testid="task-dependencies"]').innerText()
+  const blockingRows = await page.locator('[data-testid="blocking-row"]').count()
+  ok('Opening it names who is waiting, not just how many', blockingRows > 0, `${blockingRows} waiting`)
+  ok('It says what finishing it will do', /tells whoever it was the last thing standing in the way of/i.test(depsText))
+
+  await page.locator('[data-testid="dependency-add"]').click()
+  await page.waitForSelector('[data-testid="dependency-editor"]', { timeout: 15_000 })
+  ok('Nothing is recorded until a task is chosen',
+    await page.locator('[data-testid="dependency-add-confirm"]').isDisabled())
+  ok('The editor says what a dependency will do, and what a loop does',
+    /completing it is refused rather than warned about/i.test(
+      await page.locator('[data-testid="dependency-editor"]').innerText(),
+    ))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/task-dependencies.png`, fullPage: true })
+
   // ---- Who can find a document --------------------------------------------
   // The seed restricts the Coldstore agreement, so the populated state is on screen.
   await page.goto(`${BASE}/knowledge`)
