@@ -514,6 +514,42 @@ try {
   ok('A released hold stays on the record with who released it and why',
     /Ahlgren v\. Northwind/.test(releasedText) && /counsel withdrew/i.test(releasedText))
 
+  // ---- Feature flags --------------------------------------------------------
+  await page.goto(`${BASE}/settings/features`)
+  await page.waitForSelector('[data-testid="flags"]', { timeout: 15_000 })
+  const flagRows = await page.locator('[data-testid="flag-row"]').count()
+  ok('Features lists what each flag actually changes', flagRows > 0, `${flagRows} live flags`)
+  const flagsText = await page.locator('main').innerText()
+  ok('It explains the three layers', /product default.*organization.*yourself/is.test(flagsText))
+  ok('Flags that control nothing are listed without a switch',
+    (await page.locator('[data-testid="flag-inert"]').count()) > 0)
+
+  // Turning one off for everybody is the half that needs a reason.
+  await page.locator('[data-testid="flag-set-org"]').first().click()
+  await page.waitForSelector('[data-testid="flag-editor"]', { timeout: 15_000 })
+  ok('An organization-wide change will not save without a reason',
+    await page.locator('[data-testid="flag-org-confirm"]').isDisabled())
+  ok('And it says what a personal override will do to it',
+    /keeps their own choice/i.test(await page.locator('[data-testid="flag-editor"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/features.png`, fullPage: true })
+
+  // A personal preference takes effect immediately and needs nothing.
+  const densityRow = page.locator('[data-testid="flag-row"]', { hasText: 'Compact rows' })
+  await densityRow.locator('[data-testid="flag-set-me"]').click()
+  await page.waitForFunction(
+    () => document.querySelector('.shell')?.getAttribute('data-density') === 'comfortable',
+    undefined,
+    { timeout: 20_000 },
+  )
+  ok('A personal preference changes the interface straight away', true)
+  await densityRow.locator('[data-testid="flag-clear-me"]').click()
+  await page.waitForFunction(
+    () => document.querySelector('.shell')?.getAttribute('data-density') === 'compact',
+    undefined,
+    { timeout: 20_000 },
+  )
+  ok('And resetting it falls back to what the organization has', true)
+
   // ---- Teams ---------------------------------------------------------------
   await page.goto(`${BASE}/settings/teams`)
   await page.waitForSelector('[data-testid="teams"]', { timeout: 15_000 })

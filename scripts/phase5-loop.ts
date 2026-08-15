@@ -34,6 +34,8 @@ import {
   saveCompiled,
   addDependency,
   addTeamMember,
+  clearFlag,
+  flagStates,
   applyRetention,
   archiveTeam,
   composeBriefingFacts,
@@ -59,6 +61,7 @@ import {
   releaseHold,
   retentionPolicies,
   saveCustomTool,
+  setFlag,
   updateTask,
   scheduleFor,
   previewSchedule,
@@ -811,6 +814,45 @@ try {
   ok('A team cannot be disbanded out from under the work scoped to it',
     /still scoped to/i.test(disband ?? ''), (disband ?? 'it was allowed').slice(0, 80))
 
+  // ---- What this organization has, and what one person has --------------
+  console.log('\nOne feature is turned off, and one person keeps it…\n')
+
+  const flags = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const start = await flagStates(ctx, actor)
+    const off = await setFlag(ctx, actor, {
+      flag: 'meetings',
+      enabled: false,
+      scope: 'organization',
+      reason: 'Works council has not signed off on transcription.',
+    })
+    return { start, off }
+  })
+
+  ok('Every flag starts at the product default',
+    flags.start.every((state) => state.source === 'default'), `${flags.start.length} flags`)
+  ok('An organization can turn one off, with the reason on the row',
+    flags.off.find((state) => state.flag === 'meetings')?.effective === false)
+
+  const forColleague = await withTenant({ ...session, userId: contractor!.id }, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const seen = await flagStates(ctx, actor)
+    // A person's own choice sits on top of the organization's — which is right for a
+    // preference and is exactly why capabilities do not belong here.
+    const mine = await setFlag(ctx, actor, { flag: 'meetings', enabled: true, scope: 'user' })
+    return { seen, mine }
+  })
+  ok('Everybody in the organization sees the change',
+    forColleague.seen.find((state) => state.flag === 'meetings')?.effective === false)
+  ok('And one person can keep it for themselves',
+    forColleague.mine.find((state) => state.flag === 'meetings')?.source === 'you')
+
+  const restored = await withTenant(session, async (ctx) =>
+    clearFlag(ctx, await loadActor(ctx), { flag: 'meetings', scope: 'organization' }),
+  )
+  ok('Clearing an override falls back one layer, not to nothing',
+    restored.find((state) => state.flag === 'meetings')?.source === 'default')
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -821,7 +863,8 @@ try {
         'document and one person; a matter can stop all of it, in the open; and the assistant learned one ' +
         'thing, was agreed with, was corrected, and forgot it when its source went; and one document was \n' +
         'taken out of circulation, shared back, and reopened on purpose; and one piece of work waited for \n' +
-        'another until it was actually done; and a contractor saw exactly one team’s work and nothing else.\n',
+        'another until it was actually done; a contractor saw exactly one team’s work and nothing else; and \n' +
+        'one feature was turned off for everybody while one person kept it.\n',
   )
 } catch (error) {
   console.error(error)

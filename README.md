@@ -16,8 +16,9 @@ and then the controls the interface had been claiming and the product did not ha
 authentication, retention and erasure, legal holds, the agent memory whose table had been
 designed since Phase 0 with nothing ever written to it, the document circulation lists the
 retrieval ACL had been checking for against an empty table, the task dependencies the daily
-briefing had been reporting on since Phase 2, and the teams that made the `guest` role
-mean something.
+briefing had been reporting on since Phase 2, the teams that made the `guest` role mean
+something, and the feature-flag overrides the session had been resolving against an empty
+table on every request.
 
 ---
 
@@ -39,14 +40,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 649 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 659 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -375,6 +376,39 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Features, and the switch that changed nothing
+
+`feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
+**read path was already finished**. The session loads it on every request, splits the
+organization-wide rows from the per-user ones and layers them over `DEFAULT_FLAGS`. That has
+run on every page load since Phase 0 and never found a row — so every organization had
+identical features and no administrator could change one.
+
+Three layers, shown as three layers: default → organization → person, with the screen saying
+which layer a value came from and why. **A person's own choice sits on top of the
+organization's** — correct for a preference, wrong for a capability, which is exactly why it
+is said out loud: anything governing what a tenant *may* do belongs in the policy engine or a
+plan limit, never in a switch somebody can flip for themselves.
+
+Reading takes no permission — the session already computes these values for everybody, so
+requiring one meant a member could not find out why a screen was missing. Changing the
+organization layer needs `settings:update` and a reason, and is audited; a personal
+preference is neither.
+
+An unknown flag name is refused twice, by the repository with a sentence and by the database
+with a `CHECK` — the resolver layers unknown keys onto an object nobody reads, so a
+misspelled override would sit there for ever looking as though it did something. A test
+asserts the code list and the database list agree.
+
+**A flag that controls nothing gets no switch.** `reports`, `autopilot`, `chat_presence` and
+`public_api` are read by nothing at all; they are listed on the screen as declared-but-inert,
+without a toggle. A control that changes nothing is worse than an absent one. Two others were
+wired rather than left that way: `insights` gates its navigation entry, and `compact_density`
+sets the row height for one person — the one genuinely per-person flag, which makes the
+person layer visible in the interface rather than only in a test.
+
+**Settings → Features**. See ADR 0022.
+
 ## Teams, and the role that could do nothing
 
 `teams` and `team_members` were created in migration 0001 and never written to. That looked
@@ -651,7 +685,10 @@ proposes dependencies, because a model inferring "this probably waits for that" 
 enforced at completion time is a much larger claim than recording one by hand. Only the task
 and document lists are scope-aware; the other list endpoints still gate at organization level,
 which is right for every role above `guest` and wrong in the same way for `guest`. Nothing
-infers a team: the agent will not scope work it creates to one. The scale
+infers a team: the agent will not scope work it creates to one. Four of the ten feature flags
+— `reports`, `autopilot`, `chat_presence`, `public_api` — are declared and read by nothing;
+they are listed on the Features screen as inert rather than given a switch, and the demo ships
+with no overrides at all, because seeding one would mean turning a feature off in the demo. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -689,6 +726,9 @@ disabled with the reason named. Nothing in the interface pretends to work.
   and memories go in the same transaction, and the count of each is reported to the caller and
   written to the audit trail (§25.13). The memory count is now a real number rather than a
   fact about an empty table.
+- **A feature can be turned off for one tenant, and kept by one person.** Three layers
+  resolved per request, the organization layer audited with a reason, and no switch offered
+  for a flag that controls nothing.
 - **A narrow role sees exactly its own slice.** Lists ask the policy engine which rows the
   actor may consider rather than whether they may read everything, so a contractor on one
   team sees that team's work and nothing else — in the list, in the detail view and in

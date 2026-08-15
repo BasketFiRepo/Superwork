@@ -30,8 +30,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     return row ?? { approvals: 0, insights: 0, inbox: 0, pastSla: 0, commitments: 0 }
   })
 
+  // Density is a per-person flag, resolved with the session. The root layout stamps the
+  // default on <html>; this overrides it for the signed-in shell only.
   return (
-    <div className="shell">
+    <div className="shell" data-density={session.flags.compact_density ? 'compact' : 'comfortable'}>
       <header className="topbar">
         <Link href="/" className="row-tight" style={{ fontWeight: 600 }}>
           <span className="dot" style={{ background: 'var(--accent)' }} />

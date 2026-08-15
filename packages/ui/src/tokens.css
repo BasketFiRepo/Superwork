@@ -70,7 +70,9 @@
   --font-mono: ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
 }
 
-:root[data-density='comfortable'] { --row-height: 44px; }
+/* Any ancestor, not only :root — the density flag is resolved per person inside the app
+   shell, and custom properties inherit. */
+[data-density='comfortable'] { --row-height: 44px; }
 
 :root[data-theme='dark'] {
   --canvas: #0f1113;
