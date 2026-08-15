@@ -84,6 +84,7 @@ export function Sidebar({
         { href: '/settings/integrations', label: 'Integrations' },
         { href: '/settings/tools', label: 'Custom tools' },
         { href: '/settings/api', label: 'API and MCP' },
+        { href: '/settings/members', label: 'Members' },
         { href: '/settings/identity', label: 'Identity' },
         { href: '/settings/compliance', label: 'Jurisdiction' },
         { href: '/settings/retention', label: 'Retention and erasure' },

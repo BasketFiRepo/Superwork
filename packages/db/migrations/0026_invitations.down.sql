@@ -1,0 +1,13 @@
+DROP INDEX IF EXISTS invitations_org_idx;
+ALTER TABLE invitations DROP CONSTRAINT IF EXISTS invitations_accepted_has_user;
+ALTER TABLE invitations DROP CONSTRAINT IF EXISTS invitations_one_outcome;
+DROP TRIGGER IF EXISTS invitations_expiry_ahead ON invitations;
+DROP FUNCTION IF EXISTS sw_invitation_expiry_ahead();
+ALTER TABLE invitations DROP COLUMN IF EXISTS invited_by;
+ALTER TABLE invitations DROP COLUMN IF EXISTS reason;
+ALTER TABLE invitations DROP COLUMN IF EXISTS accepted_user_id;
+ALTER TABLE invitations DROP COLUMN IF EXISTS revoked_reason;
+ALTER TABLE invitations DROP COLUMN IF EXISTS revoked_by;
+ALTER TABLE invitations DROP COLUMN IF EXISTS revoked_at;
+DROP INDEX IF EXISTS invitations_pending_email;
+DROP INDEX IF EXISTS invitations_token_idx;

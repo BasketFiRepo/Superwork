@@ -720,6 +720,50 @@ try {
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
 
+  // ---- Adding a person to the organization --------------------------------
+  await page.goto(`${BASE}/settings/members`)
+  await page.waitForSelector('[data-testid="members"]', { timeout: 15_000 })
+  const memberRows = await page.locator('[data-testid="member-row"]').count()
+  ok('The members screen lists who is here', memberRows > 0, `${memberRows} members`)
+
+  await page.locator('[data-testid="invitation-add"]').click()
+  await page.waitForSelector('[data-testid="invitation-editor"]', { timeout: 15_000 })
+  ok('Nothing is invited without a reason',
+    await page.locator('[data-testid="invitation-send"]').isDisabled())
+
+  const invitee = `browser.check.${Date.now()}@northwind.example`
+  await page.fill('#invite-email', invitee)
+  await page.fill('#invite-reason', 'Joining the renewals team on Monday.')
+  await page.locator('[data-testid="invitation-send"]').click()
+  await page.waitForSelector('[data-testid="invitation-link"]', { timeout: 20_000 })
+  const linkPanel = await page.locator('[data-testid="invitation-link"]').innerText()
+  ok('The link is shown once, and says so', /shown once/i.test(linkPanel))
+  ok('And it says plainly that nothing was emailed', /Nothing was emailed/i.test(linkPanel))
+
+  const inviteUrl = (linkPanel.match(/https?:\/\/\S+\/invite\/\S+/) ?? [])[0] ?? ''
+  ok('The link is a real one', inviteUrl.includes('/invite/'), inviteUrl.slice(0, 48))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/invitations.png`, fullPage: true })
+
+  // The other half of the journey, on a page nobody is signed in to.
+  const guest = await browser.newPage()
+  await guest.goto(inviteUrl)
+  await guest.waitForSelector('[data-testid="invite-form"]', { timeout: 15_000 })
+  ok('The invitee is told who invited them, and to what',
+    /invited/i.test(await guest.locator('[data-testid="invite-offer"]').innerText()))
+  await guest.fill('#name', 'Browser Check')
+  await guest.fill('#password', 'a-good-password')
+  await guest.locator('[data-testid="invite-accept"]').click()
+  await guest.waitForURL((url) => !url.pathname.startsWith('/invite'), { timeout: 20_000 })
+  ok('Accepting signs them straight in rather than sending them to a login form',
+    !guest.url().includes('/login') && !guest.url().includes('/invite'), guest.url())
+
+  // The same link a second time is dead.
+  await guest.goto(inviteUrl)
+  await guest.waitForSelector('[data-testid="invite-dead"]', { timeout: 15_000 })
+  ok('And the same link does not work twice',
+    /does not work/i.test(await guest.locator('h1').innerText()))
+  await guest.close()
+
   // ---- Who is answerable for whom -----------------------------------------
   await page.goto(`${BASE}/settings/reporting`)
   await page.waitForSelector('[data-testid="org-chart"]', { timeout: 15_000 })
