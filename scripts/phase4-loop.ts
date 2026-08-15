@@ -19,6 +19,8 @@ import {
   claimNextRun,
   createLegalEntity,
   deliverDueNudges,
+  nextWorkingDay,
+  calendarDate,
   enqueueRun,
   listLegalEntities,
   nudgeBudget,
@@ -149,7 +151,10 @@ try {
       })
     }
 
-    const outcome = await deliverDueNudges(ctx)
+    // Not delivered on a day nobody works (ADR 0039), so the beat names the day it means
+    // rather than depending on which day CI happens to run.
+    const workingDay = nextWorkingDay('uk-england-wales', calendarDate('Europe/London'))
+    const outcome = await deliverDueNudges(ctx, { now: new Date(`${workingDay}T23:59:00Z`) })
     const budget = await nudgeBudget(ctx, person!.id)
     return { person: person!, outcome, budget }
   })

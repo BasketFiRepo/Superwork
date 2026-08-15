@@ -123,6 +123,11 @@ import {
   saveView,
   listSavedViews,
   documentIngestions,
+  holidaysIn,
+  workingCalendarFor,
+  restDaysAhead,
+  nextWorkingDay,
+  calendarDate,
   ingestionBacklog,
   requestReindex,
   runIngestionJobs,
@@ -153,6 +158,22 @@ import {
   WATCHERS,
 } from '@superwork/agent'
 import { demoSession } from '@superwork/agent/evals/harness'
+
+/**
+ * A working day for the demo's people, as an instant.
+ *
+ * Reminders are no longer delivered on days nobody works (ADR 0039), so a beat asserting that
+ * one arrives has to say *which day* it is talking about. These beats were always
+ * date-dependent — running them on a Saturday would have been a lie about a weekday — it
+ * simply never showed until the product learned what a weekend is.
+ */
+const onAWorkingDay = (): Date => {
+  const day = nextWorkingDay('uk-england-wales', calendarDate('Europe/London'))
+  // End of that day, not the start: a rung scheduled for the same day carries the clock
+  // time it was shifted from, so a midday "now" would leave an afternoon reminder not
+  // yet due.
+  return new Date(`${day}T23:59:00Z`)
+}
 
 const ok = (label: string, condition: boolean, detail = '') => {
   console.log(`  ${condition ? '✓' : '✗'} ${label}${detail ? ` — ${detail}` : ''}`)
@@ -1526,7 +1547,9 @@ try {
   // Only this subject. The relaxed profile raises the contact budget for *everybody*, and
   // delivering the whole queue under it would push somebody else's held-back reminders
   // through at a limit their organization does not actually run on.
-  await withTenant(session, async (ctx) => deliverDueNudges(ctx, { subjectId: lateTaskId }))
+  await withTenant(session, async (ctx) =>
+    deliverDueNudges(ctx, { subjectId: lateTaskId, now: onAWorkingDay() }),
+  )
   const told = await withTenant({ ...session, userId: subject.personId }, async (ctx) =>
     listDisclosures(ctx, await loadActor(ctx), subject.personId),
   )
@@ -1847,7 +1870,9 @@ try {
   ok('Work that is late has a ladder opened for it by the product, not by a test',
     opened.opened > 0, `${opened.opened} of ${opened.considered} considered`)
 
-  const sent = await withTenant(session, async (ctx) => deliverDueNudges(ctx, { subjectId: chased.taskId }))
+  const sent = await withTenant(session, async (ctx) =>
+    deliverDueNudges(ctx, { subjectId: chased.taskId, now: onAWorkingDay() }),
+  )
   ok('And the rung that was due is delivered', sent.delivered > 0, `${sent.delivered} delivered`)
 
   const asPerson = { ...session, userId: chased.person.id }
@@ -2337,6 +2362,76 @@ try {
       WHERE organization_id = ${ctx.organizationId} AND entity_id = ${indexedDoc.id} AND verb = 'failed'`
   })
 
+
+  // ---- The days people do not work ----------------------------------------
+  console.log('\nA reminder that comes due on Christmas Day…\n')
+
+  const workingDays = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const departments = await listDepartments(ctx, actor)
+    const operations = departments.find((row) => row.name === 'Operations')!
+
+    // A sub-department inherits rather than restating it: a company says where it is once.
+    const made = await createDepartment(ctx, actor, { name: 'Loop Customs', parentId: operations.id })
+    const child = made.find((row) => row.name === 'Loop Customs')!
+
+    const person = await workingCalendarFor(ctx, actor.userId)
+
+    // A real reminder, dated for a real bank holiday, delivered through the real gate.
+    const [task] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'loop working day — pre-cool the trailer', 'todo', 'medium',
+              ${actor.userId}, ${new Date('2026-12-25T09:00:00Z')}, true, ${ctx.userId})
+      RETURNING id`
+    await ctx.sql`
+      INSERT INTO nudges (
+        organization_id, recipient_user_id, subject_type, subject_id, stage, channel, message,
+        actions, scheduled_for, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${actor.userId}, 'task', ${task!.id}, 2, 'in_app',
+        'loop working day — pre-cool the trailer — still open.', '["done"]'::jsonb,
+        ${new Date('2026-12-25T09:00:00Z')}, true, ${ctx.userId}
+      )`
+
+    const onTheDay = await deliverDueNudges(ctx, {
+      now: new Date('2026-12-25T10:00:00Z'),
+      subjectId: task!.id,
+    })
+    const [heldRow] = await ctx.sql<{ heldReason: string | null; deliveredAt: Date | null }[]>`
+      SELECT held_reason AS "heldReason", delivered_at AS "deliveredAt" FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id}`
+
+    const afterwards = await deliverDueNudges(ctx, {
+      now: new Date('2026-12-29T10:00:00Z'),
+      subjectId: task!.id,
+    })
+
+    // Put the demo back.
+    await ctx.sql`DELETE FROM notifications WHERE organization_id = ${ctx.organizationId} AND entity_id IN (
+      SELECT id FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id})`
+    await ctx.sql`DELETE FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id}`
+    await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task!.id}`
+    await archiveDepartment(ctx, actor, { id: child.id, reason: 'The loop is finished with it.' })
+
+    return { child, person, onTheDay, heldRow: heldRow!, afterwards }
+  })
+
+  ok('A company says where it is once, and everything underneath inherits it',
+    workingDays.child.holidayCalendar === null &&
+      workingDays.child.effectiveHolidayCalendar === 'uk-england-wales' &&
+      workingDays.child.holidayCalendarFrom === 'Operations',
+    `${workingDays.child.name} ← ${workingDays.child.holidayCalendarFrom}`)
+  ok('The bank holidays are worked out rather than guessed at',
+    holidaysIn('uk-england-wales', 2026).get('2026-04-03') === 'Good Friday' &&
+      holidaysIn('uk-england-wales', 2027).get('2027-12-27') === 'Christmas Day')
+  ok('A person can see which days they will not be chased on',
+    workingDays.person.calendarId === 'uk-england-wales' && restDaysAhead(workingDays.person).length > 0)
+  ok('A reminder due on a bank holiday is not delivered, and says why',
+    workingDays.onTheDay.heldByCalendar === 1 && workingDays.heldRow.deliveredAt === null,
+    workingDays.heldRow.heldReason ?? '')
+  ok('And it arrives on the next working day rather than being lost',
+    workingDays.afterwards.delivered === 1)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2371,7 +2466,8 @@ try {
         'shared as a question rather than as access, and work somebody else is carrying \n' +
         'can be followed without being able to see any more of it than before; and a document \n' +
         'that will not index says so, is retried on a widening delay, gives up out loud rather \n' +
-        'than for ever, and can be put back into memory by a person.\n',
+        'than for ever, and can be put back into memory by a person; and nobody is chased on a \n' +
+        'day they do not work — not at a weekend, and not on Christmas Day.\n',
   )
 } catch (error) {
   console.error(error)

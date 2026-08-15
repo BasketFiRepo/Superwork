@@ -1258,6 +1258,28 @@ try {
   ok('Asking for it again queues the work rather than doing it in the request', queued)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/indexing.png`, fullPage: true })
 
+  // ---- The days people do not work ----------------------------------------
+  // `departments.holiday_calendar` was written by nothing, so the ladder chased people on
+  // Saturdays and on Christmas Day.
+  await page.goto(`${BASE}/settings/teams`)
+  await page.waitForSelector('[data-testid="department-row"]', { timeout: 15_000 })
+  const calendarText = await page.locator('[data-testid="calendar-explainer"]').innerText()
+  ok('The department screen says what a working calendar decides',
+    /which days the system will not chase these people on/i.test(calendarText))
+  ok('And that it can only ever quieten the reminders',
+    /only ever quieten|never|not make the product chase anybody\s+harder/i.test(calendarText))
+  const chosen = await page.locator('[data-testid="department-calendar"]').first().inputValue()
+  ok('A department carries the calendar it is set to', chosen === 'uk-england-wales', chosen || 'unset')
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/working-days.png`, fullPage: true })
+
+  // The other end of the same fact: the person is told which days they are safe on.
+  await page.goto(`${BASE}/reminders`)
+  await page.waitForSelector('[data-testid="working-calendar"]', { timeout: 15_000 })
+  const mine = await page.locator('[data-testid="working-calendar"]').innerText()
+  ok('A person is told which days they will not be chased on',
+    /not chased on days you do not work/i.test(mine) && /England & Wales/i.test(mine))
+  ok('And it names the next one rather than only the rule', /Next: .+\(\d{4}-\d{2}-\d{2}\)/.test(mine))
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before

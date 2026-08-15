@@ -343,8 +343,12 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
   const departmentIds = new Map<string, string>()
   for (const name of ['Executive', 'Operations', 'Finance', 'Commercial', 'Quality']) {
     const [row] = await sql<{ id: string }[]>`
-      INSERT INTO departments (organization_id, name, path, depth, timezone, is_demo)
-      VALUES (${organizationId}, ${name}, ${name.toLowerCase()}, 0, 'Europe/London', true)
+      INSERT INTO departments (organization_id, name, path, depth, timezone, holiday_calendar, is_demo)
+      VALUES (${organizationId}, ${name}, ${name.toLowerCase()}, 0, 'Europe/London',
+              -- Northwind is a British company, so its people are not chased at weekends or
+              -- on bank holidays. The column has existed since migration 0001 and nothing
+              -- ever set it, so the ladder chased them on Christmas Day (ADR 0039).
+              'uk-england-wales', true)
       RETURNING id`
     departmentIds.set(name, row!.id)
   }

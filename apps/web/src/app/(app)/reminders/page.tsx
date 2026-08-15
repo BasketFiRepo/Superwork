@@ -4,6 +4,8 @@ import {
   listReminders,
   notificationPreferences,
   nudgeBudget,
+  restDaysAhead,
+  workingCalendarFor,
 } from '@superwork/core'
 import { Reminders } from '@/components/Reminders'
 import { NotificationPreferences } from '@/components/NotificationPreferences'
@@ -26,9 +28,11 @@ export const dynamic = 'force-dynamic'
 export default async function RemindersPage() {
   const session = await requireSession()
 
-  const { reminders, notifications, preferences, budget, people } = await withActor(
+  const { reminders, notifications, preferences, budget, people, calendar } = await withActor(
     session,
     async (ctx, actor) => ({
+      // Which days this person is not chased on, and which department decides that (§29.2).
+      calendar: await workingCalendarFor(ctx, actor.userId),
       reminders: await listReminders(ctx, actor),
       notifications: await listNotifications(ctx, actor),
       preferences: await notificationPreferences(ctx, actor),
@@ -51,6 +55,24 @@ export default async function RemindersPage() {
           <strong>{budget.perDay}</strong> times a day in total, across every agent — {budget.usedToday} used
           today. That ceiling is set by the strictest jurisdiction this company operates under and
           cannot be raised by configuration.
+        </p>
+        <p className="prose secondary" data-testid="working-calendar">
+          {calendar.calendarId ? (
+            <>
+              You are not chased on days you do not work — weekends, and the public holidays of{' '}
+              <strong>{calendar.label}</strong>
+              {calendar.departmentName ? `, which ${calendar.departmentName} is set to` : ''}. A
+              reminder that comes due on one of those waits for the next working day.
+              {restDaysAhead(calendar).length > 0 ? (
+                <> Next: {restDaysAhead(calendar).map((day) => `${day.name} (${day.date})`).join(', ')}.</>
+              ) : null}
+            </>
+          ) : (
+            <>
+              No working calendar is set for your department, so reminders can reach you on any
+              day, weekends included. An administrator can set one on Settings → Teams.
+            </>
+          )}
         </p>
       </header>
 

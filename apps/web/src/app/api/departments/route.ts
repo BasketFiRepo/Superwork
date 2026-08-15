@@ -18,6 +18,9 @@ const Body = z.discriminatedUnion('action', [
     id: z.string().uuid(),
     name: z.string().min(2).max(120).optional(),
     parentId: z.string().uuid().nullish(),
+    // `null` clears it, so the department goes back to inheriting. The repository is the
+    // authority on which names are real; this only refuses the obviously wrong shape.
+    holidayCalendar: z.string().max(40).nullish(),
   }),
   z.object({ action: z.literal('archive'), id: z.string().uuid(), reason: z.string().min(4).max(500) }),
 ])
@@ -54,7 +57,12 @@ export async function POST(request: Request) {
         })
       }
       if (body.action === 'update') {
-        return updateDepartment(ctx, actor, { id: body.id, name: body.name, parentId: body.parentId })
+        return updateDepartment(ctx, actor, {
+          id: body.id,
+          name: body.name,
+          parentId: body.parentId,
+          ...(body.holidayCalendar === undefined ? {} : { holidayCalendar: body.holidayCalendar }),
+        })
       }
       return archiveDepartment(ctx, actor, { id: body.id, reason: body.reason })
     })

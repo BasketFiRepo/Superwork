@@ -871,6 +871,35 @@ Now:
 
 **Knowledge; any document.** See ADR 0038.
 
+## A day somebody does not work
+
+`departments.holiday_calendar` has existed since migration 0001 and nothing ever wrote to it
+or read it. §29 spends its length on how *hard* the system may chase somebody — a per-person
+daily budget shared across every agent, a jurisdiction ceiling that cannot be raised by
+configuration — and said nothing about *when*. So the ladder chased people on Saturdays and on
+Christmas Day.
+
+- **The dates are computed, not fetched.** Easter by the anonymous Gregorian algorithm;
+  England and Wales bank holidays including the substitute weekdays that appear when Christmas
+  falls at a weekend; US federal holidays and the weekday each is observed on. A real holiday
+  feed belongs behind a provider interface; this is its fallback, not a placeholder for it.
+- **A calendar is a department fact, and it is inherited** from the nearest ancestor that sets
+  one, so a company says "England and Wales" once instead of on every department.
+- **Two gates, and the second is the guarantee.** Scheduling moves a rung onto the next
+  working day; delivery checks again at the moment of sending, so a reminder scheduled before
+  the calendar was set is still not delivered on a day its recipient does not work. It waits,
+  and `held_reason` records why.
+- **An unset calendar means the behaviour that was there before.** This may only ever reduce
+  chasing, so its absence has to mean the old behaviour rather than a default nobody chose.
+- **The gate is on the recipient**, not the subject — on the escalation rungs those are
+  different people.
+
+This also found that the acceptance loops were date-dependent: they asserted a reminder is
+delivered and then delivered it "now". Running them on a Saturday was asserting a weekday, and
+nothing showed it until the product learned what a weekend is.
+
+**Settings → Teams; Reminders.** See ADR 0039.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1354,6 +1383,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0036](docs/adr/0036-the-structure-a-product-is-governed-by-should-be-buildable-in-it.md) | The structure a product is governed by should be buildable in it |
 | [0037](docs/adr/0037-a-saved-view-is-a-question-and-a-watch-is-not-a-grant.md) | A saved view is a question, and a watch is not a grant |
 | [0038](docs/adr/0038-indexing-has-to-survive-the-request-that-asked-for-it.md) | Indexing has to survive the request that asked for it |
+| [0039](docs/adr/0039-a-day-somebody-does-not-work.md) | A day somebody does not work |
 
 ## Configuration
 

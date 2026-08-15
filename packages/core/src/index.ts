@@ -1,5 +1,7 @@
 export * from './errors.js'
 export * from './time.js'
+export * from './holidays.js'
+export * from './working-days.js'
 export * from './audit.js'
 export * from './links.js'
 export * from './outbox.js'
