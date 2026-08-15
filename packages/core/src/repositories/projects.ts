@@ -51,11 +51,15 @@ export async function listProjects(ctx: TenantContext, actor: Actor): Promise<Pr
   const scope = grantedScope(actor, 'project:read', 'project')
   const sql = ctx.sql
   const shared = sharedObjectIds(actor, 'project')
+  // Being on a project's roster lends a read of it (ADR 0032), so the list has to say so —
+  // otherwise "you are on this project" and "it is not in your list of projects" are both
+  // true.
+  const onRoster = actor.projectIds ?? []
 
   // A role with no grant of this kind at all can still have been *given* a row, and a gate
   // that throws before any row is considered denies the one thing a tuple exists to allow.
   // Refuse only when there is genuinely nothing to ask about.
-  if (scope === null && shared.length === 0) {
+  if (scope === null && shared.length === 0 && onRoster.length === 0) {
     const decision = can(actor, 'project:read', { type: 'project', organizationId: ctx.organizationId })
     throw new PermissionError(decision.reason)
   }
@@ -74,6 +78,7 @@ export async function listProjects(ctx: TenantContext, actor: Actor): Promise<Pr
                   : sql`(p.owner_id = ${actor.userId} OR p.created_by = ${actor.userId})`
             }
             ${shared.length ? sql`OR p.id = ANY(${shared}::uuid[])` : sql``}
+            ${onRoster.length ? sql`OR p.id = ANY(${onRoster}::uuid[])` : sql``}
           )`
 
   const rows = await sql<ProjectView[]>`

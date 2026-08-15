@@ -49,6 +49,15 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
       )
     LIMIT 1000`
 
+  // The projects this person is on. Read fresh with the actor, like the tuples, so that
+  // adding somebody to a project takes effect on their next request rather than whenever a
+  // cache expires — and taking them off does the same.
+  const roster = await ctx.sql<{ project_id: string }[]>`
+    SELECT pm.project_id FROM project_members pm
+    JOIN projects p ON p.id = pm.project_id AND p.deleted_at IS NULL
+    WHERE pm.organization_id = ${ctx.organizationId} AND pm.user_id = ${userId} AND pm.deleted_at IS NULL
+    LIMIT 1000`
+
   return {
     type: 'user',
     userId: row.user_id,
@@ -59,6 +68,7 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
     teamIds,
     extraPermissions: row.extra_permissions ?? [],
     relations: new Set(tuples.map((tuple) => `${tuple.relation}:${tuple.object_type}:${tuple.object_id}`)),
+    projectIds: roster.map((entry) => entry.project_id),
     // Only the actor for *this* request carries the session's proof. Loading somebody
     // else's actor must never hand them this request's step-up.
     steppedUpAt: userId === ctx.userId ? ctx.steppedUpAt : null,

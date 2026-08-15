@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
+import { can } from '@superwork/auth'
 import {
   computeProjectHealth,
   getProject,
@@ -10,8 +11,10 @@ import {
   NotFoundError,
   PermissionError,
   projectMilestones,
+  projectRoster,
   shareableRelations,
 } from '@superwork/core'
+import { ProjectRoster } from '@/components/ProjectRoster'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -29,7 +32,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params
 
   try {
-    const { project, health, milestones, tasks, shares, people, teams, relations } = await withActor(
+    const { project, health, milestones, tasks, shares, people, teams, relations, roster, canStaff, everybody } = await withActor(
       session,
       async (ctx, actor) => {
         const loaded = await getProject(ctx, actor, id)
@@ -39,12 +42,30 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           milestones: await projectMilestones(ctx, id),
           tasks: (await listTasks(ctx, actor, { projectId: id, limit: 50 })).tasks,
           shares: await listShares(ctx, actor, 'project', id),
+          roster: await projectRoster(ctx, actor, id),
+          // The same question the repository asks, so the panel offers what it will accept.
+          canStaff: can(actor, 'project:update', {
+            type: 'project',
+            id: loaded.id,
+            organizationId: ctx.organizationId,
+            ownerId: loaded.ownerId,
+            createdBy: loaded.createdBy,
+            departmentId: loaded.departmentId,
+            teamIds: loaded.teamId ? [loaded.teamId] : [],
+            riskTier: 'low',
+          }).allow,
           relations: shareableRelations(actor, 'project', id, ctx.organizationId),
           teams: await listTeams(ctx, actor).catch(() => []),
+          // Two lists, because they answer different questions. Sharing with yourself is
+          // meaningless; putting yourself on a project you are running is not.
           people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
             AND m.user_id <> ${actor.userId}
+          ORDER BY u.name`,
+          everybody: await ctx.sql<{ id: string; name: string }[]>`
+          SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+          WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
           ORDER BY u.name`,
         }
       },
@@ -79,6 +100,21 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           </div>
           {project.description ? <p className="prose secondary">{project.description}</p> : null}
         </header>
+
+        <ProjectRoster
+          projectId={project.id}
+          canEdit={canStaff}
+          people={everybody}
+          members={roster.map((member) => ({
+            userId: member.userId,
+            name: member.name,
+            role: member.role,
+            reason: member.reason,
+            derived: member.derived,
+            addedByName: member.addedByName,
+            joinedAt: member.joinedAt.toISOString(),
+          }))}
+        />
 
         <ShareObject
           objectType="project"
