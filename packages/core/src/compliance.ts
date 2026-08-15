@@ -146,6 +146,79 @@ export async function createLegalEntity(
   return created
 }
 
+/**
+ * States, on this transaction, why the change about to be made is being made.
+ *
+ * The trigger on `legal_entities` reads these the way row-level security reads
+ * `app.current_org` — set for the transaction, gone when it ends. Anything that changes a
+ * profile or a consultation without calling this still produces a history row; it is
+ * simply marked as having arrived without a reason, which is a finding rather than a
+ * silence (§29.6).
+ */
+async function stateChangeReason(
+  ctx: TenantContext,
+  justification: string,
+  approvedBy: string | null,
+): Promise<void> {
+  await ctx.sql`
+    SELECT set_config('app.change_justification', ${justification}, true),
+           set_config('app.change_approver', ${approvedBy ?? ''}, true)`
+}
+
+export interface JurisdictionChange {
+  id: string
+  legalEntityId: string
+  entityName: string
+  changeKind: 'profile' | 'consultation'
+  fromState: string
+  toState: string
+  justification: string
+  justified: boolean
+  approvedByName: string | null
+  changedByName: string | null
+  changedAt: Date
+  /** True when this moved to a profile that permits more than the one before it. */
+  loosening: boolean
+}
+
+const PROFILE_ORDER: JurisdictionProfile[] = ['works_council', 'gdpr', 'standard']
+
+/**
+ * The history. First thing a review asks for, and until now it was a table with a writer
+ * and no reader anywhere in the product.
+ */
+export async function jurisdictionHistory(
+  ctx: TenantContext,
+  actor: Actor,
+  options: { legalEntityId?: string; limit?: number } = {},
+): Promise<JurisdictionChange[]> {
+  guard(ctx, actor, 'settings:read')
+  const sql = ctx.sql
+  const rows = await sql<Omit<JurisdictionChange, 'loosening'>[]>`
+    SELECT c.id, c.legal_entity_id AS "legalEntityId", e.name AS "entityName",
+           c.change_kind AS "changeKind", c.from_state AS "fromState", c.to_state AS "toState",
+           c.justification, c.justified,
+           a.name AS "approvedByName", u.name AS "changedByName", c.changed_at AS "changedAt"
+    FROM jurisdiction_changes c
+    JOIN legal_entities e ON e.id = c.legal_entity_id
+    LEFT JOIN users a ON a.id = c.approved_by
+    LEFT JOIN users u ON u.id = c.changed_by
+    WHERE c.organization_id = ${ctx.organizationId} AND c.deleted_at IS NULL
+      ${options.legalEntityId ? sql`AND c.legal_entity_id = ${options.legalEntityId}` : sql``}
+    ORDER BY c.changed_at DESC
+    LIMIT ${Math.min(options.limit ?? 100, 500)}`
+
+  return rows.map((row) => ({
+    ...row,
+    // Loosening is the direction a review cares about, and it is computed rather than
+    // stored so an added profile cannot leave old rows classified by a stale rule.
+    loosening:
+      row.changeKind === 'profile' &&
+      PROFILE_ORDER.indexOf(row.toState as JurisdictionProfile) >
+        PROFILE_ORDER.indexOf(row.fromState as JurisdictionProfile),
+  }))
+}
+
 export async function setJurisdiction(
   ctx: TenantContext,
   actor: Actor,
@@ -169,17 +242,14 @@ export async function setJurisdiction(
     )
   }
 
+  // The history row is written by the database, not here. Stating the reason on the
+  // transaction rather than inserting the row is what makes the record complete: a change
+  // that arrives by any other path still produces a row, marked as unexplained, instead of
+  // leaving no trace at all (migration 0025).
+  await stateChangeReason(ctx, input.justification.trim(), input.approvedBy ?? null)
   await ctx.sql`
     UPDATE legal_entities SET jurisdiction_profile = ${input.profile}
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.legalEntityId}`
-  await ctx.sql`
-    INSERT INTO jurisdiction_changes (
-      organization_id, legal_entity_id, from_profile, to_profile, justification,
-      approved_by, changed_by, created_by
-    ) VALUES (
-      ${ctx.organizationId}, ${input.legalEntityId}, ${current.jurisdiction_profile}, ${input.profile},
-      ${input.justification.trim()}, ${input.approvedBy ?? null}, ${actor.userId}, ${ctx.userId}
-    )`
 
   await writeAudit(ctx, {
     actorType: actor.type,
@@ -209,6 +279,13 @@ export async function recordConsultation(
     )
   }
 
+  await stateChangeReason(
+    ctx,
+    input.status === 'agreed'
+      ? `Consultation agreed, reference ${input.reference?.trim()}.`
+      : `Consultation recorded as ${input.status}.`,
+    null,
+  )
   await ctx.sql`
     UPDATE legal_entities
     SET consultation_status = ${input.status},
@@ -436,6 +513,35 @@ export async function worksCouncilReview(ctx: TenantContext, actor: Actor): Prom
         ? 'No legal entity in this organization is under a co-determination profile.'
         : `${agreed.length} of ${requiring.length} entit${requiring.length === 1 ? 'y has' : 'ies have'} a recorded ` +
           `agreement${agreed.length > 0 ? ` (${agreed.map((entity) => `${entity.name}: ${entity.consultationReference}`).join('; ')})` : ''}.`,
+    route: '/settings/compliance',
+  })
+
+  // 7b — Every change to a profile or a consultation has a reason on it.
+  //
+  // The history used to record only what `setJurisdiction` did, so a change made by any
+  // other path left no trace and this question could not be asked at all. The database
+  // writes the row now, which means an unexplained change shows up here instead of
+  // nowhere.
+  const [changeCounts] = await sql<{ total: string; unjustified: string; loosened: string }[]>`
+    SELECT count(*)::text AS total,
+           count(*) FILTER (WHERE NOT justified)::text AS unjustified,
+           count(*) FILTER (WHERE change_kind = 'profile' AND justified
+                              AND array_position(ARRAY['works_council','gdpr','standard'], to_state)
+                                > array_position(ARRAY['works_council','gdpr','standard'], from_state))::text AS loosened
+    FROM jurisdiction_changes
+    WHERE organization_id = ${org} AND deleted_at IS NULL`
+  const unjustified = Number(changeCounts?.unjustified ?? '0')
+  findings.push({
+    id: 'jurisdiction_history',
+    question: 'Can you show every change to a jurisdiction profile, with who made it and why?',
+    why: 'Loosening a profile is the change that widens what §29 may do. A history that only records the well-behaved caller is a log of intentions, not a record.',
+    status: unjustified === 0 ? 'pass' : 'fail',
+    evidence:
+      unjustified === 0
+        ? `${changeCounts?.total ?? 0} recorded change(s), every one with a stated reason` +
+          `${Number(changeCounts?.loosened ?? '0') > 0 ? `, of which ${changeCounts?.loosened} loosened a profile and needed a named approver` : ''}. ` +
+          'The row is written by the database, so no path can change a profile without producing one.'
+        : `${unjustified} change(s) were made without a stated reason. They are recorded — that is why this question can be answered — but nobody signed for them.`,
     route: '/settings/compliance',
   })
 

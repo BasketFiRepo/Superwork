@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 732 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 743 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines → jurisdiction history
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -560,6 +560,33 @@ as much about what is refused as what is built.
 
 **Settings → Reporting lines**, and your own line on your own record. See ADR 0027.
 
+## Who changed the rules, and why
+
+`jurisdiction_changes` had a writer since migration 0012 and no reader anywhere. "Who
+loosened this profile, when, why, and who approved it" is the first question a compliance
+review asks, and the answer sat in a table nothing selected from. The missing reader was the
+smaller hole: **the history recorded only what `setJurisdiction` did**, so a sync, a
+migration or a script changing the column directly left no trace — and the phase 5
+acceptance loop had been doing exactly that since the previous increment.
+
+- **The database writes the history.** A trigger records every change to a profile or a
+  consultation in the same statement that makes it. No code path can move either without
+  producing a row, because the row is not a separate call that can be forgotten.
+- **The reason is stated on the transaction**, through a setting the trigger reads, exactly
+  as row-level security reads `app.current_org` — and it is transaction-scoped, so one
+  caller's justification cannot leak onto the next one's change.
+- **An unexplained change is recorded, not refused.** A trigger that blocks the `UPDATE`
+  gets worked around by the next migration; a change arriving without a reason lands marked
+  unexplained and the review fails on it.
+- **Consultation is history too.** Under a works-council profile, moving to or away from
+  `agreed` switches §29 features on and off, and it was recorded nowhere.
+- **Loosening is computed at read time**, so adding a profile later cannot leave old rows
+  classified by a stale rule.
+
+The first thing the record caught was the acceptance loop itself. It now goes through
+`setJurisdiction` with a reason and a named approver — a better demonstration than the
+bypass was. **Settings → Jurisdiction and review.** See ADR 0028.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -906,6 +933,12 @@ away. They are evidence about query shape, not a 100,000-user result.
   person for a period is a real feature and is not the one that was built.
 - Nothing walks *down* the reporting chain. There is no "my reports' overdue work" query,
   and adding one would be the §29.5 prohibition wearing a different name.
+- The jurisdiction history covers a profile and a consultation, not `legal_entities.data_region`.
+  Residency is an organization-level setting elsewhere, moving it is a migration rather than
+  a toggle, and the entity-level column has no setter at all — left alone rather than
+  half-covered.
+- Deleting a legal entity cascades its history away. An entity that no longer exists has no
+  history to review, which is right, and worth knowing before somebody goes looking.
 - The demo organization has no legal entity, so it resolves to the strictest profile and
   escalates nothing to anybody. The escalation path is exercised only where a profile
   permits it.
@@ -1022,6 +1055,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0025](docs/adr/0025-a-shelf-is-a-container-an-account-is-not.md) | A shelf is a container, an account is not |
 | [0026](docs/adr/0026-a-policy-can-only-tighten.md) | A policy can only tighten |
 | [0027](docs/adr/0027-a-reporting-line-routes-accountability-not-visibility.md) | A reporting line routes accountability, not visibility |
+| [0028](docs/adr/0028-the-database-writes-the-history.md) | The database writes the history |
 
 ## Configuration
 

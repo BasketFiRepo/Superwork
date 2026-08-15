@@ -1,5 +1,11 @@
 import { requireSession, withActor } from '@/lib/session'
-import { listLegalEntities, PROFILES, worksCouncilReview, PermissionError } from '@superwork/core'
+import {
+  jurisdictionHistory,
+  listLegalEntities,
+  PROFILES,
+  worksCouncilReview,
+  PermissionError,
+} from '@superwork/core'
 import { CompliancePanel } from '@/components/CompliancePanel'
 
 export const dynamic = 'force-dynamic'
@@ -16,6 +22,7 @@ export default async function CompliancePage() {
   let data: {
     review: Awaited<ReturnType<typeof worksCouncilReview>>
     entities: Awaited<ReturnType<typeof listLegalEntities>>
+    history: Awaited<ReturnType<typeof jurisdictionHistory>>
   } | null = null
   let denied: string | null = null
 
@@ -23,6 +30,7 @@ export default async function CompliancePage() {
     data = await withActor(session, async (ctx, actor) => ({
       review: await worksCouncilReview(ctx, actor),
       entities: await listLegalEntities(ctx, actor),
+      history: await jurisdictionHistory(ctx, actor, { limit: 50 }),
     }))
   } catch (error) {
     if (error instanceof PermissionError) denied = error.message
@@ -74,6 +82,75 @@ export default async function CompliancePage() {
             requiresConsultation: profile.requiresConsultation,
           }))}
         />
+      ) : null}
+
+      {data ? (
+        <section className="panel" data-testid="jurisdiction-history">
+          <div className="panel-header">
+            <h2>Every change to a profile or a consultation</h2>
+            <span className="small muted">
+              {data.history.length === 0 ? 'Nothing has changed' : `${data.history.length} recorded`}
+            </span>
+          </div>
+
+          <div className="panel-body">
+            <p className="prose small secondary" style={{ margin: 0 }} data-testid="history-note">
+              This row is written by the database, in the same statement as the change. There is
+              no path — a script, a sync, a migration — that can move a profile or a consultation
+              without producing one. A change that arrives without a stated reason is recorded as
+              unexplained rather than not recorded, because a change nobody can see is worse than
+              one that is visibly unaccounted for.
+            </p>
+          </div>
+
+          {data.history.length === 0 ? (
+            <div className="panel-body">
+              <div className="empty small secondary">
+                No entity has changed profile or consultation since it was created.
+              </div>
+            </div>
+          ) : (
+            <div className="panel-body-flush table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 150 }}>When</th>
+                    <th>Entity</th>
+                    <th style={{ width: 210 }}>Change</th>
+                    <th>Why, and who</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.history.map((change) => (
+                    <tr key={change.id} data-testid="history-row">
+                      <td className="small secondary">{change.changedAt.toISOString().slice(0, 16).replace('T', ' ')}</td>
+                      <td className="small">{change.entityName}</td>
+                      <td className="small secondary">
+                        <span className={change.loosening ? 'chip chip-critical' : 'chip'}>
+                          {change.changeKind === 'profile' ? (change.loosening ? 'loosened' : 'tightened') : 'consultation'}
+                        </span>{' '}
+                        {change.fromState.replace(/_/g, ' ')} → {change.toState.replace(/_/g, ' ')}
+                      </td>
+                      <td className="small secondary">
+                        {change.justified ? (
+                          change.justification
+                        ) : (
+                          <span className="chip chip-critical" data-testid="history-unexplained">
+                            no reason stated
+                          </span>
+                        )}
+                        <div className="small muted">
+                          {change.changedByName ?? 'unknown'}
+                          {change.approvedByName ? ` · approved by ${change.approvedByName}` : ''}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       ) : null}
     </div>
   )

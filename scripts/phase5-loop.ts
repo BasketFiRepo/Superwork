@@ -43,6 +43,7 @@ import {
   composeBriefingFacts,
   confirmMemory,
   createTask,
+  createLegalEntity,
   createTeam,
   correctMemory,
   deleteDocument,
@@ -54,6 +55,7 @@ import {
   grantDocumentAccess,
   hybridSearch,
   ingestDocument,
+  jurisdictionHistory,
   listHolds,
   listDocuments,
   listMemories,
@@ -77,6 +79,7 @@ import {
   saveCustomTool,
   scheduleLadder,
   setFlag,
+  setJurisdiction,
   setPolicyEnabled,
   updateTask,
   scheduleFor,
@@ -1264,17 +1267,33 @@ try {
   // one is present depends on whether the phase 4 loop has run first. Every entity is
   // relaxed and every one restored to exactly what it was.
   const entitiesBefore = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
     const rows = await ctx.sql<{ id: string; profile: string }[]>`
       SELECT id, jurisdiction_profile AS profile FROM legal_entities
       WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
     if (rows.length === 0) {
-      await ctx.sql`
-        INSERT INTO legal_entities (organization_id, name, country, jurisdiction_profile, is_demo, created_by)
-        VALUES (${ctx.organizationId}, 'Loop GmbH', 'DE', 'gdpr', true, ${session.userId})`
+      // Created at the strictest default and then loosened through the supported path, so
+      // the history is exercised whether or not the phase 4 loop has left entities behind.
+      const created = await createLegalEntity(ctx, actor, { name: 'Loop GmbH', country: 'DE' })
+      await setJurisdiction(ctx, actor, {
+        legalEntityId: created.id,
+        profile: 'gdpr',
+        justification: 'Exercising the escalation ladder in the acceptance loop.',
+        approvedBy: session.userId,
+      })
     } else {
-      await ctx.sql`
-        UPDATE legal_entities SET jurisdiction_profile = 'gdpr'
-        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+      // Through `setJurisdiction`, not a bare UPDATE. This loop *was* the unaccounted path
+      // the history now catches: it relaxed the profile with a plain statement, and the
+      // review reported an unexplained change — correctly. Loosening needs a named
+      // approver as well as a reason, and this is where that is demonstrated.
+      for (const entity of rows) {
+        await setJurisdiction(ctx, actor, {
+          legalEntityId: entity.id,
+          profile: 'gdpr',
+          justification: 'Exercising the escalation ladder in the acceptance loop.',
+          approvedBy: session.userId,
+        })
+      }
     }
     return rows
   })
@@ -1338,6 +1357,20 @@ try {
     told.some((entry) => entry.kind === 'manager_rollup'),
     told.filter((entry) => entry.kind === 'manager_rollup').length + ' recorded')
 
+  // The history is read before the cleanup: an entity this loop created is deleted at the
+  // end, and its history rows cascade away with it, which is right — an entity that never
+  // existed has no history — but it means the assertion has to come first.
+  const profileHistory = await withTenant(session, async (ctx) =>
+    jurisdictionHistory(ctx, await loadActor(ctx), { limit: 20 }),
+  )
+  ok('Every profile change this loop made is on the record, with a reason',
+    profileHistory.length >= 1 && profileHistory.every((change) => change.justified),
+    profileHistory.map((change) => `${change.fromState}→${change.toState}`).join(', ') || 'nothing recorded')
+  ok('And the loosening one carries a named approver',
+    profileHistory.some((change) => change.loosening) &&
+      profileHistory.filter((change) => change.loosening).every((change) => change.approvedByName !== null),
+    `${profileHistory.filter((change) => change.loosening).length} loosened`)
+
   // Put the demo back the way it was found. Both halves matter: the entity goes, and so do
   // the escalations this beat manufactured — the compliance review counts a delivered
   // escalation against the profile in force *now*, so leaving them behind would make the
@@ -1353,10 +1386,13 @@ try {
     await ctx.sql`
       DELETE FROM tasks
       WHERE organization_id = ${ctx.organizationId} AND id IN (${lateTaskId}, ${tooSoonId})`
+    const actor = await loadActor(ctx)
     for (const entity of entitiesBefore) {
-      await ctx.sql`
-        UPDATE legal_entities SET jurisdiction_profile = ${entity.profile}
-        WHERE organization_id = ${ctx.organizationId} AND id = ${entity.id}`
+      await setJurisdiction(ctx, actor, {
+        legalEntityId: entity.id,
+        profile: entity.profile as JurisdictionProfile,
+        justification: 'Restoring the profile the loop found in place.',
+      })
     }
     await ctx.sql`
       DELETE FROM legal_entities
@@ -1367,6 +1403,8 @@ try {
     return strictestProfile(rows)
   })
   ok('The demo is left on the profile it started on', profileAfter === 'works_council', profileAfter)
+
+
 
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
