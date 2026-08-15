@@ -293,9 +293,13 @@ export const commentOnTask = register({
   idempotent: true,
   redactions: [],
   async execute(input, ctx: ToolContext) {
+    // Which agent, not just "an agent". The description has always promised the comment is
+    // "attributed to the agent by name", and `agent_id` was never filled in — which was
+    // survivable only while nothing displayed the row.
     const [row] = await ctx.tenantDb.sql<{ id: string }[]>`
-      INSERT INTO task_comments (organization_id, task_id, body, actor_type, created_by)
-      VALUES (${ctx.organizationId}, ${input.taskId}, ${input.body}, 'agent', ${ctx.principalUserId})
+      INSERT INTO task_comments (organization_id, task_id, body, actor_type, agent_id, created_by)
+      VALUES (${ctx.organizationId}, ${input.taskId}, ${input.body}, 'agent',
+              ${ctx.policy.agent?.agentId ?? null}, ${ctx.principalUserId})
       RETURNING id`
     return { ok: true as const, value: { id: row!.id } }
   },

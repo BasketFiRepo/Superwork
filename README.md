@@ -729,6 +729,34 @@ accountability and monitoring.
 
 **Reminders.** See ADR 0033.
 
+## Comments, and follow-ups that come back
+
+Two tables the agent wrote and nobody could read, both under a tool description promising
+something the product did not do.
+
+`comment_on_task@v1` says its comment is *"attributed to the agent by name. Never post as if
+a person wrote it."* Nothing read `task_comments`, so those notes were invisible — and no
+person could add one, because the only writer was a tool. The `mentions` array had been on
+the row since the first migration and was never populated.
+
+`create_follow_up@v1` says it records a follow-up *"so it resurfaces if no reply arrives."*
+It never resurfaced: nothing read the table and no worker swept it, so every follow-up the
+agent had recorded since Phase 2 was still open.
+
+- **Comments are a thread on the task**, the agent's marked as the agent's. Commenting needs
+  only a read of the task — discussing work you can see is not changing it. Your own words
+  are yours to remove; anybody else's needs a say over the task.
+- **A mention is an address**, so a trigger refuses one naming somebody outside the
+  organization, and it lands on their reminders rather than in their email.
+- **A follow-up closes itself when the customer writes back**, recorded as `replied` rather
+  than as somebody's decision — being chased about a thread that has already been answered is
+  how people learn to ignore a product.
+- **What is left tells its owner once**, made structural by a unique index rather than a flag.
+- **Nothing is sent outward.** A follow-up surfacing is internal; replying is still a person's
+  act (§25.7), and the acceptance loop asserts the outbox is empty afterwards.
+
+**Any task → Comments; any thread → Follow-ups.** See ADR 0034.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1207,6 +1235,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0031](docs/adr/0031-a-watcher-that-is-right-and-unwelcome-is-not-one-that-is-wrong.md) | A watcher that is right and unwelcome is not one that is wrong |
 | [0032](docs/adr/0032-being-on-a-project-lends-a-read-not-a-say.md) | Being on a project lends a read, not a say |
 | [0033](docs/adr/0033-a-reminder-has-to-arrive-somewhere-and-the-answer-has-to-mean-something.md) | A reminder has to arrive somewhere, and the answer has to mean something |
+| [0034](docs/adr/0034-a-note-nobody-can-read-is-not-a-note.md) | A note nobody can read is not a note |
 
 ## Configuration
 
