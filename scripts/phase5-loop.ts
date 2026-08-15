@@ -1476,7 +1476,12 @@ try {
   ok('A withdrawn invitation stops working immediately',
     (await invitationOffer(withdrawn)) === null)
 
-  // Leave the demo as it was found: the joiner is a real membership this loop created.
+  // Leave the demo as it was found — as far as it can be. The membership and the
+  // invitations go; the *user* stays, and cannot be removed: accepting wrote an audit row
+  // naming them as the principal, `audit_logs` is append-only, and the foreign key has no
+  // cascade. That is the design working. A person who has done something in Superwork
+  // cannot be erased by deleting a row, which is why erasure is its own subsystem (ADR
+  // 0016) rather than a DELETE.
   await withTenant(session, async (ctx) => {
     await ctx.sql`
       DELETE FROM memberships
@@ -1486,7 +1491,11 @@ try {
       DELETE FROM invitations
       WHERE organization_id = ${ctx.organizationId} AND email LIKE 'loop.%@northwind.example'`
   })
-  await adminSql()`DELETE FROM users WHERE lower(email) = lower(${joiner})`
+  const orphaned = await adminSql()<{ count: number }[]>`
+    SELECT count(*)::int FROM memberships m JOIN users u ON u.id = m.user_id
+    WHERE lower(u.email) = lower(${joiner}) AND m.deleted_at IS NULL`
+  ok('The joiner’s membership is cleaned up, and their audit trail is not',
+    orphaned[0]!.count === 0)
 
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
