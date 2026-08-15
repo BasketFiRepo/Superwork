@@ -1,6 +1,6 @@
 import type { RiskTier, TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
-import type { PreviewLine } from '@superwork/core'
+import { approvalPolicies, evaluateApprovalPolicies, type PreviewLine } from '@superwork/core'
 import { resolveTool, type Tool, type ToolContext } from '@superwork/tools'
 import type { GateOutcome, GatedStep, Plan } from './types.js'
 
@@ -96,17 +96,47 @@ export async function gatePlan(
   }
 
   const writes = steps.filter((s) => s.allowed && s.riskTier !== 'read')
-  // Bulk changes get an approval even when each individual write is low-risk (§11.1).
-  const bulkThreshold = writes.length > 20
-  const requiresApproval = steps.some((s) => s.allowed && s.requiresApproval) || bulkThreshold || writes.length > 0
+
+  // The rules used to live here as a constant — `writes.length > 20`, the same twenty the
+  // seeded "Bulk changes require approval" policy states. The row and the constant agreed
+  // and only the constant ran, so an admin could neither see nor change the rule that was
+  // actually governing them (§11.1).
+  //
+  // The floor stays in code and is passed in: any write is held for a person. A policy may
+  // raise the bar — a senior approver, a shorter deadline, an outright refusal — and there
+  // is no configuration that lowers it.
+  const policy = evaluateApprovalPolicies(
+    await approvalPolicies(ctx),
+    {
+      tools: steps.filter((s) => s.allowed).map((s) => s.tool),
+      writes: writes.length,
+      riskTier: highestRisk,
+      actorType: actor.agent ? 'agent' : 'user',
+      mode: actor.agent?.mode ?? null,
+      departmentId: actor.departmentIds[0] ?? null,
+    },
+    steps.some((s) => s.allowed && s.requiresApproval) || writes.length > 0,
+  )
+
+  // A denied plan is refused rather than held: a card somebody can approve is not a
+  // prohibition. Every write is struck out with the policy's own name as the reason.
+  const denied = policy.denied && writes.length > 0
+  const finalSteps = denied
+    ? steps.map((step) =>
+        step.allowed && step.riskTier !== 'read'
+          ? { ...step, allowed: false, reason: policy.reason, requiresApproval: false }
+          : step,
+      )
+    : steps
 
   return {
-    steps,
-    requiresApproval: requiresApproval && writes.length > 0,
-    blocked: steps.filter((s) => !s.allowed),
+    steps: finalSteps,
+    requiresApproval: !denied && policy.requiresApproval && writes.length > 0,
+    blocked: finalSteps.filter((s) => !s.allowed),
     estimatedCostCents: Math.max(1, Math.round(steps.length * 0.4)),
     approvalTitle: summarizePlan(plan, steps),
     riskTier: highestRisk,
+    policy,
   }
 }
 

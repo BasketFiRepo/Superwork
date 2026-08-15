@@ -31,6 +31,11 @@ export interface ApprovalCardView {
   slaHours: number
   hoursWaiting: number
   createdAt: string
+  /** Why this is being asked, in the deciding policy's own words (§11.1). */
+  policyReason: string | null
+  policyName: string | null
+  /** Set when a policy named a role rather than a person. */
+  approverRole: string | null
   preview: {
     operation: string
     entityType: string
@@ -132,6 +137,7 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
             Proposed by {approval.requestedByLabel} · waiting {approval.hoursWaiting.toFixed(1)}h of a{' '}
             {approval.slaHours}h SLA
             {breached ? ' · past SLA' : ''}
+            {approval.approverRole ? ` · a ${approval.approverRole} decides this` : ''}
           </span>
         </div>
         <span className={`chip${approval.status === 'pending' ? '' : approval.status === 'rejected' ? ' chip-critical' : ' chip-positive'}`}>
@@ -140,6 +146,18 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
       </div>
 
       <div className="panel-body stack stack-6">
+        {approval.policyReason ? (
+          <p className="small secondary" style={{ margin: 0 }} data-testid="approval-why">
+            <strong>Why you are being asked:</strong> {approval.policyReason}
+            {approval.policyName ? (
+              <>
+                {' '}
+                <a href="/settings/approvals">See the rule</a>.
+              </>
+            ) : null}
+          </p>
+        ) : null}
+
         <section className="stack stack-3">
           <span className="micro">
             What will happen — {approval.preview.length} {approval.preview.length === 1 ? 'change' : 'changes'}

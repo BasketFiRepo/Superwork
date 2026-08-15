@@ -27,11 +27,16 @@ const browser = await chromium.launch(executablePath ? { executablePath } : {})
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
 
 const errors: string[] = []
-// "Failed to load resource" on its own is useless; record what actually failed.
+// "Failed to load resource" on its own is useless; record what actually failed. The screen
+// goes on the record too: a minified React error with no location is not something anybody
+// can act on, and this walks thirty of them.
+const where = () => page.url().replace(BASE, '') || '/'
 page.on('console', (message: ConsoleMessage) => {
-  if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) errors.push(message.text())
+  if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) {
+    errors.push(`${message.text()} (on ${where()})`)
+  }
 })
-page.on('pageerror', (error) => errors.push(String(error)))
+page.on('pageerror', (error) => errors.push(`${String(error)} (on ${where()})`))
 // A check that deliberately exercises a refusal will see the 4xx that proves it worked.
 // Those are announced rather than counted as breakage.
 let expectingRefusal = false
@@ -708,6 +713,28 @@ try {
   ok('And the owner can take it back again',
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
+
+  // ---- The rules that decide what stops for a person ----------------------
+  await page.goto(`${BASE}/settings/approvals`)
+  await page.waitForSelector('[data-testid="approval-policies"]', { timeout: 15_000 })
+  const policyRows = await page.locator('[data-testid="policy-row"]').count()
+  ok('The seeded approval rules are on a screen at last', policyRows >= 3, `${policyRows} rules`)
+  ok('And each says what it catches in plain English, not JSON',
+    /changes 20 or more things/i.test(await page.locator('[data-testid="approval-policies"]').innerText()))
+  ok('The screen says a rule can only tighten, never switch an approval off',
+    /only ever tighten/i.test(await page.locator('[data-testid="policy-floor"]').innerText()))
+
+  const workedRows = await page.locator('[data-testid="policy-worked-row"]').count()
+  const workedText = await page.locator('[data-testid="policy-worked"]').innerText()
+  ok('It works the current rules through cases people actually run', workedRows >= 3, `${workedRows} cases`)
+  ok('Outbound mail routes to a manager by the rule', /a manager decides/i.test(workedText))
+  ok('And autopilot is refused outright rather than given a card', /refused/i.test(workedText))
+
+  await page.locator('[data-testid="policy-toggle"]').first().click()
+  await page.waitForSelector('[data-testid="policy-toggle-editor"]', { timeout: 15_000 })
+  ok('Switching a rule off will not happen without a reason',
+    await page.locator('[data-testid="policy-toggle-confirm"]').isDisabled())
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/approval-policies.png`, fullPage: true })
 
   // ---- A shelf of knowledge, and an account -------------------------------
   await page.goto(`${BASE}/knowledge`)

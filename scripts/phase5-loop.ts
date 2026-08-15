@@ -37,6 +37,8 @@ import {
   clearFlag,
   flagStates,
   applyRetention,
+  approvalPolicies,
+  evaluateApprovalPolicies,
   archiveTeam,
   composeBriefingFacts,
   confirmMemory,
@@ -70,6 +72,7 @@ import {
   retentionPolicies,
   saveCustomTool,
   setFlag,
+  setPolicyEnabled,
   updateTask,
   scheduleFor,
   previewSchedule,
@@ -1036,30 +1039,38 @@ try {
     ok('A knowledge space can be shared at all — the permission catalogue spells it differently',
       spaceShare.objectLabel === space.name, spaceShare.objectLabel ?? 'no label')
 
-    // Every seeded document is `internal` and a contractor reads up to `public`, so the
-    // shelf opens and everything on it stays shut. That is the guarantee, asserted first.
-    const stillShut = await withTenant(asContractor, async (ctx) => {
-      const actor = await loadActor(ctx)
-      return {
-        spaces: (await listSpaces(ctx, actor)).map((row) => row.id),
-        documents: (await listDocuments(ctx, actor, { spaceId: space.id, limit: 200 })).length,
-      }
-    })
-    ok('It opens the shelf', stillShut.spaces.includes(space.id))
-    ok('While everything on it classified above them stays shut',
-      stillShut.documents === 0, `${stillShut.documents} of ${space.documentCount} readable`)
-
-    // Publish one — chunks carry their own classification, so retrieval needs both moved
-    // or search and the page would disagree about the same document.
-    const published = await withTenant(session, async (ctx) => {
+    // Pick one and put it back to `internal` first, so this beat asserts the transition
+    // rather than a count of the whole shelf. It mutates seeded data, and a check that
+    // assumes a fresh database passes once and fails on the next run.
+    const candidate = await withTenant(session, async (ctx) => {
       const [row] = await ctx.sql<{ id: string; title: string }[]>`
         SELECT id, title FROM documents
         WHERE organization_id = ${ctx.organizationId} AND space_id = ${space.id}
           AND deleted_at IS NULL AND index_status = 'indexed'
         ORDER BY title LIMIT 1`
-      await ctx.sql`UPDATE documents SET sensitivity = 'public' WHERE id = ${row!.id}`
-      await ctx.sql`UPDATE document_chunks SET sensitivity = 'public' WHERE document_id = ${row!.id}`
+      await ctx.sql`UPDATE documents SET sensitivity = 'internal' WHERE id = ${row!.id}`
+      await ctx.sql`UPDATE document_chunks SET sensitivity = 'internal' WHERE document_id = ${row!.id}`
       return row!
+    })
+
+    // A contractor reads up to `public`, so the shelf opens and what is on it stays shut.
+    const stillShut = await withTenant(asContractor, async (ctx) => {
+      const actor = await loadActor(ctx)
+      return {
+        spaces: (await listSpaces(ctx, actor)).map((row) => row.id),
+        documents: (await listDocuments(ctx, actor, { spaceId: space.id, limit: 200 })).map((row) => row.id),
+      }
+    })
+    ok('It opens the shelf', stillShut.spaces.includes(space.id))
+    ok('While something on it classified above them stays shut',
+      !stillShut.documents.includes(candidate.id), `“${candidate.title}” is not readable`)
+
+    // Publish that one — chunks carry their own classification, so retrieval needs both
+    // moved or search and the page would disagree about the same document.
+    const published = await withTenant(session, async (ctx) => {
+      await ctx.sql`UPDATE documents SET sensitivity = 'public' WHERE id = ${candidate.id}`
+      await ctx.sql`UPDATE document_chunks SET sensitivity = 'public' WHERE document_id = ${candidate.id}`
+      return candidate
     })
 
     const onTheShelf = await withTenant(asContractor, async (ctx) => {
@@ -1128,6 +1139,62 @@ try {
     }),
   )
 
+  // ---- The rules that decide what stops for a person ------------------------
+  console.log('\nThe approval rules are read by something at last…\n')
+
+  const rules = await withTenant(session, async (ctx) => approvalPolicies(ctx))
+  ok('The seeded policies are loaded rather than decorative', rules.length >= 3,
+    rules.map((rule) => rule.name).join(' · '))
+
+  const outbound = evaluateApprovalPolicies(rules, {
+    tools: ['send_email@v1'],
+    writes: 1,
+    riskTier: 'high',
+    actorType: 'agent',
+    mode: 'execute',
+  })
+  ok('Outbound mail is routed to a manager by the rule, not by a constant',
+    outbound.approverRole === 'manager', outbound.reason)
+
+  const bulk = evaluateApprovalPolicies(rules, {
+    tools: ['create_task@v1'],
+    writes: 25,
+    riskTier: 'low',
+    actorType: 'agent',
+    mode: 'execute',
+  })
+  ok('The bulk threshold now comes from the row that always stated it',
+    bulk.matched.some((entry) => /bulk/i.test(entry.name)), bulk.matched.map((m) => m.name).join(', '))
+
+  const auto = evaluateApprovalPolicies(rules, {
+    tools: ['send_email@v1'],
+    writes: 1,
+    riskTier: 'high',
+    actorType: 'agent',
+    mode: 'autopilot',
+  })
+  ok('Autopilot is refused outright rather than given a card somebody can clear',
+    auto.denied && !auto.requiresApproval, auto.reason)
+
+  // The property that is not configurable.
+  const withEverythingOff = evaluateApprovalPolicies(
+    rules.map((rule) => ({ ...rule, enabled: false })),
+    { tools: ['send_email@v1'], writes: 1, riskTier: 'high', actorType: 'agent', mode: 'execute' },
+  )
+  ok('With every rule switched off, a change is still held for a person',
+    withEverythingOff.requiresApproval && !withEverythingOff.denied,
+    'there is no configuration that lets a write through unattended')
+
+  const disabling = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    return setPolicyEnabled(ctx, actor, {
+      policyId: rules[0]!.id,
+      enabled: false,
+      reason: 'Testing the control.',
+    }).then(() => 'allowed', (error: Error) => error.constructor.name)
+  })
+  ok('Turning a rule off asks for a password first', disabling === 'StepUpRequiredError', disabling)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1142,7 +1209,8 @@ try {
         'one feature was turned off for everybody while one person kept it; and one task was handed to one \n' +
         'colleague and taken back; and a whole project was handed over with the work inside it, which came \n' +
         'back when it did; and a shelf of knowledge was lent with what is on it while an account was lent \n' +
-        'without what is filed against it.\n',
+        'without what is filed against it; and the rules that decide what stops for a person are read \n' +
+        'from the rows that always stated them, and cannot be configured to let a change through.\n',
   )
 } catch (error) {
   console.error(error)

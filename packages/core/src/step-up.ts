@@ -27,6 +27,10 @@ export const STEP_UP_ACTIONS = {
   // Placing one is not here on purpose: preserving evidence in a hurry is the point, and
   // the friction belongs on the side that lets the deletion resume.
   'legal_hold.release': 'letting a matter’s records be deleted again',
+  // Weakening one is the dangerous direction, and turning a rule off is how you weaken it.
+  // Adding a rule only ever tightens, so it does not need this — but the two arrive through
+  // the same screen, and a control that asks sometimes teaches people to click through.
+  'approval_policy.set': 'changing which actions need a person’s approval',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS
