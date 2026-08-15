@@ -14,8 +14,9 @@ zero external credentials** — then the three things the build itself had liste
 true (natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools),
 and then the controls the interface had been claiming and the product did not have: step-up
 authentication, retention and erasure, legal holds, the agent memory whose table had been
-designed since Phase 0 with nothing ever written to it, and the document circulation lists
-the retrieval ACL had been checking for against an empty table.
+designed since Phase 0 with nothing ever written to it, the document circulation lists the
+retrieval ACL had been checking for against an empty table, and the task dependencies the
+daily briefing had been reporting on since Phase 2.
 
 ---
 
@@ -37,14 +38,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 630 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 640 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -373,6 +374,38 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Work that waits for other work
+
+`task_dependencies` was created in migration 0002 and never written to, while the daily
+briefing ran an `EXISTS` against it on every generation. "Your work is blocking other people"
+has been structurally empty since Phase 2 — for every user, on every day, without ever
+failing.
+
+Two things were missing, one of them invisible. The only index served "what does this task
+wait for"; every read in the product goes the other way, so the briefing's subquery was a
+sequential scan whose emptiness was the only reason nobody noticed. And there was no cycle
+check at all.
+
+- **A cycle is refused by the database.** A trigger walks the graph and raises before the row
+  lands; the repository only rewrites the message to name the two tasks. The thing that
+  eventually writes a cycle is a bulk import or an agent, not somebody clicking twice — the
+  same reasoning as the append-only trigger on `audit_logs`.
+- **Both ends must be the same organization's**, enforced by a second trigger. RLS stops one
+  tenant reading another's rows, but the foreign keys point at `tasks(id)` with no tenant in
+  them, so nothing stopped a row *referencing* across the boundary.
+- **Completing a task past an unfinished prerequisite is refused**, naming it and its
+  assignee. This is what makes the record a dependency rather than a note. A cancelled
+  prerequisite counts as finished.
+- **Finishing a task tells the people it was holding up** — and only those whose *last*
+  prerequisite it was, because telling somebody they are unblocked when they are not trains
+  them to ignore the message. Nobody is told about their own completion.
+- **Permission is checked on the dependent task**, not the prerequisite. Saying "my task waits
+  for yours" is a statement about my work; requiring your permission would mean nobody ever
+  records a dependency across a team boundary.
+
+The list view carries `waiting on N` and `blocking N` chips, and there is a task detail page
+showing both directions — the notification had to land somewhere. See ADR 0020.
+
 ## Who can find a document
 
 `document_permissions` was created in migration 0004 and never written to, while being read
@@ -573,7 +606,10 @@ that building teams later needs no change to retrieval. Seven tables are dead sc
 nothing reads or writes — `agent_messages`, `email_accounts`, `events`, `ingestion_jobs`,
 `invitations`, `saved_views` and `task_watchers` — left in place rather than dropped, and
 listed here so nobody has to rediscover them. A restriction has no expiry: a list is removed
-by somebody deciding to, not by a clock. The scale
+by somebody deciding to, not by a clock. A task dependency has no type — there is one
+relation, "cannot be completed until", not a scheduling calculus — and nothing in the planner
+proposes dependencies, because a model inferring "this probably waits for that" and having it
+enforced at completion time is a much larger claim than recording one by hand. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -611,6 +647,9 @@ disabled with the reason named. Nothing in the interface pretends to work.
   and memories go in the same transaction, and the count of each is reported to the caller and
   written to the audit trail (§25.13). The memory count is now a real number rather than a
   fact about an empty table.
+- **A dependency cannot be walked past.** A task with an unfinished prerequisite refuses to
+  complete, a cycle is refused by a database trigger rather than by application code, and
+  finishing a prerequisite notifies whoever it was the last thing blocking.
 - **A document can be taken out of general circulation, and the restriction bites.** While a
   circulation list exists, only the subjects on it retrieve the document — enforced inside
   both arms of hybrid search and in memory recall, with no exemption for administrators.

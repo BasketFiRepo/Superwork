@@ -32,8 +32,11 @@ import {
   listWorkflowRuns,
   reviewHost,
   saveCompiled,
+  addDependency,
   applyRetention,
+  composeBriefingFacts,
   confirmMemory,
+  createTask,
   correctMemory,
   deleteDocument,
   documentAudience,
@@ -51,6 +54,7 @@ import {
   releaseHold,
   retentionPolicies,
   saveCustomTool,
+  updateTask,
   scheduleFor,
   previewSchedule,
   setWorkflowSchedule,
@@ -685,6 +689,62 @@ try {
   )
   ok('Removing the restriction is its own decision, not a side effect', !reopened.restricted)
 
+  // ---- Work that waits for other work -------------------------------------
+  console.log('\nOne piece of work waits for another…\n')
+
+  const chain = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [colleague] = await ctx.sql<{ id: string }[]>`
+      SELECT m.user_id AS id FROM memberships m
+      WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    const pack = await createTask(ctx, actor, { title: 'Pack the Halden pallet', assigneeId: actor.userId })
+    const ship = await createTask(ctx, actor, { title: 'Ship the Halden order', assigneeId: colleague!.id })
+    const deps = await addDependency(ctx, actor, {
+      taskId: ship.id,
+      dependsOnTaskId: pack.id,
+      reason: 'Nothing leaves the yard unpacked.',
+    })
+    return { pack: pack.id, ship: ship.id, colleague: colleague!.id, deps }
+  })
+
+  ok('A dependency is recorded in both directions from one edge',
+    chain.deps.blockedBy.length === 1 && chain.deps.isBlocked)
+
+  // The rejection is caught outside `withTenant`, not inside it. A statement that fails
+  // aborts the transaction, so swallowing the error in the callback leaves the commit to
+  // raise it again — the refusal has to be allowed to roll the transaction back.
+  const loop = await withTenant(session, async (ctx) =>
+    addDependency(ctx, await loadActor(ctx), { taskId: chain.pack, dependsOnTaskId: chain.ship }),
+  ).then(() => null, (error: Error) => error.message)
+  ok('A loop is refused, because neither task could ever be finished', /never be completed|ever be completed/i.test(loop ?? ''),
+    (loop ?? 'it was allowed').slice(0, 90))
+
+  const early = await withTenant(session, async (ctx) =>
+    updateTask(ctx, await loadActor(ctx), { id: chain.ship, status: 'completed' }),
+  ).then(() => null, (error: Error) => error.message)
+  ok('Completing it early is refused, and says what it is waiting on', /Pack the Halden pallet/.test(early ?? ''),
+    (early ?? 'it was allowed').slice(0, 90))
+
+  const facts = await withTenant(session, async (ctx) =>
+    composeBriefingFacts(ctx, await loadActor(ctx), 'daily'),
+  )
+  ok('The briefing section that was always empty now says who you are holding up',
+    facts.blockingOthers.some((entry) => entry.id === chain.pack),
+    `${facts.blockingOthers.length} of your ${facts.blockingOthers.length === 1 ? 'tasks is' : 'tasks are'} blocking somebody`)
+
+  const freed = await withTenant(session, async (ctx) => {
+    await updateTask(ctx, await loadActor(ctx), { id: chain.pack, status: 'completed' })
+    const [note] = await ctx.sql<{ body: string }[]>`
+      SELECT body FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${chain.colleague}
+        AND type = 'task_unblocked' AND entity_id = ${chain.ship}`
+    const done = await updateTask(ctx, await loadActor(ctx), { id: chain.ship, status: 'completed' })
+    return { note: note?.body ?? null, status: done.status }
+  })
+  ok('Finishing it tells the person who was waiting', Boolean(freed.note), freed.note?.slice(0, 80) ?? 'nobody was told')
+  ok('And then it can be completed', freed.status === 'completed')
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -694,7 +754,8 @@ try {
         'everything else; what Superwork keeps has a stated window, a purge that runs, and a way out for one ' +
         'document and one person; a matter can stop all of it, in the open; and the assistant learned one ' +
         'thing, was agreed with, was corrected, and forgot it when its source went; and one document was \n' +
-        'taken out of circulation, shared back, and reopened on purpose.\n',
+        'taken out of circulation, shared back, and reopened on purpose; and one piece of work waited for \n' +
+        'another until it was actually done.\n',
   )
 } catch (error) {
   console.error(error)

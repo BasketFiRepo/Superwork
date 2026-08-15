@@ -411,6 +411,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['mergeCandidates'] = await seedDuplicateContact(ctx, companyIds, userIds)
     counts['memories'] = await seedMemory(ctx, companyIds, userIds)
     counts['restricted'] = await seedCirculationList(ctx, userIds, departmentIds)
+    counts['dependencies'] = await seedTaskDependencies(ctx, userIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -919,6 +920,43 @@ async function seedMemory(
     conflict: true,
   })
 
+  return count
+}
+
+/**
+ * A short chain of work that waits on other work (§12.1).
+ *
+ * The briefing's "your work is blocking other people" section has been structurally empty
+ * since Phase 2, because nothing ever wrote a dependency. Maya owns the prerequisite so the
+ * demo owner sees that section populated on their own briefing rather than having to switch
+ * accounts to believe it.
+ */
+async function seedTaskDependencies(ctx: TenantContext, userIds: Map<string, string>): Promise<number> {
+  const tasks = await ctx.sql<{ id: string; title: string; assignee_id: string | null }[]>`
+    SELECT id, title, assignee_id FROM tasks
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND status NOT IN ('completed', 'cancelled')
+    ORDER BY created_at
+    LIMIT 40`
+
+  const maya = userIds.get('maya')!
+  const prerequisite = tasks.find((task) => task.assignee_id === maya) ?? tasks[0]
+  if (!prerequisite) return 0
+
+  // Two other people's tasks wait on it, so the count in the briefing is a real plural.
+  const dependents = tasks.filter((task) => task.id !== prerequisite.id && task.assignee_id !== maya).slice(0, 2)
+  if (dependents.length === 0) return 0
+
+  let count = 0
+  for (const dependent of dependents) {
+    await ctx.sql`
+      INSERT INTO task_dependencies (organization_id, task_id, depends_on_task_id, reason, is_demo, created_by)
+      VALUES (
+        ${ctx.organizationId}, ${dependent.id}, ${prerequisite.id},
+        ${`Cannot start until “${prerequisite.title}” lands.`}, true, ${ctx.userId}
+      ) ON CONFLICT DO NOTHING`
+    count += 1
+  }
   return count
 }
 

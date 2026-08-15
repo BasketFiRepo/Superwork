@@ -4,6 +4,7 @@ import { ConflictError, NotFoundError, PermissionError, ValidationError } from '
 import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
 import { startOfDay } from '../time.js'
+import { notifyUnblocked, unfinishedPrerequisites } from './task-dependencies.js'
 
 export interface TaskView {
   id: string
@@ -24,6 +25,10 @@ export interface TaskView {
   createdByActorType: string
   createdByAgentRunId: string | null
   aiConfidence: number | null
+  /** Unfinished prerequisites. Non-zero means this cannot be completed yet. */
+  blockedByCount: number
+  /** Tasks waiting on this one. Non-zero means finishing it frees somebody. */
+  blockingCount: number
   version: number
   createdAt: Date
   updatedAt: Date
@@ -39,6 +44,15 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
          t.created_by_actor_type AS "createdByActorType",
          t.created_by_agent_run_id AS "createdByAgentRunId",
          t.ai_confidence AS "aiConfidence",
+         -- Both served by the two indexes on task_dependencies; the blocking side needed
+         -- the one added in 0021, without which this was a sequential scan per row.
+         (SELECT count(*)::int FROM task_dependencies d
+           JOIN tasks pre ON pre.id = d.depends_on_task_id AND pre.deleted_at IS NULL
+           WHERE d.organization_id = t.organization_id AND d.task_id = t.id AND d.deleted_at IS NULL
+             AND pre.status NOT IN ('completed', 'cancelled')) AS "blockedByCount",
+         (SELECT count(*)::int FROM task_dependencies d
+           WHERE d.organization_id = t.organization_id AND d.depends_on_task_id = t.id
+             AND d.deleted_at IS NULL) AS "blockingCount",
          t.version, t.created_at AS "createdAt", t.updated_at AS "updatedAt"
   FROM tasks t
   LEFT JOIN users u ON u.id = t.assignee_id
@@ -242,6 +256,18 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
   if (status === 'waiting' && !waitingOn) throw new ValidationError('A waiting task must name who or what it is waiting on.')
   if (status === 'blocked' && !blockedReason) throw new ValidationError('A blocked task must state why it is blocked.')
 
+  // A dependency that can be walked past is a comment. This is where it stops being one.
+  if (status === 'completed' && before.status !== 'completed') {
+    const waiting = await unfinishedPrerequisites(ctx, input.id)
+    if (waiting.length > 0) {
+      throw new ValidationError(
+        `“${before.title}” is waiting on ${waiting.length === 1 ? '' : `${waiting.length} things, starting with `}` +
+          `“${waiting[0]!.title}”${waiting[0]!.assigneeName ? ` (${waiting[0]!.assigneeName})` : ''}. ` +
+          'Finish that first, or remove the dependency if it no longer holds.',
+      )
+    }
+  }
+
   const sql = ctx.sql
   await sql`
     UPDATE tasks SET
@@ -258,6 +284,12 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.id} AND deleted_at IS NULL`
 
   const after = await getTask(ctx, actor, input.id)
+
+  // The other half of the briefing's "you are blocking three people": tell them when you
+  // stop. Only those whose last prerequisite this was — see `notifyUnblocked`.
+  if (status === 'completed' && before.status !== 'completed') {
+    await notifyUnblocked(ctx, actor, after.id, after.title)
+  }
 
   await writeActivity(ctx, {
     actorType: actor.type,
