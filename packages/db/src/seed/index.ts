@@ -410,6 +410,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['preferences'] = await seedPreferences(ctx, userIds)
     counts['mergeCandidates'] = await seedDuplicateContact(ctx, companyIds, userIds)
     counts['memories'] = await seedMemory(ctx, companyIds, userIds)
+    counts['restricted'] = await seedCirculationList(ctx, userIds, departmentIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -919,6 +920,43 @@ async function seedMemory(
   })
 
   return count
+}
+
+/**
+ * One document with a circulation list (§4.6).
+ *
+ * The demo needs a document that is restricted rather than merely classified, because they
+ * are different controls and the difference is invisible on an empty screen. The MSA
+ * amendment is the natural candidate: commercially sensitive, needed by named people, and
+ * the same document the acceptance loop asks about — so anybody signed in as somebody not
+ * on the list can see for themselves that the assistant will not quote it to them.
+ */
+async function seedCirculationList(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+): Promise<number> {
+  const [document] = await ctx.sql<{ id: string }[]>`
+    SELECT id FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND title LIKE 'Coldstore Nordics%' AND deleted_at IS NULL`
+  if (!document) return 0
+
+  const grants: { type: 'user' | 'department'; id: string; reason: string }[] = [
+    { type: 'user', id: userIds.get('maya')!, reason: 'Signs the storage agreements.' },
+    { type: 'user', id: userIds.get('david')!, reason: 'Owns the Nordics relationship.' },
+    { type: 'department', id: departmentIds.get('Finance')!, reason: 'Reconciles the storage invoices.' },
+  ]
+
+  for (const grant of grants) {
+    await ctx.sql`
+      INSERT INTO document_permissions (
+        organization_id, document_id, subject_type, subject_id, relation, reason, granted_by, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${document.id}, ${grant.type}, ${grant.id}, 'viewer',
+        ${grant.reason}, ${userIds.get('maya')!}, true, ${ctx.userId}
+      ) ON CONFLICT DO NOTHING`
+  }
+  return grants.length
 }
 
 /**

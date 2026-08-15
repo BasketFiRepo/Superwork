@@ -36,11 +36,16 @@ import {
   confirmMemory,
   correctMemory,
   deleteDocument,
+  documentAudience,
   getRun,
+  grantDocumentAccess,
+  hybridSearch,
   ingestDocument,
   listHolds,
   listMemories,
+  openDocumentToEveryone,
   recallMemories,
+  share,
   placeHold,
   previewErasure,
   releaseHold,
@@ -614,6 +619,72 @@ try {
   ok('And it stops being recalled',
     !forgotten.recalled.some((fact) => fact.citation?.documentId === memoryDoc))
 
+  // ---- Who can find a document --------------------------------------------
+  console.log('\nOne document is taken out of general circulation…\n')
+
+  const circulation = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [doc] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'Kestrel settlement terms', 'contract', 'internal', 'pending', true, ${session.userId})
+      RETURNING id`
+    await ingestDocument(ctx, {
+      documentId: doc!.id,
+      title: 'Kestrel settlement terms',
+      docType: 'contract',
+      body: '# Settlement\n\n## Terms\n\nThe zolpidine settlement is paid in four quarterly instalments.\n',
+      sensitivityHint: 'internal',
+    })
+    const [other] = await ctx.sql<{ id: string }[]>`
+      SELECT m.user_id AS id FROM memberships m
+      WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    return { documentId: doc!.id, otherUserId: other!.id, actorId: actor.userId }
+  })
+
+  const canFind = async (userId: string) =>
+    withTenant({ ...session, userId }, async (ctx) => {
+      const result = await hybridSearch(ctx, await loadActor(ctx), 'zolpidine settlement instalments')
+      return result.chunks.some((chunk) => chunk.documentId === circulation.documentId)
+    })
+
+  ok('Before anything, a colleague can find it', await canFind(circulation.otherUserId))
+
+  const restricted = await withTenant(session, async (ctx) =>
+    grantDocumentAccess(ctx, await loadActor(ctx), {
+      documentId: circulation.documentId,
+      subjectType: 'user',
+      subjectId: circulation.actorId,
+      reason: 'Handling the settlement personally.',
+    }),
+  )
+  ok('Naming one person restricts it to that person', restricted.restricted && restricted.entries.length === 1)
+  ok('And the colleague can no longer find it', !(await canFind(circulation.otherUserId)))
+  ok('While the person named still can', await canFind(circulation.actorId))
+
+  const shared = await withTenant(session, async (ctx) => {
+    await share(ctx, await loadActor(ctx), {
+      subjectType: 'user',
+      subjectId: circulation.otherUserId,
+      relation: 'viewer',
+      objectType: 'document',
+      objectId: circulation.documentId,
+      reason: 'Covering next week.',
+    })
+    return documentAudience(ctx, await loadActor(ctx), circulation.documentId)
+  })
+  ok('Sharing it puts them on the list rather than only saying it did',
+    shared.entries.some((entry) => entry.subjectId === circulation.otherUserId))
+  ok('So the share actually works', await canFind(circulation.otherUserId))
+
+  const reopened = await withTenant(session, async (ctx) =>
+    openDocumentToEveryone(ctx, await loadActor(ctx), {
+      documentId: circulation.documentId,
+      reason: 'Settlement executed; the terms are internal now.',
+    }),
+  )
+  ok('Removing the restriction is its own decision, not a side effect', !reopened.restricted)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -622,7 +693,8 @@ try {
         'person; a correction was applied and counted; a company’s own tool went through the same gate as ' +
         'everything else; what Superwork keeps has a stated window, a purge that runs, and a way out for one ' +
         'document and one person; a matter can stop all of it, in the open; and the assistant learned one ' +
-        'thing, was agreed with, was corrected, and forgot it when its source went.\n',
+        'thing, was agreed with, was corrected, and forgot it when its source went; and one document was \n' +
+        'taken out of circulation, shared back, and reopened on purpose.\n',
   )
 } catch (error) {
   console.error(error)

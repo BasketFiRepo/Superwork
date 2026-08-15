@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { syncShareToAudience } from './document-audience.js'
 
 /**
  * Sharing, as relation tuples (§4.6).
@@ -86,13 +87,31 @@ export async function share(
     DO UPDATE SET reason = EXCLUDED.reason, expires_at = EXCLUDED.expires_at, granted_by = EXCLUDED.granted_by
     RETURNING id`
 
+  // A tuple grants `document:read` through `can()`, which lets the recipient open the
+  // document's page — but retrieval consults the circulation list, not tuples. Without
+  // this, sharing a restricted document left "I shared it with you" and "the assistant
+  // cannot find it" both true.
+  let addedToAudience = false
+  if (input.objectType === 'document') {
+    addedToAudience = await syncShareToAudience(ctx, actor, {
+      documentId: input.objectId,
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      reason: input.reason,
+    })
+  }
+
   await writeAudit(ctx, {
     actorType: actor.type,
     actorId: actor.userId,
     action: 'sharing.granted',
     entityType: input.objectType,
     entityId: input.objectId,
-    after: { subject: `${input.subjectType}:${input.subjectId}`, relation: input.relation },
+    after: {
+      subject: `${input.subjectType}:${input.subjectId}`,
+      relation: input.relation,
+      ...(addedToAudience ? { addedToCirculationList: true } : {}),
+    },
   })
   await writeActivity(ctx, {
     actorType: actor.type,
