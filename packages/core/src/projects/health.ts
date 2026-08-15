@@ -1,5 +1,5 @@
 import type { TenantContext } from '@superwork/db'
-import { startOfDay } from '../time.js'
+import { calendarDate, startOfDay } from '../time.js'
 
 /**
  * Project health (§12.2).
@@ -41,6 +41,10 @@ interface HealthInputs {
 
 export async function computeProjectHealth(ctx: TenantContext, projectId: string): Promise<ProjectHealth> {
   const today = startOfDay(new Date(), ctx.timezone)
+  // The same day as an instant and as a calendar date. Tasks carry a `timestamptz` due
+  // moment; a milestone carries a `date`, and casting the instant to `::date` in a UTC
+  // session lands on yesterday anywhere ahead of UTC (§26.5).
+  const todayDate = calendarDate(ctx.timezone)
   const [row] = await ctx.sql<HealthInputs[]>`
     SELECT p.id AS project_id, p.name AS project_name,
            count(t.id) FILTER (WHERE t.deleted_at IS NULL)::int AS total_tasks,
@@ -54,7 +58,7 @@ export async function computeProjectHealth(ctx: TenantContext, projectId: string
              WHERE m.project_id = p.id AND m.deleted_at IS NULL) AS milestones_total,
            (SELECT count(*)::int FROM milestones m
              WHERE m.project_id = p.id AND m.deleted_at IS NULL
-               AND m.status <> 'done' AND m.due_on < ${today}::date) AS milestones_late,
+               AND m.status <> 'done' AND m.due_on < ${todayDate}::date) AS milestones_late,
            (SELECT EXTRACT(DAY FROM (now() - max(a.occurred_at)))::int FROM activities a
              WHERE a.entity_type = 'task' AND a.organization_id = p.organization_id
                AND a.entity_id IN (SELECT id FROM tasks WHERE project_id = p.id)) AS days_since_activity

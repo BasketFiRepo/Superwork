@@ -719,6 +719,25 @@ try {
   ok('The seeded team is there with its work counted', teamRows > 0, `${teamRows} teams`)
   ok('It says how much is scoped to it', /tasks · \d+ projects · \d+ documents scoped to it/i.test(teamsText))
 
+  // Departments: read everywhere, written by the seed alone until now.
+  const departmentText = await page.locator('[data-testid="departments"]').innerText()
+  ok('The same screen can make a department, and says how it differs from a team',
+    /where somebody sits/i.test(departmentText) && /what somebody is working on/i.test(departmentText))
+  await page.locator('[data-testid="department-add"]').click()
+  await page.waitForSelector('[data-testid="department-editor"]', { timeout: 15_000 })
+  await page.fill('#department-name', 'Customs')
+  await page.selectOption('#department-parent', { label: 'Operations' })
+  await page.locator('[data-testid="department-confirm"]').click()
+  const nested = await page
+    .waitForFunction(
+      () =>
+        /Operations \/ Customs/i.test(document.querySelector('[data-testid="departments"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A nested department lands with the path the database wrote', nested)
+
   await page.locator('[data-testid="team-add-member"]').first().click()
   await page.waitForSelector('[data-testid="team-member-editor"]', { timeout: 15_000 })
   ok('Nobody joins without a reason',
@@ -905,6 +924,29 @@ try {
     .then(() => true, () => false)
   ok('Putting somebody on it lands, with the reason on the row', rosterLanded)
 
+  // Milestones: on every project page since Phase 1, and until now written by the seed alone.
+  const milestoneText = await page.locator('[data-testid="milestones"]').innerText()
+  ok('A project can gain a milestone at last',
+    /Add a milestone/i.test(milestoneText) || /Milestone/i.test(milestoneText))
+  await page.locator('[data-testid="milestone-add"]').click()
+  await page.waitForSelector('[data-testid="milestone-editor"]', { timeout: 15_000 })
+  ok('Nothing is added without something to call it',
+    await page.locator('[data-testid="milestone-confirm"]').isDisabled())
+  await page.fill('#milestone-name', 'Broker consolidation signed off')
+  await page.fill('#milestone-date', '2026-09-30')
+  await page.locator('[data-testid="milestone-confirm"]').click()
+  const milestoneLanded = await page
+    .waitForFunction(
+      () =>
+        /Broker consolidation signed off/i.test(
+          document.querySelector('[data-testid="milestones"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('It lands on the project with its date', milestoneLanded)
+
   const projectShareText = await page.locator('[data-testid="share-object"]').innerText()
   ok('Sharing a project says it reaches the work inside it',
     /read the work inside it/i.test(projectShareText))
@@ -1065,10 +1107,35 @@ try {
 
   // ---- A shelf of knowledge, and an account -------------------------------
   await page.goto(`${BASE}/knowledge`)
-  await page.waitForSelector('[data-testid="knowledge-spaces"]', { timeout: 15_000 })
-  ok('The library says which shelf things live on',
-    /where a document lives/i.test(await page.locator('[data-testid="knowledge-spaces"]').innerText()))
-  await page.locator('[data-testid="knowledge-spaces"] a').first().click()
+  await page.waitForSelector('[data-testid="spaces"]', { timeout: 15_000 })
+  const spacesText = await page.locator('[data-testid="spaces"]').innerText()
+  ok('The library lists its shelves, with what is filed on each',
+    /Filed here/i.test(spacesText) && /New documents/i.test(spacesText))
+
+  // ADR 0025 said spaces were "read, shared and filed into; not yet authored". Now they are.
+  await page.locator('[data-testid="space-add"]').click()
+  await page.waitForSelector('[data-testid="space-editor"]', { timeout: 15_000 })
+  ok('Making one says what a shelf does and does not lend',
+    /never a say/i.test(await page.locator('[data-testid="space-editor"]').innerText()))
+  await page.fill('#space-name', 'Customs procedures')
+  await page.fill('#space-description', 'Everything the broker asks for.')
+  await page.locator('[data-testid="space-confirm"]').click()
+  const shelfMade = await page
+    .waitForFunction(
+      () => /Customs procedures/i.test(document.querySelector('[data-testid="spaces"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A new shelf lands in the library', shelfMade)
+
+  // The shelf with documents on it, not the empty one this walk just made.
+  await page
+    .locator('[data-testid="space-row"]', { hasNotText: 'Customs procedures' })
+    .first()
+    .locator('a')
+    .first()
+    .click()
   await page.waitForSelector('[data-testid="space-documents"]', { timeout: 15_000 })
 
   const spaceRows = await page.locator('[data-testid="space-document-row"]').count()

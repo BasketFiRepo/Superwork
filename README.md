@@ -782,6 +782,31 @@ control on it.
 
 **Settings → AI governance.** See ADR 0035.
 
+## Departments, milestones and shelves
+
+Three tables read all over the product and written by the seed alone: `departments` — one of
+the four permission scopes, and the thing the queue's fair share and every agent grant are
+scoped by; `milestones`, on every project page and a quarter of the health score; and
+`knowledge_spaces`, which ADR 0025 named as *"read, shared and filed into; not yet
+authored"*.
+
+- **The department tree's shape is the database's.** `path` and `depth` are derived from the
+  parent, and a rename or a move rewrites every descendant. A parent in another organization
+  is refused, and so is a move that would put a department underneath itself.
+- **Archiving refuses while anything is still inside**, and says what — people,
+  sub-departments, tasks, projects.
+- **A milestone is a promise the project makes**, so it needs a say over the project.
+  `completed_at` moves with the status, and the database refuses a `done` row without one.
+- **A shelf cannot default its documents above what its maker may read**, and a
+  department-scoped shelf is a departmental act.
+
+This also found a real bug: milestone lateness compared `due_on` against
+`startOfDay(now, tz)::date`, which in a UTC session lands on **yesterday** anywhere ahead of
+UTC — so a milestone due yesterday read as not yet late, everywhere in Europe. There is now a
+`calendarDate(timezone)` helper, and both readers use it.
+
+**Settings → Teams; any project; Knowledge.** See ADR 0036.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1262,6 +1287,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0033](docs/adr/0033-a-reminder-has-to-arrive-somewhere-and-the-answer-has-to-mean-something.md) | A reminder has to arrive somewhere, and the answer has to mean something |
 | [0034](docs/adr/0034-a-note-nobody-can-read-is-not-a-note.md) | A note nobody can read is not a note |
 | [0035](docs/adr/0035-a-ceiling-you-can-only-look-at.md) | A ceiling you can only look at |
+| [0036](docs/adr/0036-the-structure-a-product-is-governed-by-should-be-buildable-in-it.md) | The structure a product is governed by should be buildable in it |
 
 ## Configuration
 

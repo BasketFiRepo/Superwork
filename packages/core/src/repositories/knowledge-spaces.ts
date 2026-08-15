@@ -1,6 +1,7 @@
 import type { Sensitivity, TenantContext } from '@superwork/db'
 import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
-import { NotFoundError, PermissionError } from '../errors.js'
+import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
+import { writeAudit } from '../audit.js'
 
 /**
  * Knowledge spaces (§8.1).
@@ -93,4 +94,175 @@ export async function getSpace(ctx: TenantContext, actor: Actor, id: string): Pr
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
   return space
+}
+
+/**
+ * Making a shelf, renaming one, and putting one away (ADR 0036).
+ *
+ * ADR 0025 said it plainly and left it: *"Spaces are read, shared and filed into; they are
+ * not yet authored."* Until now the only space any organization had was the one the seed
+ * made, so "file this under…" offered exactly one answer.
+ *
+ * Creating one needs `knowledge:create` — the same permission as adding a document, because
+ * a shelf with nothing on it changes nothing about who can read what. Renaming and archiving
+ * need `knowledge:update`.
+ */
+function guardSpaceWrite(
+  ctx: TenantContext,
+  actor: Actor,
+  verb: 'create' | 'update',
+  departmentId?: string | null,
+): void {
+  // A shelf for one department is a departmental act, so the department travels with the
+  // question: a manager holds `knowledge:*:department` and would otherwise be refused a
+  // shelf for their own people. A shelf for the whole company needs an organization-wide
+  // grant, which is the honest reading of "for the whole company".
+  const decision = can(actor, `knowledge:${verb}`, {
+    type: 'knowledge',
+    organizationId: ctx.organizationId,
+    departmentId: departmentId ?? null,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+}
+
+/** A slug a link can carry, derived from the name and never from user input. */
+function slugFor(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+}
+
+export async function createSpace(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    name: string
+    description?: string | null
+    defaultSensitivity?: Sensitivity
+    departmentId?: string | null
+  },
+): Promise<SpaceView[]> {
+  guardSpaceWrite(ctx, actor, 'create', input.departmentId)
+
+  const name = input.name.trim()
+  if (name.length < 2) throw new ValidationError('A space needs a name somebody would recognise.')
+  const slug = slugFor(name)
+  if (slug.length === 0) throw new ValidationError('That name has no letters or numbers in it.')
+
+  // A space's default classification cannot exceed what the person creating it may read.
+  // Otherwise somebody could open a shelf whose documents they are not cleared to see.
+  const sensitivity = input.defaultSensitivity ?? 'internal'
+  const readable = can(actor, 'knowledge:read', {
+    type: 'knowledge',
+    organizationId: ctx.organizationId,
+    sensitivity,
+  })
+  if (!readable.allow) {
+    throw new PermissionError(
+      `${readable.reason} A space cannot default its documents to a classification you could not open yourself.`,
+    )
+  }
+
+  const [clash] = await ctx.sql<{ id: string }[]>`
+    SELECT id FROM knowledge_spaces
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND (lower(btrim(name)) = lower(${name}) OR slug = ${slug})`
+  if (clash) throw new ValidationError('There is already a space with that name.')
+
+  const [row] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO knowledge_spaces (
+      organization_id, name, slug, description, default_sensitivity, department_id, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${name}, ${slug}, ${input.description?.trim() || null},
+      ${sensitivity}::sw_sensitivity, ${input.departmentId ?? null}, ${ctx.userId}
+    ) RETURNING id`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'space.created',
+    entityType: 'knowledge_space',
+    entityId: row!.id,
+    after: { name, slug, defaultSensitivity: sensitivity },
+  })
+
+  return listSpaces(ctx, actor)
+}
+
+export async function updateSpace(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { id: string; name?: string; description?: string | null; departmentId?: string | null },
+): Promise<SpaceView[]> {
+  const before = await getSpace(ctx, actor, input.id)
+  guardSpaceWrite(ctx, actor, 'update', before.departmentId)
+
+  const name = input.name?.trim() ?? before.name
+  if (name.length < 2) throw new ValidationError('A space needs a name somebody would recognise.')
+
+  const sql = ctx.sql
+  await sql`
+    UPDATE knowledge_spaces
+    SET name = ${name},
+        slug = ${slugFor(name)},
+        description = ${input.description === undefined ? sql`description` : (input.description?.trim() || null)},
+        department_id = ${input.departmentId === undefined ? sql`department_id` : input.departmentId},
+        updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'space.updated',
+    entityType: 'knowledge_space',
+    entityId: input.id,
+    before: { name: before.name },
+    after: { name },
+  })
+
+  return listSpaces(ctx, actor)
+}
+
+/**
+ * Puts a shelf away.
+ *
+ * Refused while documents are still filed on it: they would keep a `space_id` pointing at
+ * something no screen shows, and a share of the space would lend a read of documents nobody
+ * can find the shelf for. Same rule as disbanding a team or archiving a department.
+ */
+export async function archiveSpace(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { id: string; reason: string },
+): Promise<SpaceView[]> {
+  if (input.reason.trim().length < 4) throw new ValidationError('Say why it is going.')
+
+  const space = await getSpace(ctx, actor, input.id)
+  guardSpaceWrite(ctx, actor, 'update', space.departmentId)
+  if (space.documentCount > 0) {
+    throw new ValidationError(
+      `${space.documentCount} document${space.documentCount === 1 ? ' is' : 's are'} still filed on “${space.name}”. ` +
+        'Move them first: archiving it would leave them on a shelf nobody can see.',
+    )
+  }
+
+  await ctx.sql`
+    UPDATE knowledge_spaces SET deleted_at = now(), updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'space.archived',
+    entityType: 'knowledge_space',
+    entityId: input.id,
+    before: { name: space.name },
+    after: { reason: input.reason.trim() },
+  })
+
+  return listSpaces(ctx, actor)
 }

@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { knowledgeHealth, listDocuments, listSpaces } from '@superwork/core'
+import { can } from '@superwork/auth'
+import { Spaces } from '@/components/Spaces'
 import { UploadDocument } from '@/components/UploadDocument'
 
 export const dynamic = 'force-dynamic'
@@ -8,12 +10,17 @@ export const dynamic = 'force-dynamic'
 /** Knowledge (§17). Primary action: find or capture. */
 export default async function KnowledgePage() {
   const session = await requireSession()
-  const { documents, health, spaces } = await withActor(session, async (ctx, actor) => ({
+  const { documents, health, spaces, canFile } = await withActor(session, async (ctx, actor) => ({
     documents: await listDocuments(ctx, actor, { limit: 100 }),
     health: await knowledgeHealth(ctx),
     // Seeded since migration 0004 and read by nothing until now, so the library had no
     // notion of which shelf anything sat on.
     spaces: await listSpaces(ctx, actor).catch(() => []),
+    canFile: can(actor, 'knowledge:create', {
+      type: 'knowledge',
+      organizationId: ctx.organizationId,
+      riskTier: 'low',
+    }).allow,
   }))
 
   const quarantined = documents.filter((d) => d.indexStatus === 'quarantined')
@@ -42,21 +49,17 @@ export default async function KnowledgePage() {
         </div>
       ) : null}
 
-      {spaces.length > 0 ? (
-        <section className="panel" data-testid="knowledge-spaces">
-          <div className="panel-header">
-            <h2>Spaces</h2>
-            <span className="small muted">where a document lives, and what can be shared as a set</span>
-          </div>
-          <div className="panel-body row wrap">
-            {spaces.map((space) => (
-              <Link className="chip" key={space.id} href={`/knowledge/spaces/${space.id}`}>
-                {space.name} · {space.documentCount}
-              </Link>
-            ))}
-          </div>
-        </section>
-      ) : null}
+      <Spaces
+        canEdit={canFile}
+        spaces={spaces.map((space) => ({
+          id: space.id,
+          name: space.name,
+          slug: space.slug,
+          description: space.description,
+          defaultSensitivity: space.defaultSensitivity,
+          documentCount: space.documentCount,
+        }))}
+      />
 
       <UploadDocument />
 
