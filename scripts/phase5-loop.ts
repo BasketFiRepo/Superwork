@@ -19,7 +19,7 @@
  * Run with:  pnpm loop:phase5
  */
 import { adminSql, closePools, withTenant } from '@superwork/db'
-import { can, loadActor, login } from '@superwork/auth'
+import { asAgent, can, loadActor, login } from '@superwork/auth'
 import { compileWorkflow } from '@superwork/ai'
 import {
   activateCustomTool,
@@ -106,6 +106,12 @@ import {
   listFollowUps,
   listNotifications,
   sweepFollowUps,
+  agentGrants,
+  monitoringPolicy,
+  nudgeBudget,
+  removeAgentGrant,
+  setAgentGrant,
+  setMonitoringPolicy,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -1962,6 +1968,92 @@ try {
       DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop comment —%'`
   })
 
+  // ---- The two ceilings an admin could see and not set ----------------------
+  console.log('\nAn admin tightens what the system may do…\n')
+
+  const beforeGovernance = await withTenant(session, async (ctx) =>
+    monitoringPolicy(ctx, await loadActor(ctx)),
+  )
+  ok('The monitoring policy resolves against the jurisdiction rather than a stored copy',
+    beforeGovernance.ceiling.nudgeBudgetPerPersonPerDay > 0,
+    `${beforeGovernance.jurisdictionProfile} · at most ${beforeGovernance.ceiling.nudgeBudgetPerPersonPerDay}/day`)
+
+  const widened = await withTenant(session, async (ctx) =>
+    setMonitoringPolicy(ctx, await loadActor(ctx), {
+      nudgeBudgetPerPersonPerDay: 20,
+      reason: 'Trying to chase people harder than the jurisdiction allows.',
+    }).then(() => null, (error: Error) => error.message),
+  )
+  ok('An organization cannot chase harder than its jurisdiction allows',
+    /never more/i.test(widened ?? ''), (widened ?? 'it was allowed').slice(0, 70))
+
+  const quieter = await withTenant(session, async (ctx) =>
+    setMonitoringPolicy(ctx, await loadActor(ctx), {
+      nudgeBudgetPerPersonPerDay: 1,
+      noSurprisesReviewHours: 72,
+      reason: 'Works council asked for a quieter cadence and longer to answer.',
+    }),
+  )
+  ok('But it can chase less, and give people longer to answer',
+    quieter.nudgeBudgetPerPersonPerDay === 1 && quieter.noSurprisesReviewHours === 72,
+    `${quieter.nudgeBudgetPerPersonPerDay}/day · ${quieter.noSurprisesReviewHours}h`)
+
+  const spent = await withTenant(session, async (ctx) => nudgeBudget(ctx, chased.person.id))
+  ok('And the number the ladder spends is the one that was set', spent.perDay === 1, `${spent.perDay}/day`)
+
+  const withoutProof = await withTenant(session, async (ctx) =>
+    setAgentGrant(ctx, await loadActor(ctx), {
+      capability: 'email',
+      toolPattern: 'email:send',
+      effect: 'deny',
+      reason: 'Nothing leaves this company without a person.',
+    }).then(() => null, (error: Error) => error.message),
+  )
+  ok('Changing what agents may do asks who is at the keyboard',
+    /confirm your password/i.test(withoutProof ?? ''), (withoutProof ?? 'it was allowed').slice(0, 60))
+
+  await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+    setAgentGrant(ctx, await loadActor(ctx), {
+      capability: 'email',
+      toolPattern: 'email:send',
+      effect: 'deny',
+      reason: 'Nothing leaves this company without a person pressing send.',
+    }),
+  )
+
+  const refusedByPolicy = await withTenant(session, async (ctx) => {
+    const agentActor = await asAgent(ctx, await loadActor(ctx), {
+      agentId: '00000000-0000-0000-0000-0000000000ff',
+      agentName: 'Loop agent',
+      mode: 'execute',
+      toolGrants: ['send_email@v1'],
+      maxSensitivity: 'confidential',
+    })
+    return can(agentActor, 'email:send', {
+      type: 'email',
+      organizationId: ctx.organizationId,
+      riskTier: 'high',
+    })
+  })
+  // A deny row had never denied anything: the actor loader filtered for 'allow' and dropped
+  // the rest, so the effect column was decoration.
+  ok('A deny line actually refuses, which it never did before',
+    !refusedByPolicy.allow && /does not let agents do email:send/i.test(refusedByPolicy.reason),
+    refusedByPolicy.reason.slice(0, 70))
+
+  // Put the demo back.
+  await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const grants = await agentGrants(ctx, actor)
+    const added = grants.find((row) => row.toolPattern === 'email:send' && row.effect === 'deny')
+    if (added) await removeAgentGrant(ctx, actor, { id: added.id, reason: 'The loop is finished with it.' })
+    await setMonitoringPolicy(ctx, actor, {
+      nudgeBudgetPerPersonPerDay: beforeGovernance.nudgeBudgetPerPersonPerDay,
+      noSurprisesReviewHours: beforeGovernance.noSurprisesReviewHours,
+      reason: 'Restoring what the jurisdiction requires after the loop.',
+    })
+  })
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1988,7 +2080,9 @@ try {
         'opened by the product, arrives somewhere a person can see it, and closes the work when they \n' +
         'answer it; and the note the assistant leaves on a task can be read at last, a mention \n' +
         'reaches the person named, and a follow-up either comes back or closes itself because \n' +
-        'the customer wrote first.\n',
+        'the customer wrote first; and the two ceilings an admin could only see — how hard the \n' +
+        'system may chase people, and what an agent may do at all — can be tightened from the \n' +
+        'screen the refusals have always pointed at.\n',
   )
 } catch (error) {
   console.error(error)

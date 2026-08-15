@@ -757,6 +757,31 @@ agent had recorded since Phase 2 was still open.
 
 **Any task → Comments; any thread → Follow-ups.** See ADR 0034.
 
+## The two ceilings, and who may move them
+
+`monitoring_policies` decides how hard this system may chase the people who work here.
+`agent_permissions` decides what any agent may do at all. Both were displayed and neither
+could be changed without editing the database — while the agent's own refusal said *"An
+admin can add it in Settings → AI governance"*, a screen that listed the grants and had no
+control on it.
+
+- **Tighten only.** Fewer contacts a day, a longer window to answer. Asking for more than the
+  jurisdiction allows is refused with the number that stopped it, never silently clamped.
+- **The window is now enforced.** It was displayed from the organization's row and enforced
+  from the jurisdiction constant, so a company that gave its people longer saw its own number
+  and had the shorter one applied.
+- **Deny beats allow**, and bites even when no allow rows exist. `asAgent` filtered for
+  `allow` and dropped the rest, so a deny row had never denied anything.
+- **The clearance ceiling is the lowest line that applies.** `max_sensitivity` sat on every
+  grant and was read by nothing.
+- **Changing what agents may do asks for the password again.** Tightening the monitoring
+  policy does not — that direction only protects somebody.
+- **The prohibited five are a constraint, not a switch**: individual scoring, keystroke and
+  screen capture, covert monitoring, automated employment decisions, reading private
+  messages. The screen says so, and the test asserts the constraint rather than the sentence.
+
+**Settings → AI governance.** See ADR 0035.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1236,6 +1261,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0032](docs/adr/0032-being-on-a-project-lends-a-read-not-a-say.md) | Being on a project lends a read, not a say |
 | [0033](docs/adr/0033-a-reminder-has-to-arrive-somewhere-and-the-answer-has-to-mean-something.md) | A reminder has to arrive somewhere, and the answer has to mean something |
 | [0034](docs/adr/0034-a-note-nobody-can-read-is-not-a-note.md) | A note nobody can read is not a note |
+| [0035](docs/adr/0035-a-ceiling-you-can-only-look-at.md) | A ceiling you can only look at |
 
 ## Configuration
 

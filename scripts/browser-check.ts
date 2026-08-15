@@ -470,6 +470,62 @@ try {
     /erp\.northwind\.example/.test(hostsText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/step-up.png`, fullPage: true })
 
+  // ---- AI governance: the two ceilings the refusals point at ---------------
+  // The agent's own denial says "An admin can add it in Settings → AI governance", and that
+  // screen listed the grants with no control on it.
+  //
+  // Deliberately after the custom-tools section: step-up lasts five minutes, so a beat that
+  // confirms a password earlier would leave the next one with nothing to prove.
+  await page.goto(`${BASE}/settings/ai-governance`)
+  await page.waitForSelector('[data-testid="monitoring-policy"]', { timeout: 15_000 })
+  const governanceText = await page.locator('[data-testid="monitoring-policy"]').innerText()
+  ok('The monitoring policy says what it may only tighten',
+    /can only be tightened/i.test(governanceText) && /never the other way round/i.test(governanceText))
+  ok('And states what no setting can turn on',
+    /Refused by the database, not by a setting/i.test(governanceText) &&
+      /productivity scoring/i.test(governanceText))
+
+  await page.fill('#nudge-budget', '1')
+  await page.fill('#monitoring-reason', 'Works council asked for a quieter cadence.')
+  await page.locator('[data-testid="monitoring-save"]').click()
+  const tightened = await page
+    .waitForFunction(
+      () =>
+        /quieter cadence/i.test(document.querySelector('[data-testid="monitoring-policy"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Tightening it lands, and says who set it and why', tightened)
+
+  // A grant is the other ceiling, and changing it asks for the password again.
+  await page.locator('[data-testid="grant-add"]').click()
+  await page.waitForSelector('[data-testid="grant-editor"]', { timeout: 15_000 })
+  ok('Nothing is granted without a reason',
+    await page.locator('[data-testid="grant-confirm"]').isDisabled())
+  await page.fill('#grant-capability', 'email')
+  await page.fill('#grant-pattern', 'email:send')
+  await page.selectOption('#grant-effect', 'deny')
+  await page.fill('#grant-reason', 'Nothing leaves this company without a person pressing send.')
+  await page.locator('[data-testid="grant-confirm"]').click()
+  // Whether the password is asked for again depends on how recently it was: the custom-tools
+  // beat above confirms one, and a confirmation lasts five minutes. That the change *needs*
+  // one is asserted in tests/security/governance-controls.test.ts, where the clock is ours.
+  const grantStepUp = page.locator('[data-testid="step-up"]')
+  if (await grantStepUp.waitFor({ timeout: 5_000 }).then(() => true, () => false)) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  const granted = await page
+    .waitForFunction(
+      () => /email:send/i.test(document.querySelector('[data-testid="agent-grants"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And the line lands once they confirm', granted)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/ai-governance.png`, fullPage: true })
+
   // ---- Retention and erasure ----------------------------------------------
   await page.goto(`${BASE}/settings/retention`)
   await page.waitForSelector('[data-testid="retention"]', { timeout: 15_000 })

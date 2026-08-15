@@ -1,5 +1,6 @@
 import type { TenantContext } from '@superwork/db'
 import type { Role, Sensitivity } from '@superwork/db'
+import { lowerSensitivity } from './policy.js'
 import type { Actor, AgentActorFacet } from './policy.js'
 
 interface ActorRow {
@@ -93,14 +94,31 @@ export async function asAgent(
   principal: Actor,
   input: AgentFacetInput,
 ): Promise<Actor> {
-  const grants = await ctx.sql<{ capability: string; tool_pattern: string; effect: string }[]>`
-    SELECT capability, tool_pattern, effect
+  const grants = await ctx.sql<
+    { capability: string; tool_pattern: string; effect: string; max_sensitivity: Sensitivity }[]
+  >`
+    SELECT capability, tool_pattern, effect, max_sensitivity
     FROM agent_permissions
     WHERE organization_id = ${ctx.organizationId}
       AND deleted_at IS NULL
       AND (department_id IS NULL OR department_id = ANY(${principal.departmentIds}::uuid[]))`
 
-  const orgGrant = grants.filter((g) => g.effect === 'allow').map((g) => g.tool_pattern)
+  // `deny` rows used to be filtered out and dropped, so a deny grant had never denied
+  // anything. Deny wins wherever both match, which is the only rule under which writing one
+  // down is worth doing.
+  const denied = grants.filter((g) => g.effect === 'deny').map((g) => g.tool_pattern)
+  const orgGrant = grants
+    .filter((g) => g.effect === 'allow')
+    .map((g) => g.tool_pattern)
+    .filter((pattern) => !denied.includes(pattern))
+
+  // The clearance ceiling on the row was never read either. The lowest of the agent's own
+  // limit and every grant that applies to this person wins: a ceiling that a caller's
+  // argument could raise is not a ceiling.
+  const orgCeiling = grants.reduce<Sensitivity>(
+    (lowest, grant) => lowerSensitivity(lowest, grant.max_sensitivity),
+    'restricted',
+  )
 
   return {
     ...principal,
@@ -110,8 +128,9 @@ export async function asAgent(
       agentName: input.agentName,
       mode: input.mode,
       orgGrant,
+      denied,
       toolGrants: input.toolGrants,
-      maxSensitivity: input.maxSensitivity,
+      maxSensitivity: lowerSensitivity(input.maxSensitivity, orgCeiling),
       capabilityDowngraded: input.capabilityDowngraded ?? false,
     },
   }
