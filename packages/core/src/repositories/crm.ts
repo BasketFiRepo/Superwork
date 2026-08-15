@@ -1,5 +1,5 @@
 import type { TenantContext } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { can, grantedScope, readCeiling, type Actor } from '@superwork/auth'
 import { ConflictError, NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 
@@ -217,24 +217,43 @@ export async function relationship360(ctx: TenantContext, actor: Actor, companyI
       AND deleted_at IS NULL AND status NOT IN ('cancelled')
     ORDER BY due_at NULLS LAST`
 
-  const openTasks = await sql<{ id: string; title: string; dueAt: Date | null; assigneeName: string | null }[]>`
-    SELECT t.id, t.title, t.due_at AS "dueAt", u.name AS "assigneeName"
-    FROM tasks t
-    JOIN projects p ON p.id = t.project_id
-    LEFT JOIN users u ON u.id = t.assignee_id
-    WHERE t.organization_id = ${ctx.organizationId} AND p.company_id = ${companyId}
-      AND t.deleted_at IS NULL AND t.status NOT IN ('completed', 'cancelled')
-    ORDER BY t.due_at NULLS LAST LIMIT 20`
+  // Gated once at the top and then trusted, this aggregate handed over every task and
+  // document filed under the company — including ones the reader could not open from their
+  // own screens. One check on the company is not a check on six kinds of record, and a
+  // company share (ADR 0025) would have made that an easy way in.
+  const taskScope = grantedScope(actor, 'task:read', 'task')
+  const openTasks = taskScope === null
+    ? []
+    : await sql<{ id: string; title: string; dueAt: Date | null; assigneeName: string | null }[]>`
+        SELECT t.id, t.title, t.due_at AS "dueAt", u.name AS "assigneeName"
+        FROM tasks t
+        JOIN projects p ON p.id = t.project_id
+        LEFT JOIN users u ON u.id = t.assignee_id
+        WHERE t.organization_id = ${ctx.organizationId} AND p.company_id = ${companyId}
+          AND t.deleted_at IS NULL AND t.status NOT IN ('completed', 'cancelled')
+          ${
+            taskScope === 'org'
+              ? sql``
+              : taskScope === 'department'
+                ? sql`AND t.department_id = ANY(${actor.departmentIds}::uuid[])`
+                : taskScope === 'team'
+                  ? sql`AND t.team_id = ANY(${actor.teamIds}::uuid[])`
+                  : sql`AND (t.assignee_id = ${actor.userId} OR t.created_by = ${actor.userId})`
+          }
+        ORDER BY t.due_at NULLS LAST LIMIT 20`
 
   const recentMeetings = await sql<{ id: string; title: string; startsAt: Date }[]>`
     SELECT id, title, starts_at AS "startsAt" FROM meetings
     WHERE organization_id = ${ctx.organizationId} AND company_id = ${companyId} AND deleted_at IS NULL
     ORDER BY starts_at DESC LIMIT 5`
 
+  // A title is content. A `restricted` contract listed here by name told a reader who
+  // could not open it that it exists and what it is called.
   const documents = await sql<{ id: string; title: string; docType: string }[]>`
     SELECT id, title, doc_type AS "docType" FROM documents
     WHERE organization_id = ${ctx.organizationId} AND company_id = ${companyId}
       AND deleted_at IS NULL AND index_status = 'indexed'
+      AND sensitivity <= ${readCeiling(actor)}::sw_sensitivity
     ORDER BY created_at DESC LIMIT 10`
 
   const facts: RelationshipFact[] = []

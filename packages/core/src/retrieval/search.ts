@@ -1,5 +1,5 @@
 import type { Sensitivity, TenantContext } from '@superwork/db'
-import { grantedScope, ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
+import { grantedScope, ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, sharedObjectIds, type Actor } from '@superwork/auth'
 import { embeddingProvider, tokenize, toVectorLiteral } from './embed.js'
 
 /**
@@ -82,6 +82,9 @@ export async function hybridSearch(
   const expanded = transformQuery(query, org?.glossary ?? [])
   const vector = toVectorLiteral((await embeddingProvider().embed([expanded]))[0] ?? [])
 
+  const sharedDocuments = sharedObjectIds(actor, 'document')
+  const sharedSpaces = sharedObjectIds(actor, 'knowledge_space')
+
   // The ACL predicate, applied identically to both retrieval arms.
   const acl = sql`
     d.deleted_at IS NULL
@@ -111,8 +114,17 @@ export async function hybridSearch(
       // A role whose document grant is team-scoped retrieves its teams' documents and
       // nothing else. Without this, search and `getDocument` would tell different stories
       // about the same document — the split-brain the circulation lists just fixed.
+      //
+      // Except that a narrow role can also have been *given* something, and this clause
+      // used to throw that away: a document shared with a guest joined its circulation list
+      // and then failed the team test, so the page opened and the assistant could not find
+      // it. What was given is unioned in, exactly as the list does it.
       grantedScope(actor, 'document:read', 'document') === 'team'
-        ? sql`AND d.team_id = ANY(${actor.teamIds}::uuid[])`
+        ? sql`AND (
+              d.team_id = ANY(${actor.teamIds}::uuid[])
+              ${sharedDocuments.length ? sql`OR d.id = ANY(${sharedDocuments}::uuid[])` : sql``}
+              ${sharedSpaces.length ? sql`OR d.space_id = ANY(${sharedSpaces}::uuid[])` : sql``}
+            )`
         : sql``
     }
     ${options.companyId ? sql`AND d.company_id = ${options.companyId}` : sql``}

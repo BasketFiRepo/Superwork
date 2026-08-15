@@ -1,8 +1,18 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { listContacts, listInteractions, NotFoundError, relationship360 } from '@superwork/core'
+import {
+  listContacts,
+  listInteractions,
+  listShares,
+  listTeams,
+  NotFoundError,
+  PermissionError,
+  relationship360,
+  shareableRelations,
+} from '@superwork/core'
 import { AccountSummaryPanel } from '@/components/AccountSummaryPanel'
+import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,11 +21,22 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
   const { id } = await params
 
   try {
-    const { view, contacts, interactions } = await withActor(session, async (ctx, actor) => ({
-      view: await relationship360(ctx, actor, id),
-      contacts: await listContacts(ctx, actor, { companyId: id }),
-      interactions: await listInteractions(ctx, id, 10),
-    }))
+    const { view, contacts, interactions, shares, relations, people, teams } = await withActor(
+      session,
+      async (ctx, actor) => ({
+        view: await relationship360(ctx, actor, id),
+        contacts: await listContacts(ctx, actor, { companyId: id }),
+        interactions: await listInteractions(ctx, id, 10),
+        shares: await listShares(ctx, actor, 'company', id),
+        relations: shareableRelations(actor, 'company', id, ctx.organizationId),
+        teams: await listTeams(ctx, actor).catch(() => []),
+        people: await ctx.sql<{ id: string; name: string }[]>`
+          SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+          WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+            AND m.user_id <> ${actor.userId}
+          ORDER BY u.name`,
+      }),
+    )
 
     return (
       <div className="stack stack-8">
@@ -46,6 +67,25 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
             </div>
           </div>
         ) : null}
+
+        <ShareObject
+          objectType="company"
+          objectId={view.company.id}
+          relations={relations}
+          shares={shares.map((entry) => ({
+            id: entry.id,
+            subjectType: entry.subjectType,
+            subjectName: entry.subjectName,
+            relation: entry.relation,
+            reason: entry.reason,
+            grantedByName: entry.grantedByName,
+            expiresAt: entry.expiresAt ? entry.expiresAt.toISOString() : null,
+            expired: entry.expired,
+            canRevoke: entry.canRevoke,
+          }))}
+          people={people}
+          teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
 
         <AccountSummaryPanel companyId={id} companyName={view.company.name} />
 
@@ -196,6 +236,13 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
     )
   } catch (error) {
     if (error instanceof NotFoundError) notFound()
+    if (error instanceof PermissionError) {
+      return (
+        <div className="panel">
+          <div className="empty small secondary">{error.message}</div>
+        </div>
+      )
+    }
     throw error
   }
 }

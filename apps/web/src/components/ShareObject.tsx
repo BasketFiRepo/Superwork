@@ -40,6 +40,10 @@ const RELATIONS = [
 const REACH: Partial<Record<string, string>> = {
   project:
     'Sharing a project also lets them read the work inside it — its tasks — because a project they cannot see the work of is not much of a share. It lends a read, never a say: changing a task still needs access to that task.',
+  knowledge_space:
+    'Sharing a space also lets them read the documents filed in it, and lets the assistant cite those documents when it answers them. It does not lift a document’s own classification, and a document restricted to a named circulation list stays restricted.',
+  company:
+    'Sharing a company hands over the account view — its threads, commitments and contacts. It does not reach the documents or work filed against it: those live somewhere of their own and are shared there. Each still shows only what this person could already open.',
 }
 
 export function ShareObject({

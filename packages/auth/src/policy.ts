@@ -175,10 +175,18 @@ function relationGrant(actor: Actor, resourceType: string, verb: string, resourc
   const accepted = RELATION_FOR_VERB[verb]
   if (!accepted) return null
 
+  // A tuple names the *object*, and the object's kind is not always the word the permission
+  // catalogue uses for its domain: a knowledge space is `knowledge_space` as a row and
+  // `knowledge` as a permission. Looking a tuple up under the action's prefix alone meant a
+  // shared knowledge space could never satisfy `knowledge:read`. Both are checked, and the
+  // object's own type is the one that matters.
+  const objectTypes = resourceType === resource.type ? [resource.type] : [resource.type, resourceType]
   if (resource.id) {
     for (const relation of accepted) {
-      if (actor.relations.has(`${relation}:${resourceType}:${resource.id}`)) {
-        return `Allowed because this ${resourceType.replace(/_/g, ' ')} is shared with you as ${relation}.`
+      for (const type of objectTypes) {
+        if (actor.relations.has(`${relation}:${type}:${resource.id}`)) {
+          return `Allowed because this ${type.replace(/_/g, ' ')} is shared with you as ${relation}.`
+        }
       }
     }
   }

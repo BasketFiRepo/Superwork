@@ -54,6 +54,11 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             <span className="chip">{document.chunkCount} indexed passages</span>
             <span className="chip">referenced by the AI {document.citationCount} times</span>
             {document.companyName ? <span className="chip">{document.companyName}</span> : null}
+            {document.spaceId ? (
+              <Link className="chip" href={`/knowledge/spaces/${document.spaceId}`}>
+                {document.spaceName ?? 'space'}
+              </Link>
+            ) : null}
           </div>
           {document.indexError ? (
             <div className="banner banner-attention">{document.indexError}</div>

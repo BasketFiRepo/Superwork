@@ -84,11 +84,6 @@ export async function listTasks(
   // for any role whose grant is narrower and is why the guest role could list nothing at
   // all. Ask instead which rows this actor may consider, and push that into the query.
   const scope = grantedScope(actor, 'task:read', 'task')
-  if (scope === null) {
-    const decision = can(actor, 'task:read', { type: 'task', organizationId: ctx.organizationId })
-    throw new PermissionError(decision.reason)
-  }
-
   const limit = Math.min(filter.limit ?? 50, 200)
   const sql = ctx.sql
   const shared = sharedObjectIds(actor, 'task')
@@ -96,13 +91,24 @@ export async function listTasks(
   // with you" and "you can see none of its tasks" are both true (ADR 0024). Read only —
   // `can()` refuses a container relation for any verb but read.
   const sharedProjects = sharedObjectIds(actor, 'project')
+
+  // A role with no grant of this kind at all can still have been *given* a row, and a gate
+  // that throws before any row is considered denies the one thing a tuple exists to allow.
+  // Refuse only when there is genuinely nothing to ask about.
+  if (scope === null && shared.length === 0 && sharedProjects.length === 0) {
+    const decision = can(actor, 'task:read', { type: 'task', organizationId: ctx.organizationId })
+    throw new PermissionError(decision.reason)
+  }
+
   // A tuple grants one row regardless of scope, so it is unioned in rather than narrowing.
   const visible =
     scope === 'org'
       ? sql``
       : sql`AND (
             ${
-              scope === 'department'
+              scope === null
+                ? sql`false`
+                : scope === 'department'
                 ? sql`t.department_id = ANY(${actor.departmentIds}::uuid[])`
                 : scope === 'team'
                   ? sql`t.team_id = ANY(${actor.teamIds}::uuid[])`
