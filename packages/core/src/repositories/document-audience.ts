@@ -110,15 +110,18 @@ export async function documentAudience(
   actor: Actor,
   documentId: string,
 ): Promise<DocumentAudience> {
+  const document = await loadDocument(ctx, documentId)
+  // Classification and team are passed rather than left absent: an unclassified resource
+  // now skips the clearance check, so a document that omitted them would skip it too.
   const decision = can(actor, 'document:read', {
     type: 'document',
     id: documentId,
     organizationId: ctx.organizationId,
+    ownerId: document.owner_id,
+    sensitivity: document.sensitivity,
     riskTier: 'read',
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
-
-  const document = await loadDocument(ctx, documentId)
   const rows = await ctx.sql<Row[]>`
     SELECT p.id, p.subject_type, p.subject_id, p.subject_role, p.relation, p.reason,
            g.name AS granted_by_name, p.created_at,

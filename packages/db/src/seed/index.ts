@@ -412,6 +412,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['memories'] = await seedMemory(ctx, companyIds, userIds)
     counts['restricted'] = await seedCirculationList(ctx, userIds, departmentIds)
     counts['dependencies'] = await seedTaskDependencies(ctx, userIds)
+    counts['teams'] = await seedTeams(ctx, userIds, departmentIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -921,6 +922,56 @@ async function seedMemory(
   })
 
   return count
+}
+
+/**
+ * Teams, and work scoped to one (§4.3).
+ *
+ * `teams` and `team_members` were empty, which meant the team scope in the policy engine
+ * had never evaluated true and the `guest` role — every one of whose permissions is
+ * team-scoped — could read nothing at all. The demo needs a real team with real work
+ * attached, or the scope is untestable by hand.
+ */
+async function seedTeams(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+): Promise<number> {
+  const [team] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO teams (organization_id, name, purpose, department_id, is_demo, created_by)
+    VALUES (
+      ${ctx.organizationId}, 'Halden renewal', 'Everything touching the 2026 Halden renewal.',
+      ${departmentIds.get('Commercial') ?? null}, true, ${ctx.userId}
+    ) RETURNING id`
+
+  const members: [string, 'lead' | 'member', string][] = [
+    ['david', 'lead', 'Owns the account.'],
+    ['sarah', 'member', 'Running the commercial terms.'],
+  ]
+  for (const [key, role, reason] of members) {
+    const userId = userIds.get(key)
+    if (!userId) continue
+    await ctx.sql`
+      INSERT INTO team_members (organization_id, team_id, user_id, role, reason, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${team!.id}, ${userId}, ${role}, ${reason}, true, ${ctx.userId})
+      ON CONFLICT DO NOTHING`
+  }
+
+  // Work scoped to the team, so the scope has something to be true about.
+  await ctx.sql`
+    UPDATE tasks SET team_id = ${team!.id}
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND id IN (
+        SELECT id FROM tasks
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        ORDER BY created_at LIMIT 3
+      )`
+  await ctx.sql`
+    UPDATE documents SET team_id = ${team!.id}
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND title LIKE 'Halden Foods%'`
+
+  return 1
 }
 
 /**

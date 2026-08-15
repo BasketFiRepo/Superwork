@@ -1,5 +1,5 @@
 import type { Sensitivity, TenantContext } from '@superwork/db'
-import { ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
+import { grantedScope, ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
 import { embeddingProvider, tokenize, toVectorLiteral } from './embed.js'
 
 /**
@@ -107,6 +107,14 @@ export async function hybridSearch(
           )
       )
     )
+    ${
+      // A role whose document grant is team-scoped retrieves its teams' documents and
+      // nothing else. Without this, search and `getDocument` would tell different stories
+      // about the same document — the split-brain the circulation lists just fixed.
+      grantedScope(actor, 'document:read', 'document') === 'team'
+        ? sql`AND d.team_id = ANY(${actor.teamIds}::uuid[])`
+        : sql``
+    }
     ${options.companyId ? sql`AND d.company_id = ${options.companyId}` : sql``}
     ${options.projectId ? sql`AND d.project_id = ${options.projectId}` : sql``}
     ${options.docTypes?.length ? sql`AND d.doc_type = ANY(${options.docTypes})` : sql``}
