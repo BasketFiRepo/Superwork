@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import {
   documentAudience,
+  documentIngestions,
   getDocumentBody,
   listShares,
   listTeams,
@@ -12,6 +13,7 @@ import {
 } from '@superwork/core'
 import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
+import { DocumentIndexing } from '@/components/DocumentIndexing'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -21,11 +23,12 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body, audience, people, departments, shares, teams, relations } = await withActor(session, async (ctx, actor) => {
+    const { document, body, audience, people, departments, shares, teams, relations, indexing } = await withActor(session, async (ctx, actor) => {
       const loaded = await getDocumentBody(ctx, actor, id)
       return {
         ...loaded,
         audience: await documentAudience(ctx, actor, id),
+        indexing: await documentIngestions(ctx, actor, id),
         shares: await listShares(ctx, actor, 'document', id),
         relations: shareableRelations(actor, 'document', id, ctx.organizationId),
         teams: await listTeams(ctx, actor).catch(() => []),
@@ -101,6 +104,21 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
+
+        <DocumentIndexing
+          documentId={document.id}
+          history={indexing.map((row) => ({
+            id: row.id,
+            status: row.status,
+            reason: row.reason,
+            attempts: row.attempts,
+            chunksWritten: row.chunksWritten,
+            lastError: row.lastError,
+            gaveUp: row.gaveUp,
+            createdAt: row.createdAt.toISOString(),
+            verification: row.verification,
+          }))}
         />
 
         <DeleteDocument

@@ -122,6 +122,15 @@ import {
   removeAgentGrant,
   saveView,
   listSavedViews,
+  documentIngestions,
+  ingestionBacklog,
+  requestReindex,
+  runIngestionJobs,
+  setEmbeddingProvider,
+  HashingEmbeddingProvider,
+  EMBEDDING_DIMENSIONS,
+  MAX_ATTEMPTS,
+  type EmbeddingProvider,
   deleteSavedView,
   watchTask,
   unwatchTask,
@@ -2233,6 +2242,101 @@ try {
     }
   })
 
+
+  // ---- Indexing that survives the request that asked for it ----------------
+  console.log('\nA document that will not index…\n')
+
+  /** Fails where a provider outage does: at embed time, after the version row is written. */
+  class BrokenEmbedder implements EmbeddingProvider {
+    readonly name = 'loop-broken'
+    readonly dimensions = EMBEDDING_DIMENSIONS
+    async embed(): Promise<number[][]> {
+      throw new Error('The embedding provider did not respond.')
+    }
+  }
+
+  const indexedDoc = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ id: string; title: string }[]>`
+      SELECT id, title FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND current_version_id IS NOT NULL AND index_status = 'indexed'
+      ORDER BY created_at LIMIT 1`
+    return row!
+  })
+
+  await withTenant(session, async (ctx) => {
+    await requestReindex(ctx, await loadActor(ctx), {
+      documentId: indexedDoc.id,
+      reason: 'The acceptance loop asked.',
+    })
+  })
+
+  setEmbeddingProvider(new BrokenEmbedder())
+  const firstTry = await runIngestionJobs(session)
+  const afterOne = await withTenant(session, async (ctx) =>
+    documentIngestions(ctx, await loadActor(ctx), indexedDoc.id),
+  )
+  ok('A failed indexing is recorded rather than lost with the transaction',
+    firstTry.failed === 1 && afterOne[0]!.status === 'failed',
+    afterOne[0]!.lastError ?? '')
+  ok('And it is coming back for it, so nobody is asked to do anything yet',
+    afterOne[0]!.nextAttemptAt !== null && !afterOne[0]!.gaveUp)
+
+  // Backoff is real time; the loop pulls each round forward rather than waiting for it, so
+  // the claim query under test is the real one.
+  for (let attempt = 2; attempt <= MAX_ATTEMPTS; attempt++) {
+    await withTenant(session, async (ctx) => {
+      await ctx.sql`
+        UPDATE ingestion_jobs SET next_attempt_at = now() - interval '1 minute'
+        WHERE organization_id = ${ctx.organizationId} AND document_id = ${indexedDoc.id}
+          AND finished_at IS NULL`
+    })
+    await runIngestionJobs(session)
+  }
+
+  const gaveUp = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    return { history: await documentIngestions(ctx, actor, indexedDoc.id), backlog: await ingestionBacklog(ctx, actor) }
+  })
+  ok('It stops after five tries instead of retrying for ever in silence',
+    gaveUp.history[0]!.gaveUp && gaveUp.history[0]!.attempts === MAX_ATTEMPTS,
+    `${gaveUp.history[0]!.attempts} attempts`)
+  ok('And it is on the screen somebody looks at, waiting for a person',
+    gaveUp.backlog.gaveUp === 1)
+
+  setEmbeddingProvider(new HashingEmbeddingProvider())
+  const retried = await withTenant(session, async (ctx) =>
+    requestReindex(ctx, await loadActor(ctx), { documentId: indexedDoc.id }),
+  )
+  ok('A person can try again, and what it already spent stays on the record',
+    retried[0]!.status === 'pending' && retried[0]!.attempts === MAX_ATTEMPTS)
+
+  const recovered = await runIngestionJobs(session)
+  const settled = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    return { history: await documentIngestions(ctx, actor, indexedDoc.id), backlog: await ingestionBacklog(ctx, actor) }
+  })
+  ok('And the document goes back into memory, with what the check found',
+    recovered.indexed === 1 && settled.history[0]!.status === 'indexed' &&
+      (settled.history[0]!.verification?.sampled ?? 0) > 0,
+    `${settled.history[0]!.chunksWritten} sections`)
+  ok('Nothing is left waiting behind it', settled.backlog.gaveUp === 0 && settled.backlog.waiting === 0)
+
+  // Put the demo back: the loop's own job rows go, the document stays indexed.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM ingestion_jobs
+      WHERE organization_id = ${ctx.organizationId} AND document_id = ${indexedDoc.id}
+        AND reason LIKE '%loop%'`
+    await ctx.sql`
+      DELETE FROM ingestion_jobs
+      WHERE organization_id = ${ctx.organizationId} AND document_id = ${indexedDoc.id}
+        AND reason LIKE 'Re-index asked for by%'`
+    await ctx.sql`
+      DELETE FROM activities
+      WHERE organization_id = ${ctx.organizationId} AND entity_id = ${indexedDoc.id} AND verb = 'failed'`
+  })
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2265,7 +2369,9 @@ try {
         'by — its departments, its milestones and its shelves — can be built by the people it \n' +
         'governs rather than only by the seed; and a question asked of a list can be kept, \n' +
         'shared as a question rather than as access, and work somebody else is carrying \n' +
-        'can be followed without being able to see any more of it than before.\n',
+        'can be followed without being able to see any more of it than before; and a document \n' +
+        'that will not index says so, is retried on a widening delay, gives up out loud rather \n' +
+        'than for ever, and can be put back into memory by a person.\n',
   )
 } catch (error) {
   console.error(error)

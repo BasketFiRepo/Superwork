@@ -6,6 +6,7 @@ import {
   markDispatched,
   markFailed,
   openLaddersForDueWork,
+  runIngestionJobs,
   sweepFollowUps,
   writeActivity,
 } from '@superwork/core'
@@ -17,6 +18,7 @@ import { emailProvider } from '@superwork/integrations'
  *
  * Every job here must be observable rather than silent:
  *   • dispatch the transactional outbox, honouring the email recall window (§2.4, §5.7)
+ *   • index what is queued, retrying with backoff and giving up out loud (§7.1)
  *   • run each read-only watcher on the cadence it declares (§9.1)
  *   • fire the workflow schedules that are due (§10.2)
  *   • generate briefings, deliver the nudge ladder, write agent digests
@@ -139,6 +141,25 @@ async function main(): Promise<void> {
         if (dispatched > 0) console.log(`[outbox] ${org.id}: dispatched ${dispatched}`)
       } catch (error) {
         console.error(`[outbox] ${org.id} failed:`, error instanceof Error ? error.message : error)
+      }
+
+      // Indexing (§7.1). Rides the outbox's cadence because it is the same kind of work:
+      // something a person asked for that must survive the request they asked it in.
+      try {
+        const indexed = await runIngestionJobs({
+          organizationId: org.id,
+          userId: org.ownerId,
+          timezone: org.timezone,
+        })
+        if (indexed.claimed > 0) {
+          console.log(
+            `[indexing] ${org.id}: ${indexed.claimed} claimed · ${indexed.indexed} indexed · ` +
+              `${indexed.failed} failed · ${indexed.skipped} skipped` +
+              (indexed.gaveUp > 0 ? ` · ${indexed.gaveUp} gave up and now need a person` : ''),
+          )
+        }
+      } catch (error) {
+        console.error(`[indexing] ${org.id} failed:`, error instanceof Error ? error.message : error)
       }
     }
 

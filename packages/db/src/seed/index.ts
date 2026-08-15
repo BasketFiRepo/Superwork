@@ -583,7 +583,7 @@ async function seedDocuments(
   projectIds: Map<string, string>,
   userIds: Map<string, string>,
 ): Promise<number> {
-  const { ingestDocument } = await import('@superwork/core')
+  const { ingestDocument, recordIngestion } = await import('@superwork/core')
 
   const [space] = await ctx.sql<{ id: string }[]>`
     INSERT INTO knowledge_spaces (organization_id, name, slug, description, is_demo, created_by)
@@ -614,6 +614,9 @@ async function seedDocuments(
       sensitivityHint: document.sensitivityHint ?? 'internal',
       untrusted: document.untrusted ?? false,
     })
+    // Every ingestion leaves a record, the seed's included: the demo's indexing panel shows
+    // what was indexed and what the post-index check found, rather than an empty table.
+    await recordIngestion(ctx, { documentId: row!.id, reason: 'Seeded with the demo', result })
     if (result.versionId) versionByKey.set(document.key, result.versionId)
     count += 1
   }

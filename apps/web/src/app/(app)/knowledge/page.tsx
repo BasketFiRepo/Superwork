@@ -1,18 +1,21 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { knowledgeHealth, listDocuments, listSpaces } from '@superwork/core'
+import { ingestionBacklog, knowledgeHealth, listDocuments, listSpaces } from '@superwork/core'
 import { can } from '@superwork/auth'
 import { Spaces } from '@/components/Spaces'
 import { UploadDocument } from '@/components/UploadDocument'
+import { IngestionQueue } from '@/components/IngestionQueue'
 
 export const dynamic = 'force-dynamic'
 
 /** Knowledge (§17). Primary action: find or capture. */
 export default async function KnowledgePage() {
   const session = await requireSession()
-  const { documents, health, spaces, canFile } = await withActor(session, async (ctx, actor) => ({
+  const { documents, health, spaces, canFile, backlog } = await withActor(session, async (ctx, actor) => ({
     documents: await listDocuments(ctx, actor, { limit: 100 }),
     health: await knowledgeHealth(ctx),
+    // Indexing is a queue now, so "what is waiting and what gave up" is answerable (§7.1).
+    backlog: await ingestionBacklog(ctx, actor),
     // Seeded since migration 0004 and read by nothing until now, so the library had no
     // notion of which shelf anything sat on.
     spaces: await listSpaces(ctx, actor).catch(() => []),
@@ -62,6 +65,28 @@ export default async function KnowledgePage() {
       />
 
       <UploadDocument />
+
+      <IngestionQueue
+        counts={{
+          waiting: backlog.waiting,
+          running: backlog.running,
+          retrying: backlog.retrying,
+          gaveUp: backlog.gaveUp,
+        }}
+        jobs={backlog.jobs.map((job) => ({
+          id: job.id,
+          documentId: job.documentId,
+          documentTitle: job.documentTitle,
+          status: job.status,
+          reason: job.reason,
+          attempts: job.attempts,
+          chunksWritten: job.chunksWritten,
+          lastError: job.lastError,
+          nextAttemptAt: job.nextAttemptAt ? job.nextAttemptAt.toISOString() : null,
+          gaveUp: job.gaveUp,
+          verification: job.verification,
+        }))}
+      />
 
       <section className="grid-2">
         <div className="panel">

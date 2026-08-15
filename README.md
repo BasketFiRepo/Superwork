@@ -837,6 +837,40 @@ nothing to chase. Running the loop twice is what surfaced it.
 
 **Tasks; any task; Inbox.** See ADR 0037.
 
+## Indexing that survives the request that asked for it
+
+`ingestion_jobs` was created in migration 0004 with `attempts`, `last_error`,
+`chunks_written` and a `verification` jsonb, and nothing ever wrote a row. Indexing ran inline
+inside the caller's transaction, which hid three things:
+
+- **A failed upload left nothing.** `ingestDocument` marks the document failed and rethrows;
+  the rethrow aborts the enclosing transaction, so the document row and the failure record
+  roll back together. Nothing to retry, nothing to count, nothing on a screen.
+- **There was no re-index path at all** — not a button, not an API, not a tool.
+- **The verification result was thrown away.** The §7.1 *Verify* stage does run on every
+  ingest; its warnings were flattened into `documents.index_error`, a column that also holds
+  failure messages, so "indexed, but two sections are hard to find" and "did not index" read
+  identically.
+
+Now:
+
+- **The queue is the history of every ingestion**, not only of the retries. An upload still
+  indexes inline — a document that is not indexed is not memory — but the attempt leaves a
+  row saying when, how many sections, and what the check found.
+- **A failure is retried on a widening delay, then stops out loud.** Five attempts, then it
+  gives up, writes to the activity feed and appears on the knowledge screen as somebody's
+  decision. Same reasoning as the outbox's dead-letter terminus.
+- **Each job runs in its own transaction and its failure is recorded in a further one** — a
+  database error aborts the transaction it happened in, so writing the failure on the same
+  connection would fail silently and leave the job `processing` for ever.
+- **The lifecycle is a CHECK constraint, not a convention**: `failed` is either coming back or
+  has given up, never both and never neither.
+- **Re-indexing needs a say over the document**, because it writes a new version and
+  supersedes the old passages. **A job that gave up is woken, not replaced**, so the count it
+  gave up on stays next to the person who decided to try again.
+
+**Knowledge; any document.** See ADR 0038.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1319,6 +1353,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0035](docs/adr/0035-a-ceiling-you-can-only-look-at.md) | A ceiling you can only look at |
 | [0036](docs/adr/0036-the-structure-a-product-is-governed-by-should-be-buildable-in-it.md) | The structure a product is governed by should be buildable in it |
 | [0037](docs/adr/0037-a-saved-view-is-a-question-and-a-watch-is-not-a-grant.md) | A saved view is a question, and a watch is not a grant |
+| [0038](docs/adr/0038-indexing-has-to-survive-the-request-that-asked-for-it.md) | Indexing has to survive the request that asked for it |
 
 ## Configuration
 

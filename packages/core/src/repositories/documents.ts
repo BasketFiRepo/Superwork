@@ -3,6 +3,7 @@ import { can, grantedScope, readCeiling, sensitivityAtMost, sharedObjectIds, typ
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
+import { recordIngestion } from '../retrieval/ingestion-queue.js'
 import { holdsCoveringDocument } from '../legal-hold.js'
 
 export interface DocumentView {
@@ -189,6 +190,11 @@ export async function uploadDocument(
     sensitivityHint: input.sensitivityHint ?? 'internal',
     untrusted: input.untrusted ?? false,
   })
+
+  // The queue is the history of every ingestion, not only of the ones that needed retrying:
+  // "when was this indexed, into how many sections, and what did the check find" has an
+  // answer for an ordinary upload too.
+  await recordIngestion(ctx, { documentId, reason: `Uploaded by ${actor.displayName}`, result: ingest })
 
   await writeActivity(ctx, {
     actorType: actor.type,

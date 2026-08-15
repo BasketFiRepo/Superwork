@@ -1223,6 +1223,41 @@ try {
     /does not reach the documents or work filed against it/i.test(companyShareText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company-share.png`, fullPage: true })
 
+  // ---- Indexing, and a document that can be put back into memory -----------
+  // `ingestion_jobs` was written by nothing: indexing ran inline, so a failure rolled back
+  // with the transaction it happened in and there was no way to ask for another attempt.
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="ingestion-queue"]', { timeout: 15_000 })
+  const queueText = await page.locator('[data-testid="ingestion-queue"]').innerText()
+  ok('The library says what is waiting to be indexed, and what gave up',
+    /Indexing/.test(queueText) &&
+      /retried on a widening delay|waiting|gave up|running|retrying/i.test(queueText))
+
+  await page.locator('[data-testid="document-row"] a').first().click()
+  await page.waitForSelector('[data-testid="document-indexing"]', { timeout: 15_000 })
+  const indexingText = await page.locator('[data-testid="document-indexing"]').innerText()
+  ok('A document says how it got into company memory, and how many sections',
+    /attempt/i.test(indexingText) && /Checked \d+, found \d+/.test(indexingText))
+  ok('It says re-indexing needs a say over the document, not a read of it',
+    /needs a say over\s+the document rather than a read of it/i.test(indexingText))
+
+  await page.locator('[data-testid="reindex-ask"]').click()
+  await page.waitForSelector('[data-testid="reindex-editor"]', { timeout: 15_000 })
+  await page.fill('#reindex-reason', 'Browser check asked for it.')
+  await page.locator('[data-testid="reindex-confirm"]').click()
+  const queued = await page
+    .waitForFunction(
+      () =>
+        /Browser check asked for it/.test(
+          document.querySelector('[data-testid="document-indexing"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Asking for it again queues the work rather than doing it in the request', queued)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/indexing.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before
