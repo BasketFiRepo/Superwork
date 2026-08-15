@@ -7,18 +7,24 @@ completed operational loop: something happened → it was noticed → it was und
 context → an action was proposed → a human approved it → it was executed → the result was
 verified → everyone can see what occurred and why.
 
-This repository implements Phase 0 (foundations), Phase 1 (one closed loop), Phase 2
-(the nervous system: inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust
-and depth) and Phase 4 (enterprise scale) of the build specification, end to end, **with
-zero external credentials** — then the three things the build itself had listed as not yet
-true (natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools),
-and then the controls the interface had been claiming and the product did not have: step-up
-authentication, retention and erasure, legal holds, the agent memory whose table had been
-designed since Phase 0 with nothing ever written to it, the document circulation lists the
-retrieval ACL had been checking for against an empty table, the task dependencies the daily
-briefing had been reporting on since Phase 2, the teams that made the `guest` role mean
-something, and the feature-flag overrides the session had been resolving against an empty
-table on every request.
+This repository implements the build specification end to end, **with zero external
+credentials**: Phase 0 (foundations), Phase 1 (one closed loop), Phase 2 (the nervous
+system — inbox, meetings, CRM and the daily briefing), Phase 3 (scale, trust and depth)
+and Phase 4 (enterprise scale).
+
+The specification stops there. Everything after it came from the product's own accounting
+of itself, in two batches. First the three things this README already listed as not yet
+true — natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools.
+
+Then a longer list, found by asking a blunter question: **which tables does live code read
+from that nothing has ever written to?** Each answer was a control the interface was
+claiming and the product did not have — step-up authentication, retention, erasure, legal
+holds, the agent's memory, document circulation lists, task dependencies, teams, and
+feature-flag overrides. Several were worse than gaps. The circulation-list check had been
+running inside both arms of retrieval since Phase 1 and had never matched a row; the daily
+briefing had been reporting on task dependencies that could not exist; and the `guest` role
+could read nothing at all, because every permission it holds is team-scoped and no team
+could be created.
 
 ---
 
@@ -110,7 +116,8 @@ apps/
 packages/
   config              Env schema (fails fast), model routing by task class, plan limits
   db                  Migrations, RLS policies, TenantContext, demo seed
-  core                Domain logic: repositories, retrieval, audit, metering, health
+  core                Domain logic: repositories, retrieval, audit, metering, health,
+                      retention, erasure, legal holds, memory, teams, flags
   auth                Sessions and the one policy engine, `can()`
   ai                  Provider abstraction, context assembly, versioned prompts, mock brain
   tools               Tool registry and catalogue with risk tiers, inverses and previews
@@ -130,7 +137,7 @@ the intersection of the human it acts for, the organization's grant ceiling, its
 tool's risk tier, and data classification. Denials explain themselves and name who can
 grant access; cross-tenant attempts report absence, never denial.
 
-**Tenant isolation, enforced three times** — forced row level security on all 66 tenant
+**Tenant isolation, enforced three times** — forced row level security on all 90 tenant
 tables under two non-superuser roles (`packages/db/migrations/0008_rls.up.sql`), a
 `TenantContext` that no repository can be constructed without
 (`packages/db/src/tenant.ts`), and a cross-tenant test pack that sweeps every table
@@ -336,6 +343,27 @@ undo a change in somebody else's system. Custom tools are visible to the orchest
 a sub-agent's registry is a structural guarantee, and an admin-authored tool must not be a
 way to hand the Researcher a write. They are built per tenant and never registered globally,
 so one organization's tool cannot appear in another's registry. See ADR 0013.
+
+## What the product was claiming and did not have
+
+Nine sections follow. They came out of one question — *which tables does live code read
+from that nothing has ever written to?* — and each turned out to be a control the interface
+described, or a code path that had been executing against an empty table for months without
+ever failing.
+
+| | The claim | What was actually there |
+|---|---|---|
+| [Step-up](#step-up-authentication) | "requires step-up authentication" on the governance screen | The second approver was real; step-up was not built |
+| [Features](#features-and-the-switch-that-changed-nothing) | Per-organization feature flags | The resolver ran on every request against an empty table |
+| [Teams](#teams-and-the-role-that-could-do-nothing) | A `team` permission scope, and a `guest` role | The scope had never evaluated true; a guest could read nothing |
+| [Dependencies](#work-that-waits-for-other-work) | "your work is blocking other people" in the briefing | An `EXISTS` against a table nothing wrote to |
+| [Circulation lists](#who-can-find-a-document) | Per-document access, checked in both arms of retrieval | The branch had never matched a row; sharing did not affect it |
+| [Memory](#what-the-assistant-remembers) | Deleting a document removes "memories formed from it" | True only in the way an empty set makes anything true |
+| [Retention](#retention-and-erasure) | Migration 0009 named "the retention and erasure jobs" | Neither job existed |
+| [Legal holds](#legal-holds) | — | No way to stop the deletion once retention existed |
+| [Erasure](#retention-and-erasure) | `purgeDocument` since Phase 1 | Called by nothing, so a document could not be deleted at all |
+
+Each one below says what was wrong, what was decided, and what it cost.
 
 ## Step-up authentication
 
@@ -655,43 +683,65 @@ looks unenforced is a support call.
 
 ## What is deliberately not true yet
 
-Outbound HTTP is simulated unless a deployment sets `HTTP_TOOLS_MODE=live`: a custom tool
-returns a deterministic locally-generated response marked **Simulated**, and everything
-around it — review, permissions, previews, approvals, audit — is real. Every other provider
-ships as a simulated implementation too, and connecting one says so on the row. The workflow
-compiler understands the sentences it understands and refuses the rest; new shapes need a
-named query in the safe query layer, not a cleverer prompt. The cron grammar is the five
-standard fields plus the traditional aliases — nothing parses `L`, `W` or `#`, and a spec
-that does not parse is refused when the schedule is written rather than silently never
-firing. Schedules are minute-granular; sub-minute schedules are not supported. Retention
-windows are per class, not per record: a single meeting still cannot be pinned on its own —
-a legal hold is the coarser instrument that covers a matter. A hold notice cannot be
-suppressed, so there is no covert hold: the kind a fraud investigation would want, where
-telling the custodian tips them off, is not expressible here and has to be taken outside this
-product under a court order. Erasure is an admin action only — there is no self-service
-route, because verifying that a request came from the person it names is a problem this
-product does not solve, and a self-service endpoint with a weak identity check is worse than
-none. Memory extraction is only as good as its rule: the mock brain notices a fact only when
-a cited sentence reads as a plain "X is Y" statement, so anything phrased another way is not
-noticed at all. A circulation list can name a team, and no team can exist: `teams` and `team_members` are
-still tables nothing writes, so that branch of the retrieval ACL never matches. It is kept so
-that building teams later needs no change to retrieval. Seven tables are dead schema that
-nothing reads or writes — `agent_messages`, `email_accounts`, `events`, `ingestion_jobs`,
-`invitations`, `saved_views` and `task_watchers` — left in place rather than dropped, and
-listed here so nobody has to rediscover them. A restriction has no expiry: a list is removed
-by somebody deciding to, not by a clock. A task dependency has no type — there is one
-relation, "cannot be completed until", not a scheduling calculus — and nothing in the planner
-proposes dependencies, because a model inferring "this probably waits for that" and having it
-enforced at completion time is a much larger claim than recording one by hand. Only the task
-and document lists are scope-aware; the other list endpoints still gate at organization level,
-which is right for every role above `guest` and wrong in the same way for `guest`. Nothing
-infers a team: the agent will not scope work it creates to one. Four of the ten feature flags
-— `reports`, `autopilot`, `chat_presence`, `public_api` — are declared and read by nothing;
-they are listed on the Features screen as inert rather than given a switch, and the demo ships
-with no overrides at all, because seeding one would mean turning a feature off in the demo. The scale
-budgets are measured at the scale this machine can build, and the harness prints that scale next to
-the target rather than rounding the difference away. Controls for anything unbuilt render
-disabled with the reason named. Nothing in the interface pretends to work.
+Every limit below is a decision, not an oversight. Controls for anything unbuilt render
+disabled with the reason named; nothing in the interface pretends to work.
+
+**Nothing calls out of the process.** Outbound HTTP is simulated unless a deployment sets
+`HTTP_TOOLS_MODE=live`: a custom tool returns a deterministic locally-generated response
+marked **Simulated**, while everything around it — review, permissions, previews, approvals,
+audit — is real. Every other provider ships as a simulated implementation too, and
+connecting one says so on the row.
+
+**The scale budgets are measured below the scale they target.** The harness prints the scale
+it actually reached beside the scale the target assumes, rather than rounding the difference
+away. They are evidence about query shape, not a 100,000-user result.
+
+### Where the grammar stops
+
+- The workflow compiler understands the sentences it understands and refuses the rest. New
+  shapes need a named query in the safe query layer, not a cleverer prompt.
+- Cron is the five standard fields plus the traditional aliases. Nothing parses `L`, `W` or
+  `#`, and a spec that does not parse is refused when the schedule is written rather than
+  silently never firing. Schedules are minute-granular.
+- Memory extraction is only as good as its rule: the mock brain notices a fact only when a
+  cited sentence reads as a plain "X is Y" statement. Anything phrased another way is not
+  noticed at all.
+
+### Where a control is coarser than you might want
+
+- Retention windows are per class, not per record. A single meeting cannot be pinned on its
+  own; a legal hold is the coarser instrument that covers a matter, and it has no expiry —
+  a hold is released by somebody deciding to, not by a clock.
+- A task dependency has no type. There is one relation, "cannot be completed until", not a
+  scheduling calculus.
+- Only the task and document lists are scope-aware. The other list endpoints still gate at
+  organization level, which is right for every role above `guest` and wrong in the same way
+  for `guest`.
+
+### Where we refuse on purpose
+
+- **No covert legal hold.** A hold notice cannot be suppressed, so the kind a fraud
+  investigation would want — where telling the custodian tips them off — is not expressible
+  here and has to be taken outside this product under a court order.
+- **No self-service erasure.** Verifying that a request came from the person it names is a
+  problem this product does not solve, and an endpoint with a weak identity check is worse
+  than none.
+- **Nothing is inferred.** The agent will not propose a task dependency, and will not scope
+  work it creates to a team. A model inferring "this probably waits for that" and having it
+  enforced at completion time is a much larger claim than recording one by hand.
+
+### What is declared and inert
+
+- Four of the ten feature flags — `reports`, `autopilot`, `chat_presence`, `public_api` —
+  are read by nothing. They are listed on the Features screen as inert rather than given a
+  switch, because a control that changes nothing is worse than an absent one.
+- Seven tables are dead schema that nothing reads *or* writes: `agent_messages`,
+  `email_accounts`, `events`, `ingestion_jobs`, `invitations`, `saved_views` and
+  `task_watchers`. They are left in place rather than dropped, and listed here so nobody has
+  to rediscover them. Unlike the tables this work was about, none of these has a live reader,
+  so none is silently affecting behaviour.
+- The demo organization ships with no feature-flag overrides, because seeding one would mean
+  turning a feature off in the demo.
 
 ## Safety properties this implementation actually holds
 
@@ -749,6 +799,36 @@ disabled with the reason named. Nothing in the interface pretends to work.
   purge, refuses erasure and refuses document deletion for what it covers, naming the matter
   each time; every named custodian gets a disclosure they can read, and there is no setting
   that turns that off.
+
+## The decisions, and why
+
+One record per irreversible decision, in `docs/adr`. They are the argument, not the
+changelog: each says what was chosen, what it rules out, and what it costs.
+
+| ADR | |
+|---|---|
+| [0001](docs/adr/0001-postgres-as-the-single-substrate.md) | PostgreSQL is the single data substrate |
+| [0002](docs/adr/0002-sql-over-orm.md) | Hand-written SQL migrations and a typed query layer, not an ORM |
+| [0003](docs/adr/0003-two-database-roles.md) | Two non-superuser database roles |
+| [0004](docs/adr/0004-deterministic-mock-ai.md) | Mock AI reasons over real data |
+| [0005](docs/adr/0005-runs-are-durable-state-machines.md) | Agent runs are durable state machines, not in-memory promises |
+| [0006](docs/adr/0006-audit-append-only-with-erasure.md) | Append-only auditing that still permits erasure |
+| [0007](docs/adr/0007-a-commitment-belongs-to-the-person-who-made-it.md) | A commitment belongs to the person who made it |
+| [0008](docs/adr/0008-the-ledger-counts-departments-not-people.md) | The AI ledger counts departments, never people |
+| [0009](docs/adr/0009-an-api-key-acts-as-a-person.md) | An API key acts as a person, and MCP is read-only |
+| [0010](docs/adr/0010-fair-share-scheduling-in-the-database.md) | Fair-share scheduling lives in the database |
+| [0011](docs/adr/0011-the-strictest-jurisdiction-is-the-default.md) | The strictest jurisdiction is the default, and the review is a query |
+| [0012](docs/adr/0012-a-workflow-is-a-planner-not-an-execution-path.md) | A workflow is a second planner, not a second execution path |
+| [0013](docs/adr/0013-an-edit-is-a-narrower-approval.md) | An edit is a narrower approval, and a custom tool is an ordinary tool |
+| [0014](docs/adr/0014-a-schedule-is-a-row-and-a-missed-firing-is-a-fact.md) | A schedule is a row, evaluated in the company's timezone, and a missed firing is a fact |
+| [0015](docs/adr/0015-step-up-is-not-a-permission.md) | Step-up is not a permission |
+| [0016](docs/adr/0016-deletion-is-a-feature-not-a-cron-job.md) | Deletion is a feature, not a cron job |
+| [0017](docs/adr/0017-a-hold-is-a-row-the-purge-consults.md) | A hold is a row the purge consults |
+| [0018](docs/adr/0018-the-assistant-notices-a-person-decides.md) | The assistant notices, a person decides |
+| [0019](docs/adr/0019-a-circulation-list-narrows-a-tuple-widens.md) | A circulation list narrows, a tuple widens |
+| [0020](docs/adr/0020-a-dependency-that-can-be-walked-past-is-a-comment.md) | A dependency that can be walked past is a comment |
+| [0021](docs/adr/0021-a-scope-is-what-a-list-asks-about.md) | A scope is what a list asks about |
+| [0022](docs/adr/0022-a-switch-that-changes-nothing.md) | A switch that changes nothing |
 
 ## Configuration
 
