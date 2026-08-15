@@ -1,9 +1,17 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { documentAudience, getDocumentBody, NotFoundError, PermissionError } from '@superwork/core'
+import {
+  documentAudience,
+  getDocumentBody,
+  listShares,
+  listTeams,
+  NotFoundError,
+  PermissionError,
+} from '@superwork/core'
 import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
+import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,11 +20,13 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body, audience, people, departments } = await withActor(session, async (ctx, actor) => {
+    const { document, body, audience, people, departments, shares, teams } = await withActor(session, async (ctx, actor) => {
       const loaded = await getDocumentBody(ctx, actor, id)
       return {
         ...loaded,
         audience: await documentAudience(ctx, actor, id),
+        shares: await listShares(ctx, actor, 'document', id),
+        teams: await listTeams(ctx, actor).catch(() => []),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -65,6 +75,23 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }}
           people={people}
           departments={departments}
+        />
+
+        <ShareObject
+          objectType="document"
+          objectId={document.id}
+          shares={shares.map((entry) => ({
+            id: entry.id,
+            subjectType: entry.subjectType,
+            subjectName: entry.subjectName,
+            relation: entry.relation,
+            reason: entry.reason,
+            grantedByName: entry.grantedByName,
+            expiresAt: entry.expiresAt ? entry.expiresAt.toISOString() : null,
+            expired: entry.expired,
+          }))}
+          people={people}
+          teams={teams.map((team) => ({ id: team.id, name: team.name }))}
         />
 
         <DeleteDocument

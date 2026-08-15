@@ -18,7 +18,12 @@ import { syncShareToAudience } from './document-audience.js'
  */
 
 export type Relation = 'viewer' | 'editor' | 'owner' | 'approver'
-export type ShareableType = 'project' | 'document' | 'knowledge_space' | 'company'
+/**
+ * `task` was missing, while `listTasks` already unioned shared task ids into its scope
+ * predicate — so that branch could never match. Sharing one task with one person is the
+ * most ordinary act of collaboration there is; leaving it out made the union dead code.
+ */
+export type ShareableType = 'project' | 'document' | 'knowledge_space' | 'company' | 'task'
 
 const RELATION_RANK: Record<Relation, number> = { viewer: 0, editor: 1, approver: 2, owner: 3 }
 
@@ -34,7 +39,26 @@ export interface ShareView {
   grantedByName: string | null
   expiresAt: Date | null
   createdAt: Date
+  /** What the object is called, so a list of shares reads as something other than uuids. */
+  objectLabel: string | null
+  /** True when the grant has lapsed. `loadActor` already ignores these; the screen must too. */
+  expired: boolean
+  /** How this reached the person: directly, or through a team or department they belong to. */
+  via: 'you' | 'team' | 'department'
 }
+
+/**
+ * The object's own name, resolved per type. A share list showing `document` and a uuid is a
+ * list nobody can act on — the whole question being answered is "what did I give them".
+ */
+const OBJECT_LABEL = (ctx: TenantContext) => ctx.sql`
+  CASE t.object_type
+    WHEN 'task'            THEN (SELECT x.title FROM tasks x WHERE x.id = t.object_id)
+    WHEN 'document'        THEN (SELECT x.title FROM documents x WHERE x.id = t.object_id)
+    WHEN 'project'         THEN (SELECT x.name FROM projects x WHERE x.id = t.object_id)
+    WHEN 'company'         THEN (SELECT x.name FROM companies x WHERE x.id = t.object_id)
+    WHEN 'knowledge_space' THEN (SELECT x.name FROM knowledge_spaces x WHERE x.id = t.object_id)
+  END`
 
 /** The verb a relation implies, used to check the granter holds at least as much. */
 const VERB_FOR_RELATION: Record<Relation, string> = {
@@ -174,7 +198,12 @@ export async function listShares(
     SELECT t.id, t.subject_type AS "subjectType", t.subject_id AS "subjectId",
            coalesce(u.name, tm.name, d.name) AS "subjectName",
            t.relation, t.object_type AS "objectType", t.object_id AS "objectId",
-           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt"
+           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt",
+           ${OBJECT_LABEL(ctx)} AS "objectLabel",
+           -- Shown rather than filtered out: "this lapsed on Tuesday" is the answer
+           -- somebody is looking for when they ask why a colleague lost access.
+           (t.expires_at IS NOT NULL AND t.expires_at <= now()) AS expired,
+           'you' AS via
     FROM relation_tuples t
     LEFT JOIN users u ON t.subject_type = 'user' AND u.id = t.subject_id
     LEFT JOIN teams tm ON t.subject_type = 'team' AND tm.id = t.subject_id
@@ -185,26 +214,55 @@ export async function listShares(
     ORDER BY t.created_at DESC`
 }
 
-/** Everything shared *with* somebody — the answer to "why can they see this?". */
+/**
+ * Everything shared *with* somebody — the answer to "why can they see this?".
+ *
+ * Includes the grants that reach them through a team or department, not only the ones
+ * naming them directly. `loadActor` has always resolved all three when it builds the
+ * relation set, so listing only the direct ones answered the question wrongly: somebody
+ * would see an object they could not account for, which is precisely the confusion this
+ * view exists to end.
+ */
 export async function sharedWith(
   ctx: TenantContext,
   actor: Actor,
   userId: string,
 ): Promise<ShareView[]> {
+  // Self only, like `personalRecord` and `listDisclosures` beside it. This used to require
+  // `member:read`, which *every* role holds down to `guest` — so any colleague could list
+  // what somebody else had been given. Nothing is lost by closing it: an administrator
+  // reviewing access reads it from the object end with `listShares`, where the same facts
+  // live and the permission is the object's own.
   if (userId !== actor.userId) {
-    const decision = can(actor, 'member:read', { type: 'member', organizationId: ctx.organizationId })
-    if (!decision.allow) throw new PermissionError(decision.reason)
+    throw new PermissionError(
+      'This shows what has been shared with you. To review who can reach something, open the thing itself.',
+    )
   }
 
   return ctx.sql<ShareView[]>`
-    SELECT t.id, t.subject_type AS "subjectType", t.subject_id AS "subjectId", u.name AS "subjectName",
+    SELECT t.id, t.subject_type AS "subjectType", t.subject_id AS "subjectId",
+           coalesce(u.name, tm.name, d.name) AS "subjectName",
            t.relation, t.object_type AS "objectType", t.object_id AS "objectId",
-           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt"
+           t.reason, g.name AS "grantedByName", t.expires_at AS "expiresAt", t.created_at AS "createdAt",
+           ${OBJECT_LABEL(ctx)} AS "objectLabel",
+           false AS expired,
+           CASE t.subject_type WHEN 'user' THEN 'you' ELSE t.subject_type END AS via
     FROM relation_tuples t
-    LEFT JOIN users u ON u.id = t.subject_id
+    LEFT JOIN users u ON t.subject_type = 'user' AND u.id = t.subject_id
+    LEFT JOIN teams tm ON t.subject_type = 'team' AND tm.id = t.subject_id
+    LEFT JOIN departments d ON t.subject_type = 'department' AND d.id = t.subject_id
     LEFT JOIN users g ON g.id = t.granted_by
     WHERE t.organization_id = ${ctx.organizationId} AND t.deleted_at IS NULL
-      AND t.subject_type = 'user' AND t.subject_id = ${userId}
       AND (t.expires_at IS NULL OR t.expires_at > now())
+      AND (
+        (t.subject_type = 'user' AND t.subject_id = ${userId})
+        OR (t.subject_type = 'team' AND t.subject_id IN (
+              SELECT team_id FROM team_members
+              WHERE organization_id = ${ctx.organizationId} AND user_id = ${userId} AND deleted_at IS NULL))
+        OR (t.subject_type = 'department' AND t.subject_id IN (
+              SELECT department_id FROM memberships
+              WHERE organization_id = ${ctx.organizationId} AND user_id = ${userId}
+                AND deleted_at IS NULL AND department_id IS NOT NULL))
+      )
     ORDER BY t.created_at DESC`
 }

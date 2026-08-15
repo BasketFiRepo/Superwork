@@ -52,10 +52,13 @@ import {
   listHolds,
   listDocuments,
   listMemories,
+  listShares,
   listTasks,
   openDocumentToEveryone,
   recallMemories,
   share,
+  sharedWith,
+  unshare,
   placeHold,
   previewErasure,
   releaseHold,
@@ -853,6 +856,57 @@ try {
   ok('Clearing an override falls back one layer, not to nothing',
     restored.find((state) => state.flag === 'meetings')?.source === 'default')
 
+  // ---- One thing, given to one person ---------------------------------------
+  console.log('\nOne task is handed to one colleague, and taken back…\n')
+
+  const handover = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const task = await createTask(ctx, actor, { title: 'The handover task', assigneeId: actor.userId })
+    const given = await share(ctx, actor, {
+      subjectType: 'user',
+      subjectId: contractor!.id,
+      relation: 'viewer',
+      objectType: 'task',
+      objectId: task.id,
+      reason: 'Covering while I am away.',
+    })
+    return { taskId: task.id, given }
+  })
+
+  ok('A task can be shared at all — the list has been looking for shared tasks all along',
+    handover.given.objectType === 'task')
+  ok('And the grant says what it is, not just a pair of ids', handover.given.objectLabel === 'The handover task',
+    handover.given.objectLabel ?? 'no label')
+
+  const asContractor = { ...session, userId: contractor!.id }
+  const reached = await withTenant(asContractor, async (ctx) => {
+    const actor = await loadActor(ctx)
+    return {
+      listed: (await listTasks(ctx, actor, { limit: 200 })).tasks.some((t) => t.id === handover.taskId),
+      given: await sharedWith(ctx, actor, actor.userId),
+    }
+  })
+  ok('It reaches somebody whose role would not have', reached.listed)
+  ok('And they can see why they can see it', reached.given.some((entry) => entry.objectId === handover.taskId),
+    reached.given[0] ? `${reached.given[0].objectLabel} · via ${reached.given[0].via}` : 'nothing')
+
+  const notMine = await withTenant(asContractor, async (ctx) =>
+    sharedWith(ctx, await loadActor(ctx), session.userId),
+  ).then(() => null, (error: Error) => error.message)
+  ok('But not what somebody else was given', /shared with you/i.test(notMine ?? ''),
+    (notMine ?? 'it was allowed').slice(0, 70))
+
+  const revoked = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    await unshare(ctx, actor, { objectType: 'task', objectId: handover.taskId, tupleId: handover.given.id })
+    return listShares(ctx, actor, 'task', handover.taskId)
+  })
+  ok('Revoking takes it back', revoked.length === 0)
+  ok('And the contractor loses it again',
+    !(await withTenant(asContractor, async (ctx) =>
+      (await listTasks(ctx, await loadActor(ctx), { limit: 200 })).tasks.some((t) => t.id === handover.taskId),
+    )))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -864,7 +918,8 @@ try {
         'thing, was agreed with, was corrected, and forgot it when its source went; and one document was \n' +
         'taken out of circulation, shared back, and reopened on purpose; and one piece of work waited for \n' +
         'another until it was actually done; a contractor saw exactly one team’s work and nothing else; and \n' +
-        'one feature was turned off for everybody while one person kept it.\n',
+        'one feature was turned off for everybody while one person kept it; and one task was handed to one \n' +
+        'colleague and taken back.\n',
   )
 } catch (error) {
   console.error(error)
