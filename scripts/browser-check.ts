@@ -585,8 +585,11 @@ try {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/teams.png`, fullPage: true })
 
   // ---- Work that waits for other work -------------------------------------
-  // The seed puts two tasks behind one of Maya's, so the populated state is on screen.
-  await page.goto(`${BASE}/tasks`)
+  // Filtered to Maya's own work, which the seed gives the blocking task to. The unfiltered
+  // list is 116 open tasks against a page size of 100, ordered by recency — the blocking
+  // one sat around row 83 and fell off the page in CI depending on timestamp ordering.
+  // Asserting against a page whose contents depend on a race is not an assertion.
+  await page.goto(`${BASE}/tasks?filter=mine`)
   await page.waitForSelector('[data-testid="task-row"]', { timeout: 15_000 })
   const blockingChips = await page.locator('[data-testid="task-blocking-chip"]').count()
   ok('The task list says which work is holding other work up', blockingChips > 0, `${blockingChips} blocking`)

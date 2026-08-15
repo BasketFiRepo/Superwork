@@ -991,10 +991,16 @@ async function seedTaskDependencies(ctx: TenantContext, userIds: Map<string, str
     LIMIT 40`
 
   const maya = userIds.get('maya')!
-  const prerequisite = tasks.find((task) => task.assignee_id === maya) ?? tasks[0]
+  // Assigned to Maya rather than found among her tasks. `find` returned undefined — she has
+  // no seeded tasks — and the fallback to `tasks[0]` silently gave the prerequisite to
+  // somebody else, so the briefing section this exists to populate stayed empty for the
+  // demo owner. That is the whole point of the fixture, so it is made true rather than hoped for.
+  const prerequisite = tasks[0]
   if (!prerequisite) return 0
+  await ctx.sql`
+    UPDATE tasks SET assignee_id = ${maya}
+    WHERE organization_id = ${ctx.organizationId} AND id = ${prerequisite.id}`
 
-  // Two other people's tasks wait on it, so the count in the briefing is a real plural.
   const dependents = tasks.filter((task) => task.id !== prerequisite.id && task.assignee_id !== maya).slice(0, 2)
   if (dependents.length === 0) return 0
 
