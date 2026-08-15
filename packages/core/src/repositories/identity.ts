@@ -215,10 +215,14 @@ export async function applyDirectorySync(
 
   let created = 0
   for (const person of plan.create) {
+    // `ON CONFLICT (email)` matched no constraint: the unique index is on
+    // `lower(email) WHERE deleted_at IS NULL`, so this raised rather than updating whenever
+    // the person already existed — which is exactly what a re-sync does.
     const [user] = await ctx.sql<{ id: string }[]>`
       INSERT INTO users (email, name, password_hash, timezone)
       VALUES (${person.email}, ${person.displayName}, ${'sso-only'}, ${ctx.timezone})
-      ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+      ON CONFLICT (lower(email)) WHERE deleted_at IS NULL
+      DO UPDATE SET name = EXCLUDED.name
       RETURNING id`
     await ctx.sql`
       INSERT INTO memberships (organization_id, user_id, role, status, created_by)

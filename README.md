@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 743 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 759 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines → jurisdiction history
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines → jurisdiction history → invitations
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -587,6 +587,36 @@ The first thing the record caught was the acceptance loop itself. It now goes th
 `setJurisdiction` with a reason and a named approver — a better demonstration than the
 bypass was. **Settings → Jurisdiction and review.** See ADR 0028.
 
+## Adding a person to the organization
+
+`invitations` was created in migration 0001 and never read *or* written, which made this the
+largest single gap in the product: **there was no way to add somebody to an organization**
+except by running the seed or connecting a directory sync.
+
+- **An invitation is a credential**, so the token is random, stored as a hash, and returned
+  exactly once. There is no screen that can show it again because the database does not have
+  it, and the panel says so rather than letting somebody find out tomorrow.
+- **Nothing is emailed.** No provider here calls out of the process, so claiming a message
+  was sent would be the fake integration button §25 forbids. The link is handed over with
+  whose job it is to deliver it written next to it.
+- **You cannot invite somebody above your own role.** The membership form of "you can only
+  share what you already hold" — and `owner` is absent from the API's enum entirely, because
+  an organization gets its owner when it is created.
+- **A bad token, a used one and a lapsed one say the same nothing.** Telling them apart tells
+  somebody probing which addresses were invited.
+- **One live invitation per address**, by partial unique index; accepting claims the row
+  before it creates the membership, so two tabs cannot both win.
+- **A withdrawn invitation is kept**, because "who invited that contractor and who called it
+  off" is a question an access review asks. **Accepting signs them in** — an invitation that
+  ends at a login form makes somebody type their new password twice.
+
+Two defects came out of the same root: the unique index on `users` is
+`lower(email) WHERE deleted_at IS NULL`, so `ON CONFLICT (email)` matches no constraint and
+raises — and `applyDirectorySync` had exactly that, which means **re-syncing a directory threw
+whenever a person already existed**.
+
+**Settings → Members**, and `/invite/<token>` for the other half. See ADR 0029.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -953,13 +983,18 @@ away. They are evidence about query shape, not a 100,000-user result.
 - Four of the ten feature flags — `reports`, `autopilot`, `chat_presence`, `public_api` —
   are read by nothing. They are listed on the Features screen as inert rather than given a
   switch, because a control that changes nothing is worse than an absent one.
-- Seven tables are dead schema that nothing reads *or* writes: `agent_messages`,
-  `email_accounts`, `events`, `ingestion_jobs`, `invitations`, `saved_views` and
-  `task_watchers`. They are left in place rather than dropped, and listed here so nobody has
+- Six tables are dead schema that nothing reads *or* writes: `agent_messages`,
+  `email_accounts`, `events`, `ingestion_jobs`, `saved_views` and `task_watchers`. They are left in place rather than dropped, and listed here so nobody has
   to rediscover them. Unlike the tables this work was about, none of these has a live reader,
   so none is silently affecting behaviour.
 - The demo organization ships with no feature-flag overrides, because seeding one would mean
   turning a feature off in the demo.
+- Seats are not enforced. `plan_limits.seats` and `subscriptions.seats_purchased` are both
+  unread, and an invitation is where a seat check belongs — but what happens at the limit
+  (refuse, warn, allow with overage) is a product decision, and inventing an answer would be
+  worse than the stated gap.
+- Members can be invited and listed but not edited from the Members screen. Changing a role
+  or deactivating somebody still lives in Identity, with the directory sync.
 
 ## Safety properties this implementation actually holds
 
@@ -1056,6 +1091,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0026](docs/adr/0026-a-policy-can-only-tighten.md) | A policy can only tighten |
 | [0027](docs/adr/0027-a-reporting-line-routes-accountability-not-visibility.md) | A reporting line routes accountability, not visibility |
 | [0028](docs/adr/0028-the-database-writes-the-history.md) | The database writes the history |
+| [0029](docs/adr/0029-an-invitation-is-a-credential.md) | An invitation is a credential |
 
 ## Configuration
 

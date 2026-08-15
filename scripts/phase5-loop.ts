@@ -19,7 +19,7 @@
  * Run with:  pnpm loop:phase5
  */
 import { adminSql, closePools, withTenant } from '@superwork/db'
-import { can, loadActor } from '@superwork/auth'
+import { can, loadActor, login } from '@superwork/auth'
 import { compileWorkflow } from '@superwork/ai'
 import {
   activateCustomTool,
@@ -33,6 +33,7 @@ import {
   reviewHost,
   saveCompiled,
   addDependency,
+  acceptInvitation,
   addTeamMember,
   clearFlag,
   flagStates,
@@ -55,6 +56,8 @@ import {
   grantDocumentAccess,
   hybridSearch,
   ingestDocument,
+  invitationOffer,
+  inviteMember,
   jurisdictionHistory,
   listHolds,
   listDocuments,
@@ -76,6 +79,7 @@ import {
   relationship360,
   releaseHold,
   retentionPolicies,
+  revokeInvitation,
   saveCustomTool,
   scheduleLadder,
   setFlag,
@@ -1406,6 +1410,84 @@ try {
 
 
 
+  // ---- Somebody joins the company ------------------------------------------
+  console.log('\nA person is added to the organization for the first time…\n')
+
+  const joiner = `loop.joiner.${Math.abs(Number(process.hrtime.bigint() % 1000000n))}@northwind.example`
+
+  const escalationAttempt = await withTenant(session, async (ctx) => {
+    // The owner *can* invite an owner; an admin cannot. Prove the rule with the role that
+    // the rule is for.
+    const [admin] = await ctx.sql<{ id: string }[]>`
+      SELECT user_id AS id FROM memberships
+      WHERE organization_id = ${ctx.organizationId} AND role = 'admin' AND deleted_at IS NULL LIMIT 1`
+    if (!admin) return 'no admin seeded'
+    return withTenant({ ...session, userId: admin.id }, async (inner) =>
+      inviteMember(inner, await loadActor(inner), {
+        email: 'escalation@northwind.example',
+        role: 'owner',
+        reason: 'Attempting to mint an owner from an admin account.',
+      }).then(() => 'allowed', (error: Error) => error.message),
+    )
+  })
+  ok('An admin cannot invite somebody above their own role',
+    /above your own role/i.test(escalationAttempt), escalationAttempt.slice(0, 60))
+
+  const issued = await withTenant(session, async (ctx) =>
+    inviteMember(ctx, await loadActor(ctx), {
+      email: joiner,
+      role: 'member',
+      reason: 'Joining the renewals team on Monday.',
+    }),
+  )
+  ok('An invitation can be created at all — the table was never read or written', Boolean(issued.token))
+  ok('And it is stored as a hash, not as the token',
+    await withTenant(session, async (ctx) => {
+      const [row] = await ctx.sql<{ hash: string }[]>`
+        SELECT token_hash AS hash FROM invitations WHERE id = ${issued.invitation.id}`
+      return row!.hash.length === 64 && !row!.hash.includes(issued.token)
+    }))
+
+  const offer = await invitationOffer(issued.token)
+  ok('The link says who invited them, and to what', offer?.role === 'member' && offer?.email === joiner,
+    `${offer?.invitedByName ?? 'nobody'} → ${offer?.role ?? 'nothing'}`)
+
+  const accepted = await acceptInvitation(issued.token, { name: 'Loop Joiner', password: 'a-good-password' })
+  ok('Accepting it creates the person and their membership', accepted?.email === joiner)
+  ok('And they can sign in with what they chose',
+    (await login(joiner, 'a-good-password')) !== null)
+
+  ok('The same link does not work twice',
+    (await acceptInvitation(issued.token, { name: 'Again', password: 'a-good-password' })) === null)
+
+  const withdrawn = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const second = await inviteMember(ctx, actor, {
+      email: `loop.withdrawn.${Math.abs(Number(process.hrtime.bigint() % 1000000n))}@northwind.example`,
+      role: 'viewer',
+      reason: 'This one will be called off.',
+    })
+    await revokeInvitation(ctx, actor, {
+      invitationId: second.invitation.id,
+      reason: 'They are not joining after all.',
+    })
+    return second.token
+  })
+  ok('A withdrawn invitation stops working immediately',
+    (await invitationOffer(withdrawn)) === null)
+
+  // Leave the demo as it was found: the joiner is a real membership this loop created.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM memberships
+      WHERE organization_id = ${ctx.organizationId}
+        AND user_id IN (SELECT id FROM users WHERE lower(email) = lower(${joiner}))`
+    await ctx.sql`
+      DELETE FROM invitations
+      WHERE organization_id = ${ctx.organizationId} AND email LIKE 'loop.%@northwind.example'`
+  })
+  await adminSql()`DELETE FROM users WHERE lower(email) = lower(${joiner})`
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1423,7 +1505,8 @@ try {
         'without what is filed against it; and the rules that decide what stops for a person are read \n' +
         'from the rows that always stated them, and cannot be configured to let a change through; and an \n' +
         'escalation reached a manager instead of the person it was written about, after they had been \n' +
-        'asked themselves and told that it happened.\n',
+        'asked themselves and told that it happened; and a person was invited into the company, joined, \n' +
+        'and could not be invited above the role of whoever invited them.\n',
   )
 } catch (error) {
   console.error(error)
