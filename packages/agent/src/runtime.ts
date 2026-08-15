@@ -497,11 +497,17 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
         preview,
         evidence,
         requestedByLabel: 'Superwork',
+        // What this tenant's own rules decided, so the card can say why it is being asked
+        // and to whom it went (§11.1). A cap or a downgrade is the more specific reason
+        // when one applies, and the policy still routes it.
+        policyId: gate.policy.policyId,
+        approverRole: gate.policy.approverRole,
+        slaHours: gate.policy.slaHours,
         policyReason: capReason
           ? `${persona.name} reached a cap you set, so this is waiting for you instead of running unattended. ${capReason}`
           : downgraded
             ? 'This run read untrusted external content, so every change is held for a person to approve.'
-            : 'Changes proposed by an agent are held for approval before execution.',
+            : gate.policy.reason,
       })
       await setRunStatus(ctx, runId, 'awaiting_approval')
       await emitStep(ctx, runId, phase, {

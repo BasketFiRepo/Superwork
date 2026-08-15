@@ -1,5 +1,8 @@
-import { asJson, type ApprovalStatus, type RiskTier, type TenantContext } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { asJson, type ApprovalStatus, type RiskTier, type Role, type TenantContext } from '@superwork/db'
+import { can, grantedScope, type Actor } from '@superwork/auth'
+import { DEFAULT_SLA_HOURS, roleAtLeast } from '../approval-policy.js'
+
+const ROLES: Role[] = ['owner', 'admin', 'manager', 'member', 'viewer', 'guest', 'service']
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 
@@ -67,7 +70,15 @@ export interface ApprovalView {
   riskTier: RiskTier
   agentRunId: string | null
   requestedByLabel: string
+  requestedByUserId: string | null
+  requestedByActorType: string
   approverUserId: string | null
+  /** Set when a policy named a role rather than a person: anybody holding it may decide. */
+  approverRole: Role | null
+  policyId: string | null
+  policyName: string | null
+  /** Why this is being asked at all — the policy's own words, or the product's default. */
+  policyReason: string | null
   slaHours: number
   expiresAt: Date | null
   preview: PreviewLine[]
@@ -90,6 +101,9 @@ export interface CreateApprovalInput {
   evidence: EvidenceItem[]
   policyReason?: string
   requestedByLabel: string
+  /** What the policy set decided about this plan (§11.1). */
+  policyId?: string | null
+  approverRole?: Role | null
 }
 
 export async function createApproval(
@@ -101,17 +115,28 @@ export async function createApproval(
     // Building the approval UI without preview() diffs means people approve blindly (§25.14).
     throw new ValidationError('An approval must carry a preview of what will happen.')
   }
-  const slaHours = input.slaHours ?? 4
+  const slaHours = input.slaHours ?? DEFAULT_SLA_HOURS
+
+  // A policy that names a role names it instead of a person when the obvious person does
+  // not hold it. Defaulting the approver to the requester and leaving `approver_role` NULL
+  // is how "external mail needs a manager" became "the member who asked may approve it".
+  const approverRole = input.approverRole ?? null
+  const explicit = input.approverUserId ?? null
+  const approverUserId =
+    explicit ?? (approverRole && !roleAtLeast(actor.role, approverRole) ? null : actor.userId)
+
   const [row] = await ctx.sql<{ id: string }[]>`
     INSERT INTO approvals (
       organization_id, title, kind, status, risk_tier, requested_by_actor_type,
-      requested_by_user_id, agent_run_id, approver_user_id, sla_hours, expires_at,
-      preview, evidence, policy_reason, created_by
+      requested_by_user_id, agent_run_id, approver_user_id, approver_role, policy_id,
+      sla_hours, expires_at, preview, evidence, policy_reason, created_by
     ) VALUES (
       ${ctx.organizationId}, ${input.title}, ${input.kind ?? 'agent_plan'}, 'pending',
       ${input.riskTier}, ${actor.type}, ${actor.userId}, ${input.agentRunId ?? null},
-      ${input.approverUserId ?? actor.userId}, ${slaHours},
-      ${new Date(Date.now() + slaHours * 3600_000 * 6)},
+      ${approverUserId}, ${approverRole}, ${input.policyId ?? null}, ${slaHours},
+      -- The deadline is the deadline. This used to be the SLA times six, which made every
+      -- "4 hours" card expire in a day and the number on the screen a decoration.
+      ${new Date(Date.now() + slaHours * 3600_000)},
       ${ctx.sql.json(asJson(input.preview))}, ${ctx.sql.json(asJson(input.evidence))},
       ${input.policyReason ?? null}, ${ctx.userId}
     ) RETURNING id`
@@ -137,7 +162,11 @@ const SELECT_APPROVAL = (ctx: TenantContext) => ctx.sql`
   SELECT a.id, a.title, a.kind, a.status, a.risk_tier AS "riskTier",
          a.agent_run_id AS "agentRunId",
          coalesce(ag.name, u.name, 'Superwork') AS "requestedByLabel",
-         a.approver_user_id AS "approverUserId", a.sla_hours AS "slaHours",
+         a.requested_by_user_id AS "requestedByUserId",
+         a.requested_by_actor_type AS "requestedByActorType",
+         a.approver_user_id AS "approverUserId", a.approver_role AS "approverRole",
+         a.policy_id AS "policyId", p.name AS "policyName",
+         a.policy_reason AS "policyReason", a.sla_hours AS "slaHours",
          a.expires_at AS "expiresAt", a.preview, a.evidence, a.edits,
          a.decision_reason AS "decisionReason", a.decided_at AS "decidedAt",
          a.created_at AS "createdAt",
@@ -145,7 +174,38 @@ const SELECT_APPROVAL = (ctx: TenantContext) => ctx.sql`
   FROM approvals a
   LEFT JOIN users u ON u.id = a.requested_by_user_id
   LEFT JOIN agent_runs r ON r.id = a.agent_run_id
-  LEFT JOIN agents ag ON ag.id = r.agent_id`
+  LEFT JOIN agents ag ON ag.id = r.agent_id
+  LEFT JOIN approval_policies p ON p.id = a.policy_id`
+
+/**
+ * Who may see an approval at all.
+ *
+ * This took no notice of the actor whatsoever: `listApprovals` and `getApproval` accepted
+ * one and never used it, so anybody signed in — down to a `guest` — could read every
+ * approval in the organization, and an approval's preview is the draft itself: recipients,
+ * subject lines, message bodies, amounts.
+ *
+ * Three ways in, and no fourth: you asked for it, you are the one being asked, or you may
+ * decide approvals of this kind. It is written as a predicate rather than a `can()` call
+ * because "may decide *this* one" depends on the row, and a list cannot ask about a row it
+ * has not fetched (ADR 0021).
+ */
+const VISIBLE_TO = (ctx: TenantContext, actor: Actor) => {
+  // `grantedScope`, not `can()`: an approval carries no department, so a manager holding
+  // `approval:decide:department` can never satisfy an organization-level resource and would
+  // have been shut out of the queue entirely. Ask whether they may decide approvals at all,
+  // and let the row-level rules below decide which ones they may act on (ADR 0021).
+  const decider = grantedScope(actor, 'approval:decide', 'approval') !== null
+  // Which named roles this actor satisfies is knowable without the row, so it goes in as a
+  // list rather than as a rank comparison the database would have to be taught.
+  const satisfies = ROLES.filter((role) => roleAtLeast(actor.role, role))
+  return ctx.sql`(
+    a.requested_by_user_id = ${actor.userId}
+    OR a.approver_user_id = ${actor.userId}
+    OR (a.approver_role IS NOT NULL AND a.approver_role = ANY(${satisfies}::sw_role[]))
+    ${decider ? ctx.sql`OR true` : ctx.sql``}
+  )`
+}
 
 export async function listApprovals(
   ctx: TenantContext,
@@ -156,6 +216,7 @@ export async function listApprovals(
   return sql<ApprovalView[]>`
     ${SELECT_APPROVAL(ctx)}
     WHERE a.organization_id = ${ctx.organizationId} AND a.deleted_at IS NULL
+      AND ${VISIBLE_TO(ctx, actor)}
       ${filter.status ? sql`AND a.status = ${filter.status}` : sql``}
     ORDER BY a.created_at DESC
     LIMIT ${Math.min(filter.limit ?? 50, 200)}`
@@ -164,7 +225,9 @@ export async function listApprovals(
 export async function getApproval(ctx: TenantContext, actor: Actor, id: string): Promise<ApprovalView> {
   const [row] = await ctx.sql<ApprovalView[]>`
     ${SELECT_APPROVAL(ctx)}
-    WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${id} AND a.deleted_at IS NULL`
+    WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${id} AND a.deleted_at IS NULL
+      AND ${VISIBLE_TO(ctx, actor)}`
+  // An approval somebody may not see reports absence, not denial (§3.2).
   if (!row) throw new NotFoundError()
   return row
 }
@@ -184,17 +247,45 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
     throw new ValidationError(`This approval was already ${approval.status.replace(/_/g, ' ')}.`)
   }
 
-  const decision = can(actor, 'approval:decide', {
-    type: 'approval',
-    id: approval.id,
-    organizationId: ctx.organizationId,
-    ownerId: approval.approverUserId,
-  })
-  if (!decision.allow) throw new PermissionError(decision.reason)
+  // An approval carries no department, so `approval:decide:department` — the manager's
+  // grant, and the only decide grant below admin — could never be satisfied by this
+  // resource. A manager has therefore never been able to decide anything, which makes
+  // "a manager decides this" routing meaningless. Ask whether they may decide approvals at
+  // all; the row's own `approverRole` below does the narrowing that matters (ADR 0021).
+  if (grantedScope(actor, 'approval:decide', 'approval') === null) {
+    const decision = can(actor, 'approval:decide', {
+      type: 'approval',
+      id: approval.id,
+      organizationId: ctx.organizationId,
+      ownerId: approval.approverUserId,
+    })
+    throw new PermissionError(decision.reason)
+  }
+
+  // A policy that names a role is the whole point of naming one. Without this the column
+  // was written and never consulted, so "external mail needs a manager" produced a card any
+  // member could clear.
+  if (approval.approverRole && !roleAtLeast(actor.role, approval.approverRole)) {
+    throw new PermissionError(
+      `${approval.policyName ? `The “${approval.policyName}” policy` : 'This organization'} requires a ${approval.approverRole} to decide this. Yours is ${actor.role}.`,
+    )
+  }
 
   // Nothing is self-approved above the configured threshold (§11.3).
-  if (approval.riskTier === 'high' && approval.approverUserId === actor.userId && actor.role === 'member') {
-    throw new PermissionError('High-risk actions cannot be self-approved. A manager or admin needs to decide this.')
+  //
+  // Two corrections. It only bound `member`, so a manager could approve their own
+  // high-risk request and an admin certainly could — the comment said "the configured
+  // threshold" and the code said "one role". And it keyed on `approverUserId`, which
+  // defaults to the requester, rather than on who actually asked.
+  //
+  // An agent's proposal is deliberately not self-approval. The person did not propose it;
+  // their agent did, and a human deciding what their agent suggested is the entire design
+  // (§5.1). Self-approval is a *person* proposing and clearing their own action.
+  const isOwnRequest = approval.requestedByActorType === 'user' && approval.requestedByUserId === actor.userId
+  if (isOwnRequest && approval.riskTier === 'high') {
+    throw new PermissionError(
+      'You proposed this yourself, and high-risk actions are not self-approved. Somebody else has to decide it.',
+    )
   }
   if (input.decision === 'reject' && !input.reason?.trim()) {
     throw new ValidationError('A rejection needs a reason — it is the signal that improves future proposals.')

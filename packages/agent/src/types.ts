@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { RiskTier } from '@superwork/db'
-import type { PreviewLine } from '@superwork/core'
+import type { PolicyOutcome, PreviewLine } from '@superwork/core'
 
 /**
  * The Plan is the unit of approval, the unit of audit and the unit of replay (§5.2).
@@ -48,6 +48,8 @@ export interface GateOutcome {
   estimatedCostCents: number
   approvalTitle: string
   riskTier: RiskTier
+  /** What this tenant's approval policies decided about the plan, and why (§11.1). */
+  policy: PolicyOutcome
 }
 
 export interface Citation {

@@ -80,6 +80,7 @@ export function Sidebar({
       title: 'Admin',
       items: [
         { href: '/settings/agents', label: 'Agents' },
+        { href: '/settings/approvals', label: 'Approvals' },
         { href: '/settings/integrations', label: 'Integrations' },
         { href: '/settings/tools', label: 'Custom tools' },
         { href: '/settings/api', label: 'API and MCP' },

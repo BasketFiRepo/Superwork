@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 695 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 716 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -493,6 +493,38 @@ the type was declared shareable and nobody below `owner` could share, or even re
 
 See ADR 0025.
 
+## The rules that decide what stops for a person
+
+`approval_policies` was seeded in migration 0005 with three rules and read by nothing, while
+the gate carried its own copy of one of them — `writes.length > 20`, the same twenty the
+seeded row states. **The row and the constant agreed**, which is why nothing looked broken.
+An admin could not see or change the rule governing them, and `policy_id` and `policy_reason`
+were columns nothing filled, so an approval could not say why it was being asked.
+
+- **A policy can only tighten.** There is no `allow` effect and there will not be one. The
+  floor — any write is held for a person — lives in code and is passed into the evaluator,
+  which ORs it in rather than replacing it. Switching every rule off returns to that floor.
+  This is what keeps "nothing is auto-sent externally, ever, under any setting" true in the
+  presence of a rule engine: no configuration reaches it, and the screen says so.
+- **A deny is refused, not held.** A rule that says "forbidden" must not produce a card
+  somebody can approve, so the plan's writes are struck out with the rule's name as the
+  reason.
+- **A rule that matches on nothing is inert**, not universal, and writing one is refused —
+  as is naming a tool that does not exist. A rule that silently matches nothing reads as
+  protection.
+- **A policy that names a role routes by it.** `approver_user_id` defaulted to the
+  requester, so "external mail needs a manager" became "the member who asked may approve it".
+- **A manager can now decide an approval at all.** An approval carries no department, so
+  `approval:decide:department` — the only decide grant below admin — could never be
+  satisfied.
+- **Self-approval means a person clearing their own request**, not a person deciding what
+  their agent proposed. The old rule bound `member` alone, so an owner could self-approve
+  anything.
+- **An approval is not readable by everyone.** Both read paths took an actor and ignored it,
+  and a preview *is* the draft: recipients, subject lines, bodies, amounts.
+
+**Settings → Approvals**, behind step-up in both directions. See ADR 0026.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -832,6 +864,13 @@ away. They are evidence about query shape, not a 100,000-user result.
   would silently restrict every document on it.
 - Knowledge spaces are read, shared and filed into, but not authored. There is one seeded
   space and no way to create a second from the interface.
+- An approval routed to a role is visible to everybody who holds it, and approvals carry no
+  department — so a department-scoped decider currently sees the whole queue. Narrowing that
+  needs a department on the approval, which is a schema change and a separate decision.
+- `approvals.delegated_to` is still a column nothing writes. Handing an approval to a named
+  person for a period is a real feature and is not the one that was built.
+- The rule form is constrained: one tool, or a number of changes, or a risk level. Rules
+  combining conditions can be seeded but not written from the interface.
 - `project_members` is written by the seed and read by nothing. It carries one row per
   project — the owner, who is already on the project row — so it says nothing the product
   does not already know. Sharing is the mechanism that grants project access.
@@ -941,6 +980,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0023](docs/adr/0023-a-share-only-ever-adds.md) | A share only ever adds |
 | [0024](docs/adr/0024-a-container-lends-a-read.md) | A container lends a read, never a say |
 | [0025](docs/adr/0025-a-shelf-is-a-container-an-account-is-not.md) | A shelf is a container, an account is not |
+| [0026](docs/adr/0026-a-policy-can-only-tighten.md) | A policy can only tighten |
 
 ## Configuration
 
