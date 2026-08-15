@@ -684,12 +684,16 @@ async function seedAgents(
   }
 
   // The organization-level ceiling the agent can never exceed.
+  //
+  // These are *permission* patterns — `resource:verb` — because that is what the matcher
+  // reads, despite the column being called `tool_pattern`. The seed used to write tool names
+  // here, which parse as a resource nothing is called and matched nothing at all (ADR 0035).
   const grants = [
     { capability: 'read', tool: '*' },
-    { capability: 'draft', tool: 'draft_email' },
-    { capability: 'execute:low', tool: 'create_task' },
-    { capability: 'execute:low', tool: 'update_task' },
-    { capability: 'execute:low', tool: 'link_entities' },
+    { capability: 'draft', tool: 'email:draft' },
+    { capability: 'execute:low', tool: 'task:create' },
+    { capability: 'execute:low', tool: 'task:update' },
+    { capability: 'execute:low', tool: 'contact:update' },
   ]
   for (const grant of grants) {
     await ctx.sql`

@@ -1,7 +1,8 @@
 import { requireSession, withActor } from '@/lib/session'
-import { describeEffectiveCapability, ROLE_MAX_SENSITIVITY } from '@superwork/auth'
-import { formatCents, spendSnapshot, trustLedger } from '@superwork/core'
+import { can, describeEffectiveCapability, ROLE_MAX_SENSITIVITY } from '@superwork/auth'
+import { agentGrants, formatCents, monitoringPolicy, spendSnapshot, trustLedger } from '@superwork/core'
 import { allTools } from '@superwork/tools'
+import { GovernanceControls } from '@/components/GovernanceControls'
 import { KillSwitch } from '@/components/KillSwitch'
 
 export const dynamic = 'force-dynamic'
@@ -38,11 +39,17 @@ export default async function AiGovernancePage() {
       WHERE a.organization_id = ${ctx.organizationId} AND a.deleted_at IS NULL
       ORDER BY a.is_subagent, a.name`
 
-    const grants = await ctx.sql<{ capability: string; tool_pattern: string; effect: string; department: string | null }[]>`
-      SELECT ap.capability, ap.tool_pattern, ap.effect, d.name AS department
-      FROM agent_permissions ap LEFT JOIN departments d ON d.id = ap.department_id
-      WHERE ap.organization_id = ${ctx.organizationId} AND ap.deleted_at IS NULL
-      ORDER BY ap.capability`
+    // The two controls this screen's own refusal message has always pointed at.
+    const grants = await agentGrants(ctx, actor)
+    const monitoring = await monitoringPolicy(ctx, actor)
+    const departments = await ctx.sql<{ id: string; name: string }[]>`
+      SELECT id, name FROM departments
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY name`
+    const canEdit = can(actor, 'settings:update', {
+      type: 'settings',
+      organizationId: ctx.organizationId,
+      riskTier: 'high',
+    }).allow
 
     const [runStats] = await ctx.sql<{ total: number; undone: number; failed: number; downgraded: number }[]>`
       SELECT count(*)::int AS total,
@@ -51,12 +58,6 @@ export default async function AiGovernancePage() {
              count(*) FILTER (WHERE capability_downgraded)::int AS downgraded
       FROM agent_runs WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
 
-    const [monitoring] = await ctx.sql<
-      { jurisdiction_profile: string; nudge_budget_per_person_per_day: number; no_surprises_review_hours: number }[]
-    >`
-      SELECT jurisdiction_profile, nudge_budget_per_person_per_day, no_surprises_review_hours
-      FROM monitoring_policies WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
-
     return {
       agents,
       grants,
@@ -64,6 +65,8 @@ export default async function AiGovernancePage() {
       spend: await spendSnapshot(ctx, 'business'),
       ledger: await trustLedger(ctx),
       monitoring,
+      departments,
+      canEdit,
       capability: describeEffectiveCapability({
         ...actor,
         type: 'agent',
@@ -72,6 +75,7 @@ export default async function AiGovernancePage() {
           agentName: 'Superwork',
           mode: 'execute',
           orgGrant: [],
+          denied: [],
           toolGrants: ['*'],
           maxSensitivity: 'confidential',
           capabilityDowngraded: false,
@@ -169,38 +173,29 @@ export default async function AiGovernancePage() {
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Organization grant ceiling</h2>
-          <span className="small muted">The agent can never exceed this, or the human it acts for</span>
-        </div>
-        <div className="panel-body-flush table-scroll">
-          <table className="table">
-            <thead>
-              <tr>
-                <th style={{ width: 160 }}>Capability</th>
-                <th>Tools</th>
-                <th style={{ width: 140 }}>Department</th>
-                <th style={{ width: 100 }}>Effect</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.grants.map((grant, index) => (
-                <tr key={index}>
-                  <td className="mono">{grant.capability}</td>
-                  <td className="mono small">{grant.tool_pattern}</td>
-                  <td className="small secondary">{grant.department ?? 'All'}</td>
-                  <td>
-                    <span className={grant.effect === 'allow' ? 'chip chip-positive' : 'chip chip-critical'}>
-                      {grant.effect}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <GovernanceControls
+        canEdit={data.canEdit}
+        departments={data.departments}
+        monitoring={{
+          jurisdictionProfile: data.monitoring.jurisdictionProfile,
+          nudgeBudgetPerPersonPerDay: data.monitoring.nudgeBudgetPerPersonPerDay,
+          noSurprisesReviewHours: data.monitoring.noSurprisesReviewHours,
+          ceiling: data.monitoring.ceiling,
+          reason: data.monitoring.reason,
+          setByName: data.monitoring.setByName,
+          prohibited: data.monitoring.prohibited,
+        }}
+        grants={data.grants.map((grant) => ({
+          id: grant.id,
+          capability: grant.capability,
+          toolPattern: grant.toolPattern,
+          effect: grant.effect,
+          maxSensitivity: grant.maxSensitivity,
+          departmentName: grant.departmentName,
+          reason: grant.reason,
+          grantedByName: grant.grantedByName,
+        }))}
+      />
 
       <section className="grid-2">
         <div className="panel">
@@ -255,30 +250,6 @@ export default async function AiGovernancePage() {
             </div>
           </div>
 
-          <div className="panel">
-            <div className="panel-header">
-              <h2>Monitoring policy</h2>
-            </div>
-            <div className="panel-body stack stack-4">
-              <div className="spread">
-                <span className="small secondary">Jurisdiction profile</span>
-                <span className="chip">{data.monitoring?.jurisdiction_profile ?? 'strict'}</span>
-              </div>
-              <div className="spread">
-                <span className="small secondary">Nudge budget per person per day</span>
-                <span className="metric">{data.monitoring?.nudge_budget_per_person_per_day ?? 3}</span>
-              </div>
-              <div className="spread">
-                <span className="small secondary">No-surprises review window</span>
-                <span className="metric">{data.monitoring?.no_surprises_review_hours ?? 24}h</span>
-              </div>
-              <p className="small muted">
-                Individual productivity scoring, covert monitoring, keystroke or screen capture, and
-                automated employment decisions are rejected by a database constraint. There is no
-                admin setting that turns them on.
-              </p>
-            </div>
-          </div>
         </div>
       </section>
 

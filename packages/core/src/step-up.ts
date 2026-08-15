@@ -31,6 +31,10 @@ export const STEP_UP_ACTIONS = {
   // Adding a rule only ever tightens, so it does not need this — but the two arrive through
   // the same screen, and a control that asks sometimes teaches people to click through.
   'approval_policy.set': 'changing which actions need a person’s approval',
+  // The ceiling on what every agent in the company may do. Removing a line narrows and
+  // adding one widens; both arrive through the same screen, and a control that asks
+  // sometimes teaches people to click through.
+  'agent_grant.set': 'changing what agents are allowed to do across this organization',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

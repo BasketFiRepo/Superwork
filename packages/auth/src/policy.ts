@@ -52,6 +52,11 @@ export interface AgentActorFacet {
   mode: AgentMode
   /** Admin-configured ceiling for the organization/department (§4.4). */
   orgGrant: string[]
+  /**
+   * Tool patterns the organization has explicitly refused. Deny beats allow: a deny row
+   * used to be filtered out by the actor loader and had never refused anything.
+   */
+  denied: string[]
   toolGrants: string[]
   maxSensitivity: Sensitivity
   /** True when the run's context contains untrusted external content (§5.9.3). */
@@ -328,7 +333,8 @@ export function readCeiling(actor: Actor): Sensitivity {
     : ROLE_MAX_SENSITIVITY[actor.role]
 }
 
-function lowerSensitivity(a: Sensitivity, b: Sensitivity): Sensitivity {
+/** The stricter of two classifications. Exported because the actor loader needs it too. */
+export function lowerSensitivity(a: Sensitivity, b: Sensitivity): Sensitivity {
   const rank: Sensitivity[] = ['public', 'internal', 'confidential', 'restricted']
   return rank.indexOf(a) <= rank.indexOf(b) ? a : b
 }
@@ -351,6 +357,15 @@ function intersectAgent(
 ): Decision {
   const risk: RiskTier = resource.riskTier ?? 'read'
   const ceiling = MODE_CEILING[agent.mode]
+
+  // A refusal is checked before the grant list, and independently of whether one exists at
+  // all: an organization with no allow rows has not configured a ceiling, but a deny row is
+  // a decision somebody made and it has to bite either way.
+  if (agent.denied.some((raw) => matchesGrant(raw, resourceType, verb))) {
+    return DENY(
+      `This organization does not let agents do ${resourceType}:${verb}. An admin set that in Settings → AI governance.`,
+    )
+  }
 
   if (agent.orgGrant.length > 0) {
     const covered = agent.orgGrant.some((raw) => matchesGrant(raw, resourceType, verb))

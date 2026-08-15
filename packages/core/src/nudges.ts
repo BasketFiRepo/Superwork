@@ -159,6 +159,14 @@ export async function scheduleLadder(
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
   const rules = PROFILES[strictestProfile(entities)]
 
+  // The organization's own window, which was shown on two screens and enforced nowhere: the
+  // wait below read the profile constant. The longer of the two wins, because an
+  // organization may give its people more time to answer and never less.
+  const [own] = await ctx.sql<{ hours: number }[]>`
+    SELECT no_surprises_review_hours AS hours FROM monitoring_policies
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
+  const reviewHours = Math.max(rules.noSurprisesReviewHours, own?.hours ?? 0)
+
   const now = input.now ?? new Date()
 
   // Which rung is due. A ladder opened on something already overdue starts at the rung
@@ -207,10 +215,12 @@ export async function scheduleLadder(
         skipped: `Nothing about ${input.ownerName ?? 'this person'} goes past them before they have seen it. They have not been contacted about this yet.`,
       }
     }
-    if (hours < rules.noSurprisesReviewHours) {
+    if (hours < reviewHours) {
       return {
         scheduled: 0,
-        skipped: `They were contacted ${hours.toFixed(1)}h ago and this profile gives them ${rules.noSurprisesReviewHours}h to answer first.`,
+        skipped:
+          `They were contacted ${hours.toFixed(1)}h ago and they have ${reviewHours}h to answer first` +
+          `${reviewHours > rules.noSurprisesReviewHours ? ' — this organization gives longer than its profile requires' : ''}.`,
       }
     }
   }

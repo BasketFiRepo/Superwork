@@ -33,6 +33,7 @@ function agentActor(mode: 'ask' | 'assist' | 'execute' | 'autopilot', role: Role
       agentName: 'Superwork',
       mode,
       orgGrant: [],
+    denied: [],
       toolGrants: ['*'],
       maxSensitivity: 'confidential',
       capabilityDowngraded: downgraded,
