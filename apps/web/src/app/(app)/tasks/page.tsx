@@ -1,7 +1,8 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { listTasks, asOfLabel, startOfDay } from '@superwork/core'
+import { listSavedViews, listTasks, asOfLabel, startOfDay } from '@superwork/core'
 import type { TaskStatus } from '@superwork/db'
+import { SavedViews } from '@/components/SavedViews'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +12,7 @@ const FILTERS = [
   { id: 'overdue', label: 'Overdue' },
   { id: 'today', label: 'Due today' },
   { id: 'blocked', label: 'Blocked' },
+  { id: 'watching', label: 'Following' },
 ] as const
 
 const OPEN_STATUSES: TaskStatus[] = ['backlog', 'todo', 'in_progress', 'waiting', 'blocked', 'review']
@@ -20,17 +22,29 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
   const params = await searchParams
   const filter = params.filter ?? 'all'
 
-  const { tasks, hasMore } = await withActor(session, async (ctx, actor) => {
+  const { tasks, hasMore, views } = await withActor(session, async (ctx, actor) => {
     const result = await listTasks(ctx, actor, {
       status: filter === 'blocked' ? ['blocked'] : OPEN_STATUSES,
       ...(filter === 'mine' ? { assigneeId: 'me' as const } : {}),
       ...(filter === 'overdue' ? { overdueOnly: true } : {}),
       ...(filter === 'today' ? { dueBefore: new Date(startOfDay(new Date(), ctx.timezone).getTime() + 86_400_000) } : {}),
+      ...(filter === 'watching' ? { watching: true } : {}),
       ...(params.q ? { search: params.q } : {}),
       limit: 100,
     })
-    return { tasks: result.tasks, hasMore: result.nextCursor !== null }
+    return {
+      tasks: result.tasks,
+      hasMore: result.nextCursor !== null,
+      views: await listSavedViews(ctx, actor, 'task'),
+    }
   })
+
+  // What "Save this view" would save, and what marks a saved view as the one you are in.
+  const current = { ...(filter === 'all' && !params.q ? {} : { filter }), ...(params.q ? { q: params.q } : {}) }
+  const active =
+    views.find(
+      (view) => (view.query.filter ?? 'all') === filter && (view.query.q ?? '') === (params.q ?? ''),
+    ) ?? null
 
   const today = startOfDay(new Date(), session.timezone).getTime()
 
@@ -44,6 +58,8 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
           Overdue is computed in your timezone, not the server's.
         </p>
       </header>
+
+      <SavedViews entity="task" views={views} current={current} activeId={active?.id ?? null} />
 
       <div className="row wrap">
         {FILTERS.map((option) => (
