@@ -6,6 +6,7 @@ import { writeActivity } from './audit.js'
 import { recordDisclosure } from './transparency.js'
 import { PROFILES, strictestProfile, type JurisdictionProfile } from './compliance.js'
 import { managerOf } from './org-chart.js'
+import { restReason, shiftToWorkingDay, workingCalendarFor } from './working-days.js'
 
 /**
  * The nudge ladder and its shared budget (§29.2, §29.5).
@@ -238,6 +239,12 @@ export async function scheduleLadder(
     LIMIT 1`
   if (existing) return { scheduled: 0, skipped: 'A ladder is already open for this, so a second agent adds nothing.' }
 
+  // A rung dated for a day nobody works is one that sits undeliverable until somebody
+  // notices. It is moved forward to the next working day where the *recipient* is — not
+  // where the owner is, because the two are different people on the escalation rungs.
+  const calendar = await workingCalendarFor(ctx, audience.userId)
+  const scheduledFor = shiftToWorkingDay(calendar, at)
+
   const message = stage.template
     .replace('{due}', input.dueAt.toISOString().slice(0, 10))
     .replace('{owner}', input.ownerName ?? 'The owner')
@@ -252,7 +259,7 @@ export async function scheduleLadder(
       ${audience.userId === input.recipientUserId ? null : input.recipientUserId},
       ${input.subjectType}, ${input.subjectId},
       ${stage.stage}, ${stage.channel}, ${`${input.subjectLabel} — ${message}`},
-      ${ctx.sql.json(asJson(NUDGE_ACTIONS))}, ${at}, ${input.agentId ?? null}, ${ctx.userId}
+      ${ctx.sql.json(asJson(NUDGE_ACTIONS))}, ${scheduledFor}, ${input.agentId ?? null}, ${ctx.userId}
     )
     ON CONFLICT DO NOTHING`
 
@@ -368,7 +375,7 @@ export async function deliverDueNudges(
      */
     subjectId?: string
   } = {},
-): Promise<{ delivered: number; heldByBudget: number; cancelled: number }> {
+): Promise<{ delivered: number; heldByBudget: number; heldByCalendar: number; cancelled: number }> {
   const now = options.now ?? new Date()
 
   // Anything whose work is already done cancels itself before anybody is contacted.
@@ -403,8 +410,31 @@ export async function deliverDueNudges(
 
   let delivered = 0
   let heldByBudget = 0
+  let heldByCalendar = 0
+
+  // One lookup per person rather than per reminder: a backlog after a long weekend is
+  // mostly the same handful of people.
+  const calendars = new Map<string, Awaited<ReturnType<typeof workingCalendarFor>>>()
 
   for (const nudge of due) {
+    // The gate that makes the guarantee true regardless of when the row was written: a
+    // reminder scheduled before the calendar was set, or before the holiday was known, is
+    // still not delivered on a day its recipient does not work. It waits, and says why —
+    // a reminder that silently did not arrive is indistinguishable from a bug.
+    let calendar = calendars.get(nudge.recipient_user_id)
+    if (!calendar) {
+      calendar = await workingCalendarFor(ctx, nudge.recipient_user_id)
+      calendars.set(nudge.recipient_user_id, calendar)
+    }
+    const resting = restReason(calendar, now)
+    if (resting) {
+      await ctx.sql`
+        UPDATE nudges SET held_reason = ${`Not delivered: ${resting} where they work.`}, updated_at = now()
+        WHERE organization_id = ${ctx.organizationId} AND id = ${nudge.id}`
+      heldByCalendar += 1
+      continue
+    }
+
     // Re-read the budget per nudge: the count comes from the rows this transaction has
     // already written, so there is no separate tally to drift out of step with them.
     const budget = await nudgeBudget(ctx, nudge.recipient_user_id)
@@ -422,7 +452,7 @@ export async function deliverDueNudges(
     }
 
     await ctx.sql`
-      UPDATE nudges SET delivered_at = now(), channel = ${channel}
+      UPDATE nudges SET delivered_at = now(), channel = ${channel}, held_reason = NULL
       WHERE organization_id = ${ctx.organizationId} AND id = ${nudge.id}`
     await ctx.sql`
       INSERT INTO notifications (
@@ -453,7 +483,7 @@ export async function deliverDueNudges(
     delivered += 1
   }
 
-  return { delivered, heldByBudget, cancelled: cancelled.length }
+  return { delivered, heldByBudget, heldByCalendar, cancelled: cancelled.length }
 }
 
 /**

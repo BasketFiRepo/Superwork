@@ -1,4 +1,4 @@
-import { listDepartments, listTeams, PermissionError } from '@superwork/core'
+import { CALENDARS, listDepartments, listTeams, PermissionError } from '@superwork/core'
 import { can } from '@superwork/auth'
 import { Departments } from '@/components/Departments'
 import { requireSession, withActor } from '@/lib/session'
@@ -64,12 +64,20 @@ export default async function TeamsPage() {
         <>
         <Departments
           canEdit={data?.canEdit ?? false}
+          calendars={CALENDARS.map((calendar) => ({
+            id: calendar.id,
+            label: calendar.label,
+            description: calendar.description,
+          }))}
           departments={(data?.departments ?? []).map((department) => ({
             id: department.id,
             name: department.name,
             path: department.path,
             depth: department.depth,
             parentId: department.parentId,
+            holidayCalendar: department.holidayCalendar,
+            effectiveHolidayCalendar: department.effectiveHolidayCalendar,
+            holidayCalendarFrom: department.holidayCalendarFrom,
             counts: department.counts,
           }))}
         />

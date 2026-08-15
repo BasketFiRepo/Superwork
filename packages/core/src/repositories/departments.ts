@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { calendarInfo } from '../holidays.js'
 
 /**
  * Departments (§4.3).
@@ -29,6 +30,12 @@ export interface DepartmentView {
   depth: number
   parentId: string | null
   timezone: string | null
+  /** The calendar set on this department itself, or null when it inherits one. */
+  holidayCalendar: string | null
+  /** What actually governs it, after inheriting from the nearest ancestor that sets one. */
+  effectiveHolidayCalendar: string | null
+  /** The department the effective calendar came from, when it was not this one. */
+  holidayCalendarFrom: string | null
   legalEntityId: string | null
   /** What would be orphaned by archiving it, so the refusal can say what it is protecting. */
   counts: { people: number; children: number; tasks: number; projects: number }
@@ -51,6 +58,24 @@ export async function listDepartments(ctx: TenantContext, actor: Actor): Promise
 
   return ctx.sql<DepartmentView[]>`
     SELECT d.id, d.name, d.path, d.depth, d.parent_id AS "parentId", d.timezone,
+           d.holiday_calendar AS "holidayCalendar",
+           -- Inherited from the nearest ancestor that sets one, so a company can say
+           -- "we are in England and Wales" once instead of on every department (ADR 0036:
+           -- the tree's shape is the database's, and so is what hangs off it).
+           coalesce(d.holiday_calendar, (
+             SELECT a.holiday_calendar FROM departments a
+             WHERE a.organization_id = d.organization_id AND a.deleted_at IS NULL
+               AND a.holiday_calendar IS NOT NULL
+               AND d.path LIKE a.path || ' / %'
+             ORDER BY a.depth DESC LIMIT 1
+           )) AS "effectiveHolidayCalendar",
+           (CASE WHEN d.holiday_calendar IS NOT NULL THEN NULL ELSE (
+             SELECT a.name FROM departments a
+             WHERE a.organization_id = d.organization_id AND a.deleted_at IS NULL
+               AND a.holiday_calendar IS NOT NULL
+               AND d.path LIKE a.path || ' / %'
+             ORDER BY a.depth DESC LIMIT 1
+           ) END) AS "holidayCalendarFrom",
            d.legal_entity_id AS "legalEntityId", d.created_at AS "createdAt",
            json_build_object(
              'people', (SELECT count(*)::int FROM memberships m
@@ -121,12 +146,27 @@ export async function createDepartment(
 export async function updateDepartment(
   ctx: TenantContext,
   actor: Actor,
-  input: { id: string; name?: string; parentId?: string | null; timezone?: string | null },
+  input: {
+    id: string
+    name?: string
+    parentId?: string | null
+    timezone?: string | null
+    /** `null` clears it, so the department goes back to inheriting. */
+    holidayCalendar?: string | null
+  },
 ): Promise<DepartmentView[]> {
   guardWrite(ctx, actor)
 
-  const [before] = await ctx.sql<{ name: string; path: string; parentId: string | null }[]>`
-    SELECT name, path, parent_id AS "parentId" FROM departments
+  if (input.holidayCalendar !== undefined && input.holidayCalendar !== null) {
+    if (!calendarInfo(input.holidayCalendar)) {
+      throw new ValidationError('That is not a calendar this product knows how to work out.')
+    }
+  }
+
+  const [before] = await ctx.sql<
+    { name: string; path: string; parentId: string | null; holidayCalendar: string | null }[]
+  >`
+    SELECT name, path, parent_id AS "parentId", holiday_calendar AS "holidayCalendar" FROM departments
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.id} AND deleted_at IS NULL`
   if (!before) throw new NotFoundError()
 
@@ -142,6 +182,7 @@ export async function updateDepartment(
     UPDATE departments
     SET name = ${name}, parent_id = ${parentId},
         timezone = ${input.timezone === undefined ? sql`timezone` : input.timezone},
+        holiday_calendar = ${input.holidayCalendar === undefined ? sql`holiday_calendar` : input.holidayCalendar},
         updated_at = now()
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}
     RETURNING path`
@@ -152,8 +193,8 @@ export async function updateDepartment(
     action: 'department.updated',
     entityType: 'department',
     entityId: input.id,
-    before: { name: before.name, path: before.path, parentId: before.parentId },
-    after: { name, path: row!.path, parentId },
+    before: { name: before.name, path: before.path, parentId: before.parentId, holidayCalendar: before.holidayCalendar },
+    after: { name, path: row!.path, parentId, holidayCalendar: input.holidayCalendar ?? before.holidayCalendar },
   })
 
   return listDepartments(ctx, actor)

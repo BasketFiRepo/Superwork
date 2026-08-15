@@ -209,9 +209,10 @@ async function main(): Promise<void> {
               return deliverDueNudges(ctx)
             },
           )
-          if (outcome.delivered || outcome.heldByBudget || outcome.cancelled) {
+          if (outcome.delivered || outcome.heldByBudget || outcome.heldByCalendar || outcome.cancelled) {
             console.log(
               `[nudges] ${org.id}: ${outcome.delivered} delivered, ${outcome.heldByBudget} held by the daily budget, ` +
+                `${outcome.heldByCalendar} held because it is not a working day for them, ` +
                 `${outcome.cancelled} cancelled because the work was already done`,
             )
           }

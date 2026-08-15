@@ -21,10 +21,27 @@ export interface DepartmentRow {
   path: string
   depth: number
   parentId: string | null
+  holidayCalendar: string | null
+  effectiveHolidayCalendar: string | null
+  holidayCalendarFrom: string | null
   counts: { people: number; children: number; tasks: number; projects: number }
 }
 
-export function Departments({ departments, canEdit }: { departments: DepartmentRow[]; canEdit: boolean }) {
+export interface CalendarOption {
+  id: string
+  label: string
+  description: string
+}
+
+export function Departments({
+  departments,
+  calendars,
+  canEdit,
+}: {
+  departments: DepartmentRow[]
+  calendars: CalendarOption[]
+  canEdit: boolean
+}) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -73,11 +90,19 @@ export function Departments({ departments, canEdit }: { departments: DepartmentR
           a department moves everything under it, including the path every screen shows.
         </p>
 
+        <p className="prose small secondary" style={{ margin: 0 }} data-testid="calendar-explainer">
+          The working calendar decides which days the system will not chase these people on.
+          Set it once near the top of the tree and everything underneath inherits it. It can
+          only ever quieten the reminders — nothing here makes the product chase anybody
+          harder, or on a day it otherwise would not.
+        </p>
+
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
                 <th>Department</th>
+                <th style={{ width: 220 }}>Working calendar</th>
                 <th style={{ width: 90 }}>People</th>
                 <th style={{ width: 90 }}>Tasks</th>
                 <th style={{ width: 100 }}>Projects</th>
@@ -92,6 +117,43 @@ export function Departments({ departments, canEdit }: { departments: DepartmentR
                       {department.name}
                     </span>
                     {department.depth > 0 ? <div className="small muted">{department.path}</div> : null}
+                  </td>
+                  <td className="small secondary">
+                    {canEdit ? (
+                      <select
+                        className="input"
+                        aria-label={`Working calendar for ${department.name}`}
+                        data-testid="department-calendar"
+                        disabled={busy}
+                        value={department.holidayCalendar ?? ''}
+                        onChange={(event) =>
+                          post({
+                            action: 'update',
+                            id: department.id,
+                            holidayCalendar: event.target.value || null,
+                          })
+                        }
+                      >
+                        <option value="">
+                          {department.holidayCalendarFrom
+                            ? `Inherited from ${department.holidayCalendarFrom}`
+                            : 'Not set — every day is chased'}
+                        </option>
+                        {calendars.map((calendar) => (
+                          <option key={calendar.id} value={calendar.id}>
+                            {calendar.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      calendars.find((calendar) => calendar.id === department.effectiveHolidayCalendar)?.label ??
+                      'Not set'
+                    )}
+                    {!department.holidayCalendar && department.holidayCalendarFrom ? (
+                      <div className="small muted">
+                        {calendars.find((c) => c.id === department.effectiveHolidayCalendar)?.label}
+                      </div>
+                    ) : null}
                   </td>
                   <td className="num">{department.counts.people}</td>
                   <td className="num">{department.counts.tasks}</td>
