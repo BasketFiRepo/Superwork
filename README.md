@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 759 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 774 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines → jurisdiction history → invitations
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines → jurisdiction history → invitations → plan limits
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -617,6 +617,37 @@ whenever a person already existed**.
 
 **Settings → Members**, and `/invite/<token>` for the other half. See ADR 0029.
 
+## What the company pays for, and what that limits
+
+The plan was stated in three places, agreeing by luck. `plan_limits` was seeded and read by
+nothing — while the config module's own comment said *"the database is the source of truth
+at runtime so limits can be changed without a deploy"*, and `checkSpendLimits` read the
+compile-time constant, so a limit could not be changed without a deploy. `subscriptions`
+held a tier, a seat count and a spend cap that nothing consulted. And
+`organizations.plan_tier` was the one the runtime used, with nothing keeping it in step.
+
+The sharpest consequence was a refusal: on hitting the cap the agent stops and says *"an
+admin can raise the cap in Settings → Billing"* — **and there was no such control on that
+screen**. A refusal that names a setting which does not exist turns a working stop into a
+bug report.
+
+- **One resolved answer, from the database**, with a missing plan row falling back to the
+  built-in defaults rather than to *no limit* — and the screen states which it used.
+- **An organization may tighten, never widen.** A limit a tenant can raise on its own is not
+  a limit. Same rule as an approval policy, for the same reason.
+- **Changing the plan is not a setting.** No self-serve tier control, because what a company
+  pays for is a commercial agreement, and a button that appeared to change it would be a
+  fake integration.
+- **The tenant cannot rewrite the plans themselves** — `plan_limits` is not a tenant table
+  and the application role has no write grant on it. That was already true; it is now
+  asserted, because it is what makes the tightening rule mean anything.
+- **The database keeps the two tiers in step**, rather than trusting application code to
+  remember that two columns must agree.
+- **Seats are enforced where they are consumed**, and an outstanding invitation holds one.
+  The refusal does the arithmetic.
+
+**Settings → Usage and cost.** See ADR 0030.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -989,10 +1020,9 @@ away. They are evidence about query shape, not a 100,000-user result.
   so none is silently affecting behaviour.
 - The demo organization ships with no feature-flag overrides, because seeding one would mean
   turning a feature off in the demo.
-- Seats are not enforced. `plan_limits.seats` and `subscriptions.seats_purchased` are both
-  unread, and an invitation is where a seat check belongs — but what happens at the limit
-  (refuse, warn, allow with overage) is a product decision, and inventing an answer would be
-  worse than the stated gap.
+- Only the spend caps and seats stop anything. `plan_limits.agent_runs_per_month`,
+  `documents_indexed`, `storage_gb` and `workflow_runs_per_month` are resolved and displayed
+  but enforced nowhere — naming that is better than four more half-checks.
 - Members can be invited and listed but not edited from the Members screen. Changing a role
   or deactivating somebody still lives in Identity, with the directory sync.
 
@@ -1092,6 +1122,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0027](docs/adr/0027-a-reporting-line-routes-accountability-not-visibility.md) | A reporting line routes accountability, not visibility |
 | [0028](docs/adr/0028-the-database-writes-the-history.md) | The database writes the history |
 | [0029](docs/adr/0029-an-invitation-is-a-credential.md) | An invitation is a credential |
+| [0030](docs/adr/0030-a-limit-a-tenant-can-raise-is-not-a-limit.md) | A limit a tenant can raise is not a limit |
 
 ## Configuration
 

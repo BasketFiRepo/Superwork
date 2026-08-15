@@ -1,0 +1,11 @@
+DROP TRIGGER IF EXISTS subscriptions_sync_plan_tier ON subscriptions;
+DROP FUNCTION IF EXISTS sw_sync_plan_tier();
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_user_cap_not_negative;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS caps_set_at;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS caps_set_by;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS caps_reason;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS per_user_daily_cap_cents;
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_cap_not_negative;
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_seats_positive;
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_status_known;
+DROP INDEX IF EXISTS subscriptions_one_per_org;

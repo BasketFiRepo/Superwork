@@ -720,6 +720,30 @@ try {
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
 
+  // ---- What the company pays for, and what it limits ----------------------
+  await page.goto(`${BASE}/settings/billing`)
+  await page.waitForSelector('[data-testid="plan"]', { timeout: 15_000 })
+  const planText = await page.locator('[data-testid="plan"]').innerText()
+  ok('The billing screen states the plan and its limits', /Seats/.test(planText) && /Monthly AI spend/.test(planText))
+  ok('And seats count what is actually in use',
+    /\d+ \/ \d+/.test(planText), planText.split('\n').find((line) => /\d+ \/ \d+/.test(line)) ?? '')
+
+  await page.locator('[data-testid="plan-edit"]').click()
+  await page.waitForSelector('[data-testid="plan-editor"]', { timeout: 15_000 })
+  ok('A limit is not changed without a reason',
+    await page.locator('[data-testid="plan-save"]').isDisabled())
+  ok('And the screen says it can tighten but never widen',
+    /never above/i.test(await page.locator('[data-testid="plan-tighten-only"]').innerText()))
+
+  // The control the refusal message has always pointed at.
+  await page.fill('#cap-monthly', '25')
+  await page.fill('#cap-reason', 'Trialling the agent on a small budget this month.')
+  await page.locator('[data-testid="plan-save"]').click()
+  await page.waitForTimeout(1500)
+  ok('Tightening a cap lands, and says who set it and why',
+    /small budget/i.test(await page.locator('[data-testid="plan"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/plan.png`, fullPage: true })
+
   // ---- Adding a person to the organization --------------------------------
   await page.goto(`${BASE}/settings/members`)
   await page.waitForSelector('[data-testid="members"]', { timeout: 15_000 })

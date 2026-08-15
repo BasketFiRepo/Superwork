@@ -3,6 +3,7 @@ import { adminSql, type Role, type TenantContext } from '@superwork/db'
 import { can, hashPassword, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { seatCheck } from '../subscription.js'
 
 /**
  * Invitations (§4.1, §23.2).
@@ -133,6 +134,12 @@ export async function inviteMember(
   if (existing) {
     throw new ValidationError('That person is already a member of this organization.')
   }
+
+  // Seats are a hard limit: an organization bought a number, and an outstanding invitation
+  // holds one. Counting only accepted invitations lets somebody invite a hundred people
+  // onto twenty-five seats and find out when they arrive (ADR 0030).
+  const seats = await seatCheck(ctx)
+  if (!seats.allow) throw new ValidationError(seats.reason)
 
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + INVITATION_TTL_DAYS * 86_400_000)

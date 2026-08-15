@@ -43,6 +43,7 @@ import {
   archiveTeam,
   composeBriefingFacts,
   confirmMemory,
+  checkSpendLimits,
   createTask,
   createLegalEntity,
   createTeam,
@@ -50,6 +51,7 @@ import {
   deleteDocument,
   deliverDueNudges,
   documentAudience,
+  effectiveLimits,
   getDocument,
   getRun,
   getTask,
@@ -84,6 +86,8 @@ import {
   scheduleLadder,
   setFlag,
   setJurisdiction,
+  setOrganizationCaps,
+  subscription,
   setPolicyEnabled,
   updateTask,
   scheduleFor,
@@ -1497,6 +1501,83 @@ try {
   ok('The joiner’s membership is cleaned up, and their audit trail is not',
     orphaned[0]!.count === 0)
 
+  // ---- What the company is paying for, and what that actually limits ---------
+  console.log('\nThe plan is read from the database, and it stops things…\n')
+
+  const plan = await withTenant(session, async (ctx) => subscription(ctx, await loadActor(ctx)))
+  ok('The seeded subscription is read at last', plan.tier === 'business', `${plan.tier} · ${plan.status}`)
+  ok('And the limits come from the table rather than a constant',
+    plan.limits.source.limits === 'database', plan.limits.source.limits)
+  ok('Seats count the people and the invitations nobody has accepted',
+    plan.seatsUsed > 0 && plan.seatsRemaining !== null,
+    `${plan.seatsUsed} of ${plan.seatsPurchased} used`)
+
+  // A tenant cannot edit the plans themselves — `plan_limits` is not a tenant table and the
+  // application role has no write grant on it. Changing what a plan allows is an operator
+  // action, which is exactly right: otherwise a limit is a suggestion.
+  const tenantEdit = await withTenant(session, async (ctx) =>
+    ctx.sql`UPDATE plan_limits SET ai_spend_cap_cents = 9999 WHERE tier = 'business'`.then(
+      () => 'allowed',
+      (error: Error) => error.message,
+    ),
+  ).catch((error: Error) => error.message)
+  ok('A tenant cannot rewrite the plans themselves',
+    /permission denied/i.test(tenantEdit), tenantEdit.slice(0, 50))
+
+  // The claim the config module always made and nothing honoured: an operator moves it and
+  // the running system follows, with no deploy.
+  await adminSql()`UPDATE plan_limits SET ai_spend_cap_cents = 9999 WHERE tier = 'business'`
+  const withoutDeploy = await withTenant(session, async (ctx) => (await effectiveLimits(ctx)).aiSpendCapCents)
+  await adminSql()`UPDATE plan_limits SET ai_spend_cap_cents = 250000 WHERE tier = 'business'`
+  ok('A limit changes without a deploy, which the comment always promised',
+    withoutDeploy === 9999, `${withoutDeploy}`)
+
+  const raised = await withTenant(session, async (ctx) =>
+    setOrganizationCaps(ctx, await loadActor(ctx), {
+      aiSpendCapCents: 999_999_999,
+      perUserDailyCapCents: null,
+      reason: 'Trying to buy more with a form.',
+    }).then(() => 'allowed', (error: Error) => error.message),
+  )
+  ok('An organization cannot raise a cap above its plan',
+    /cannot be raised above the plan/i.test(raised), raised.slice(0, 60))
+
+  const tightened = await withTenant(session, async (ctx) =>
+    setOrganizationCaps(ctx, await loadActor(ctx), {
+      aiSpendCapCents: 1_000,
+      perUserDailyCapCents: null,
+      reason: 'Trialling the agent on a small budget this month.',
+    }),
+  )
+  ok('But it can tighten one, and the record says who and why',
+    tightened.limits.aiSpendCapCents === 1_000 && Boolean(tightened.capsSetByName),
+    `${tightened.capsSetByName}: ${tightened.capsReason}`)
+
+  const stopped = await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      INSERT INTO usage_records (organization_id, user_id, unit, quantity, cost_cents, created_by)
+      VALUES (${ctx.organizationId}, ${session.userId}, 'ai_tokens', 1, 1200, ${session.userId})`
+    return checkSpendLimits(ctx, 'business')
+  })
+  ok('And the agent stops at the number on the screen, not the plan’s',
+    !stopped.allow && /1,?0?0?\.00|10\.00/.test(stopped.reason), stopped.reason.slice(0, 70))
+  ok('The refusal points at a screen that now has the control on it',
+    /Settings → Billing/.test(stopped.reason))
+
+  // Put the demo back: the cap and the spend this beat invented.
+  await withTenant(session, async (ctx) => {
+    await setOrganizationCaps(ctx, await loadActor(ctx), {
+      aiSpendCapCents: null,
+      perUserDailyCapCents: null,
+      reason: 'Restoring the plan’s own limits after the loop.',
+    })
+    await ctx.sql`
+      DELETE FROM usage_records
+      WHERE organization_id = ${ctx.organizationId} AND unit = 'ai_tokens' AND cost_cents = 1200`
+  })
+  const restoredPlan = await withTenant(session, async (ctx) => checkSpendLimits(ctx, 'business'))
+  ok('The demo is left running again', restoredPlan.allow)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1515,7 +1596,8 @@ try {
         'from the rows that always stated them, and cannot be configured to let a change through; and an \n' +
         'escalation reached a manager instead of the person it was written about, after they had been \n' +
         'asked themselves and told that it happened; and a person was invited into the company, joined, \n' +
-        'and could not be invited above the role of whoever invited them.\n',
+        'and could not be invited above the role of whoever invited them; and the plan a company pays \n' +
+        'for became one number, read from the database, that an organization can tighten and never widen.\n',
   )
 } catch (error) {
   console.error(error)

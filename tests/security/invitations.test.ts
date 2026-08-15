@@ -9,6 +9,8 @@ import {
   NotFoundError,
   PermissionError,
   revokeInvitation,
+  seatCheck,
+  seatsInUse,
   ValidationError,
 } from '@superwork/core'
 import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixtures.js'
@@ -47,6 +49,13 @@ beforeAll(async () => {
     INSERT INTO memberships (organization_id, user_id, role, is_demo)
     VALUES (${org.organizationId}, ${adminId}, 'admin', true)`
   adminSession = { organizationId: org.organizationId, userId: adminId, timezone: 'Europe/London' }
+
+  // A fixture organization has no subscription, so it falls back to the free tier's three
+  // seats — and it already has four people. That is the seat check working; a real
+  // organization has a plan, so this one gets one.
+  await adminSql()`
+    INSERT INTO subscriptions (organization_id, tier, seats_purchased, created_by)
+    VALUES (${org.organizationId}, 'business', 25, ${org.ownerId})`
 })
 
 afterAll(async () => {
@@ -127,6 +136,34 @@ describe('sending one', () => {
         }),
       ),
     ).rejects.toThrow(/above your own role/i)
+  })
+
+  it('refuses when every seat is taken, counting invitations nobody has accepted', async () => {
+    // Seats are a hard limit: an organization bought a number. An outstanding invitation
+    // holds one, or somebody can invite a hundred people onto twenty-five seats and find
+    // out when they arrive.
+    const used = await withTenant(session, async (ctx) => seatsInUse(ctx))
+    await adminSql()`
+      UPDATE subscriptions SET seats_purchased = ${used}
+      WHERE organization_id = ${org.organizationId}`
+
+    await expect(
+      withTenant(session, async (ctx) =>
+        inviteMember(ctx, await loadActor(ctx), {
+          email: 'overflow@northwind.example',
+          role: 'member',
+          reason: 'One person too many.',
+        }),
+      ),
+    ).rejects.toThrow(/seats are taken/i)
+
+    // And the refusal does the arithmetic rather than saying "no seats".
+    const check = await withTenant(session, async (ctx) => seatCheck(ctx))
+    expect(check.allow).toBe(false)
+    expect(check.reason).toMatch(new RegExp(`All ${used} seats`))
+
+    await adminSql()`
+      UPDATE subscriptions SET seats_purchased = 25 WHERE organization_id = ${org.organizationId}`
   })
 
   it('is not something an ordinary member can do', async () => {

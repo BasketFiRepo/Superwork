@@ -1,5 +1,6 @@
 import type { TenantContext } from '@superwork/db'
-import { DEFAULT_PLAN_LIMITS, type PlanTier } from '@superwork/config'
+import type { PlanTier } from '@superwork/config'
+import { effectiveLimits } from './subscription.js'
 
 /**
  * Metering (§19). Usage is recorded in the same transaction as the action wherever
@@ -42,8 +43,16 @@ export interface SpendSnapshot {
   userDailyCapCents: number | null
 }
 
-export async function spendSnapshot(ctx: TenantContext, tier: PlanTier): Promise<SpendSnapshot> {
-  const limits = DEFAULT_PLAN_LIMITS[tier]
+export async function spendSnapshot(ctx: TenantContext, _tier?: PlanTier): Promise<SpendSnapshot> {
+  // Resolved from the database — the plan's row, then this organization's own tightening —
+  // rather than from `DEFAULT_PLAN_LIMITS`. The config module's comment always said the
+  // table was the runtime source of truth; until now nothing read it, so a limit could not
+  // be changed without a deploy (§19, ADR 0030).
+  //
+  // `tier` is still accepted so callers need not change, and deliberately ignored: it came
+  // from `organizations.plan_tier`, which is now kept in step with the subscription by the
+  // database rather than passed in by whoever happened to read it first.
+  const limits = await effectiveLimits(ctx)
   const [org] = await ctx.sql<{ total: string }[]>`
     SELECT coalesce(sum(cost_cents), 0)::text AS total
     FROM usage_records
