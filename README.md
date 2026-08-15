@@ -675,6 +675,29 @@ like a quiet one.
 
 **Insights → each watcher's row.** See ADR 0031.
 
+## Who is on a project
+
+`project_members` has existed since migration 0002, written by the seed alone and read by
+nothing. Being on a project was a row in a table: it granted nothing, appeared nowhere, and
+could not be changed — while the page answered *"who is doing this?"* with one chip naming
+the owner and a list of who it had been **shared** with. Those are different questions, and
+the product could only express the second: the only way to give somebody access to a project
+they were actually working on was to record them as an outsider being shown it.
+
+- **Being on a project lends a read of it and of the work inside it** — up to the reader's
+  own clearance, and never a say over either. The same rule a container share follows, for
+  the same reason: the set of tasks changes daily, so whoever staffs it cannot see what they
+  are handing over.
+- **A roster is not a share, and the product never says it is.** The allow-reason reads
+  *"you are on this project"*, and the person's own record lists the projects they are on
+  beside the things they have been shared.
+- **Who owns a project is a property of the project.** `projects.owner_id` is the fact and
+  the roster's owner row is derived from it by the database; handing a project over moves
+  the owner row and leaves the previous owner on the work as a contributor.
+- **Staffing needs a say over the project**, not over the company's org structure.
+
+**Any project → "Who is on it".** See ADR 0032.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1151,6 +1174,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0029](docs/adr/0029-an-invitation-is-a-credential.md) | An invitation is a credential |
 | [0030](docs/adr/0030-a-limit-a-tenant-can-raise-is-not-a-limit.md) | A limit a tenant can raise is not a limit |
 | [0031](docs/adr/0031-a-watcher-that-is-right-and-unwelcome-is-not-one-that-is-wrong.md) | A watcher that is right and unwelcome is not one that is wrong |
+| [0032](docs/adr/0032-being-on-a-project-lends-a-read-not-a-say.md) | Being on a project lends a read, not a say |
 
 ## Configuration
 

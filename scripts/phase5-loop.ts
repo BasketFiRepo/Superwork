@@ -95,6 +95,9 @@ import {
   setWorkflowSchedule,
   trustLedger,
   recordInsightFeedback,
+  addProjectMember,
+  projectRoster,
+  removeProjectMember,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -1086,6 +1089,77 @@ try {
       listTasks(ctx, await loadActor(ctx), { projectId: project.id, limit: 200 }),
     )).tasks.length === 0)
 
+  // ---- Being on it, which is not the same as being given it ----------------
+  console.log('\nAnd then they are put on the project rather than shown it…\n')
+
+  const staffed = await withTenant(session, async (ctx) =>
+    addProjectMember(ctx, await loadActor(ctx), {
+      projectId: project.id,
+      userId: contractor!.id,
+      role: 'contributor',
+      reason: 'Doing the delivery-plan work with us, not just reading it.',
+    }),
+  )
+  ok('The roster says who is on it, and why', staffed.some((row) => row.userId === contractor!.id),
+    staffed.map((row) => `${row.name} ${row.role}`).join(', ').slice(0, 70))
+  ok('The owner is on it without anybody adding them',
+    staffed.some((row) => row.derived && row.role === 'owner'))
+
+  const onIt = await withTenant(asContractor, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const inside = (await listTasks(ctx, actor, { projectId: project.id, limit: 200 })).tasks
+    const first = inside[0]
+    return {
+      projects: (await listProjects(ctx, actor)).map((row) => row.id),
+      tasks: inside.length,
+      why: can(actor, 'project:read', {
+        type: 'project',
+        id: project.id,
+        organizationId: ctx.organizationId,
+        sensitivity: 'public',
+      }).reason,
+      changes: first
+        ? await updateTask(ctx, actor, { id: first.id, title: 'Renamed by somebody on it' }).then(
+            () => true,
+            () => false,
+          )
+        : null,
+    }
+  })
+  ok('Being on a project opens it, with nobody having shared it', onIt.projects.includes(project.id))
+  ok('And reaches the work inside it', onIt.tasks > 0, `${onIt.tasks} tasks`)
+  ok('The reason says which of the two it was', /you are on this project/i.test(onIt.why), onIt.why)
+  ok('It still lends a read, never a say', onIt.changes !== true)
+
+  const ownerMoved = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [before] = await ctx.sql<{ ownerId: string }[]>`
+      SELECT owner_id AS "ownerId" FROM projects WHERE id = ${project.id}`
+    await ctx.sql`UPDATE projects SET owner_id = ${contractor!.id} WHERE id = ${project.id}`
+    const handed = await projectRoster(ctx, actor, project.id)
+    await ctx.sql`UPDATE projects SET owner_id = ${before!.ownerId} WHERE id = ${project.id}`
+    return { handed, back: await projectRoster(ctx, actor, project.id), previous: before!.ownerId }
+  })
+  ok('Handing the project over moves the owner row with it, written by the database',
+    ownerMoved.handed.find((row) => row.userId === contractor!.id)?.role === 'owner')
+  ok('And leaves the previous owner on the work rather than off it',
+    ownerMoved.handed.find((row) => row.userId === ownerMoved.previous)?.role === 'contributor')
+
+  // Put the demo back: the contractor was on this project for one beat.
+  await withTenant(session, async (ctx) =>
+    removeProjectMember(ctx, await loadActor(ctx), {
+      projectId: project.id,
+      userId: contractor!.id,
+      reason: 'The delivery-plan work is finished.',
+    }),
+  )
+  const offIt = await withTenant(asContractor, async (ctx) =>
+    (await listProjects(ctx, await loadActor(ctx))).length,
+  )
+  ok('Taking them off takes the read with it', offIt === 0, `${offIt} projects still visible`)
+  ok('And the owner is back where they were',
+    ownerMoved.back.find((row) => row.userId === ownerMoved.previous)?.role === 'owner')
+
   // ---- A shelf, and the account it is not ----------------------------------
   console.log('\nA knowledge space is shared, and a company is shared differently…\n')
 
@@ -1720,7 +1794,8 @@ try {
         'and could not be invited above the role of whoever invited them; and the plan a company pays \n' +
         'for became one number, read from the database, that an organization can tighten and never widen; \n' +
         'and what people say when they throw an insight away is read at last, so a watcher they call wrong \n' +
-        'stops and one they had already handled keeps running.\n',
+        'stops and one they had already handled keeps running; and a project can finally say who is on it, \n' +
+        'which opens its work for them without handing them a say over it.\n',
   )
 } catch (error) {
   console.error(error)

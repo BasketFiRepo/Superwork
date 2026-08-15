@@ -3,6 +3,7 @@ import type { Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
 import { writeAudit } from './audit.js'
 import { reportingFor } from './org-chart.js'
+import { projectsFor } from './repositories/project-members.js'
 
 /**
  * The personal record (§29.3, §24 Phase 3 acceptance).
@@ -64,6 +65,12 @@ export interface PersonalRecord {
     managers: { name: string; type: string }[]
     reports: { name: string; type: string }[]
   }
+  /**
+   * The projects you are on. Being on one lends a read of it and of the work inside it
+   * (ADR 0032), so leaving it out would make "why can I see that?" an incomplete answer —
+   * the share list would show nothing and the access would still be there.
+   */
+  projects: { name: string; role: string; reason: string | null }[]
   rights: { label: string; description: string; action: string }[]
 }
 
@@ -96,6 +103,8 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
 
   // Where an escalation about you would go, and who you would receive one about.
   const reporting = await reportingFor(ctx, actor, userId)
+  // And what you can reach because you are on it, rather than because somebody shared it.
+  const onProjects = await projectsFor(ctx, userId)
 
   const [counts] = await sql<
     {
@@ -242,6 +251,11 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
       managers: reporting.managers.map((line) => ({ name: line.managerName, type: line.type })),
       reports: reporting.reports.map((line) => ({ name: line.personName, type: line.type })),
     },
+    projects: onProjects.map((entry) => ({
+      name: entry.projectName,
+      role: entry.role,
+      reason: entry.reason,
+    })),
     rights: [
       {
         label: 'Download everything held about you',

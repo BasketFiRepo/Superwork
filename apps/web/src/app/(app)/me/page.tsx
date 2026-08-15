@@ -92,7 +92,49 @@ export default async function MePage() {
         )}
         <div className="panel-body hairline-top small muted">
           A share adds access to one specific thing and changes nothing about your role. This
-          list is the answer to “why can I see that?”.
+          list is the answer to “why can I see that?”, together with the projects you are on.
+        </div>
+      </section>
+
+      <section className="panel" data-testid="on-projects">
+        <div className="panel-header">
+          <h2>Projects you are on</h2>
+          <span className="small muted">
+            {record.projects.length === 0 ? 'None' : `${record.projects.length}`}
+          </span>
+        </div>
+        {record.projects.length === 0 ? (
+          <div className="panel-body">
+            <div className="empty small secondary">
+              You are not on any project&rsquo;s roster. You reach projects through your role,
+              department or team instead.
+            </div>
+          </div>
+        ) : (
+          <div className="panel-body-flush table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th style={{ width: 140 }}>Doing what</th>
+                  <th>Why you were put on it</th>
+                </tr>
+              </thead>
+              <tbody>
+                {record.projects.map((entry) => (
+                  <tr key={`${entry.name}-${entry.role}`} data-testid="on-project-row">
+                    <td>{entry.name}</td>
+                    <td className="small secondary">{entry.role}</td>
+                    <td className="small secondary">{entry.reason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="panel-body hairline-top small muted">
+          Being on a project lets you read it and the work inside it, up to your own clearance.
+          It gives you no say over either.
         </div>
       </section>
 

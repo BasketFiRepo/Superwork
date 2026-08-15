@@ -678,6 +678,11 @@ try {
     /A share adds access to one specific thing/i.test(
       await page.locator('[data-testid="shared-with-you"]').innerText(),
     ))
+  // Being on a project is the other half of that answer: it lends a read the share list
+  // knows nothing about, so leaving it out would make the record quietly incomplete.
+  const onProjects = await page.locator('[data-testid="on-projects"]').innerText()
+  ok('And says which projects you are on, and what that lends you',
+    /Being on a project lets you read it/i.test(onProjects))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/sharing.png`, fullPage: true })
 
   // ---- Who can find a document --------------------------------------------
@@ -730,6 +735,36 @@ try {
     /\d/.test(await page.locator('[data-testid="project-health-band"]').innerText()))
   ok('And the arithmetic behind the number, not just the number',
     /Overdue work/.test(await page.locator('.panel', { hasText: 'Why the score is what it is' }).first().innerText()))
+
+  // Who is on it, which is a different question from who it has been shared with — and the
+  // one the page could not answer at all until the roster was read (ADR 0032).
+  const rosterText = await page.locator('[data-testid="project-roster"]').innerText()
+  const rosterRows = await page.locator('[data-testid="roster-row"]').count()
+  ok('A project says who is on it', rosterRows > 0, `${rosterRows} people`)
+  ok('And that being on it lends a read, not a say',
+    /lends a read, never a say/i.test(rosterText) && /different from sharing it/i.test(rosterText))
+  ok('The owner cannot be taken off their own project',
+    await page.locator('[data-testid="roster-remove"]').first().isDisabled())
+
+  await page.locator('[data-testid="roster-add"]').click()
+  await page.waitForSelector('[data-testid="roster-editor"]', { timeout: 15_000 })
+  ok('Nobody is put on a project without saying why',
+    await page.locator('[data-testid="roster-confirm"]').isDisabled())
+  await page.selectOption('#roster-subject', { index: 1 })
+  await page.selectOption('#roster-role', 'reviewer')
+  await page.fill('#roster-reason', 'Reviewing the customs paperwork this month.')
+  await page.locator('[data-testid="roster-confirm"]').click()
+  const rosterLanded = await page
+    .waitForFunction(
+      () =>
+        /Reviewing the customs paperwork/i.test(
+          document.querySelector('[data-testid="project-roster"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Putting somebody on it lands, with the reason on the row', rosterLanded)
 
   const projectShareText = await page.locator('[data-testid="share-object"]').innerText()
   ok('Sharing a project says it reaches the work inside it',

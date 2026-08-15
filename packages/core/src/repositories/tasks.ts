@@ -91,11 +91,14 @@ export async function listTasks(
   // with you" and "you can see none of its tasks" are both true (ADR 0024). Read only —
   // `can()` refuses a container relation for any verb but read.
   const sharedProjects = sharedObjectIds(actor, 'project')
+  // Being on a project reaches its work for the same reason a project share does: "you are
+  // on this project" and "you can see none of its tasks" cannot both be true (ADR 0032).
+  const rosterProjects = actor.projectIds ?? []
 
   // A role with no grant of this kind at all can still have been *given* a row, and a gate
   // that throws before any row is considered denies the one thing a tuple exists to allow.
   // Refuse only when there is genuinely nothing to ask about.
-  if (scope === null && shared.length === 0 && sharedProjects.length === 0) {
+  if (scope === null && shared.length === 0 && sharedProjects.length === 0 && rosterProjects.length === 0) {
     const decision = can(actor, 'task:read', { type: 'task', organizationId: ctx.organizationId })
     throw new PermissionError(decision.reason)
   }
@@ -118,6 +121,12 @@ export async function listTasks(
             ${
               sharedProjects.length
                 ? sql`OR (t.project_id = ANY(${sharedProjects}::uuid[])
+                          AND p.sensitivity <= ${readCeiling(actor)}::sw_sensitivity)`
+                : sql``
+            }
+            ${
+              rosterProjects.length
+                ? sql`OR (t.project_id = ANY(${rosterProjects}::uuid[])
                           AND p.sensitivity <= ${readCeiling(actor)}::sw_sensitivity)`
                 : sql``
             }

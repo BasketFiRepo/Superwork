@@ -472,9 +472,21 @@ async function seedProjects(
                 ${milestone.status}, true, ${ctx.userId})`
     }
 
-    await ctx.sql`
-      INSERT INTO project_members (organization_id, project_id, user_id, role, is_demo, created_by)
-      VALUES (${ctx.organizationId}, ${row!.id}, ${userIds.get(project.ownerKey)!}, 'owner', true, ${ctx.userId})`
+    // The owner's roster row is written by the database from `projects.owner_id` (ADR 0032),
+    // so the seed does not write it — two writers is what was wrong here. Everybody the
+    // project has work assigned to goes on it, which is what a roster is for.
+    const workers = new Set(
+      TASK_TEMPLATES.filter((task) => task.project === project.key && task.assignee !== project.ownerKey).map(
+        (task) => task.assignee,
+      ),
+    )
+    for (const worker of workers) {
+      await ctx.sql`
+        INSERT INTO project_members (organization_id, project_id, user_id, role, reason, is_demo, created_by)
+        VALUES (${ctx.organizationId}, ${row!.id}, ${userIds.get(worker)!}, 'contributor',
+                ${'Carrying work on this project.'}, true, ${ctx.userId})
+        ON CONFLICT (project_id, user_id) WHERE deleted_at IS NULL DO NOTHING`
+    }
   }
   return ids
 }

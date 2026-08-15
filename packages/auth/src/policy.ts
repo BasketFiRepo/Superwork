@@ -25,6 +25,15 @@ export interface Actor {
    */
   relations?: ReadonlySet<string>
   /**
+   * The projects this actor is on the roster of (§17, ADR 0032).
+   *
+   * Deliberately not folded into `relations`. A roster is not a share — nobody handed the
+   * project over, the person is doing the work — and the refusal and the personal record
+   * both have to say which of the two it was. Loaded with the actor, like the tuples, so a
+   * check stays synchronous.
+   */
+  projectIds?: readonly string[]
+  /**
    * When this actor's session last re-proved its identity (§4.1), or null.
    *
    * Deliberately *not* an input to `can()`. A permission answers "may this person do this
@@ -153,6 +162,8 @@ function checkHumanPermissions(actor: Actor, resourceType: string, verb: string,
     // do with *this* thing — which is how sharing works without changing anybody's role.
     const granted = relationGrant(actor, resourceType, verb, resource)
     if (granted) return ALLOW(granted)
+    const onIt = rosterGrant(actor, verb, resource)
+    if (onIt) return ALLOW(onIt)
     return DENY(explainMissing(actor, resourceType, verb, resource))
   }
   return ALLOW(`Allowed by ${actor.role} role (${resourceType}:${verb}:${best}).`)
@@ -213,6 +224,37 @@ function relationGrant(actor: Actor, resourceType: string, verb: string, resourc
 }
 
 const ALL_RELATIONS = ['viewer', 'editor', 'approver', 'owner'] as const
+
+/**
+ * Being on a project's roster lends a read of it and of the work inside it (ADR 0032).
+ *
+ * Read only, and for the same reason a container share is read only: the set of tasks in a
+ * project changes daily, so whoever put somebody on it cannot see what they are handing
+ * over. Changing the project itself is granted on the project, where it can be seen.
+ *
+ * The clearance ceiling still applies — `can()` checks it after this — so being put on a
+ * confidential project does not make somebody cleared to read one. The container branch
+ * checks it here as well, because a task carries no classification of its own and would
+ * otherwise open through a project the reader cannot open.
+ */
+function rosterGrant(actor: Actor, verb: string, resource: Resource): string | null {
+  if (verb !== 'read') return null
+  const roster = actor.projectIds
+  if (!roster || roster.length === 0) return null
+
+  if (resource.type === 'project' && resource.id && roster.includes(resource.id)) {
+    return 'Allowed because you are on this project.'
+  }
+
+  for (const container of resource.containers ?? []) {
+    if (container.type !== 'project' || !roster.includes(container.id)) continue
+    if (container.sensitivity !== undefined && !sensitivityAtMost(container.sensitivity, readCeiling(actor))) {
+      continue
+    }
+    return 'Allowed because it belongs to a project you are on. That lends you a read of the work, not a say over it.'
+  }
+  return null
+}
 
 function scopeSatisfied(scope: PermissionScope, actor: Actor, resource: Resource): boolean {
   switch (scope) {
