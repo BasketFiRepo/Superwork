@@ -295,6 +295,54 @@ async function resolveAudience(
 }
 
 /**
+ * Opens a ladder for work that is near its date or past it.
+ *
+ * **Nothing in the product called `scheduleLadder`.** The ladder, the audience rules, the
+ * per-person budget, the manager escalation and the delivery pass all existed, and no code
+ * path ever started one — so `deliverDueNudges` ran on an empty queue on every tick, and the
+ * whole of §29.2 was reachable only from the acceptance loops. This is the missing link, and
+ * it is deliberately the dullest possible one: every open task with a date and an assignee
+ * gets the rung that fits today, and scheduling twice is already a no-op.
+ *
+ * Only tasks. An approval and a commitment have their own screens with their own decisions
+ * on them, and chasing somebody about one from here would be a second place to decide.
+ */
+export async function openLaddersForDueWork(
+  ctx: TenantContext,
+  options: { now?: Date; limit?: number } = {},
+): Promise<{ opened: number; considered: number }> {
+  const now = options.now ?? new Date()
+  // The ladder spans two days before the date to five after it. Outside that window there is
+  // no rung to open, so the sweep does not look.
+  const from = new Date(now.getTime() - 5 * 86_400_000)
+  const to = new Date(now.getTime() + 2 * 86_400_000)
+
+  const due = await ctx.sql<{ id: string; title: string; assigneeId: string; dueAt: Date }[]>`
+    SELECT t.id, t.title, t.assignee_id AS "assigneeId", t.due_at AS "dueAt"
+    FROM tasks t
+    WHERE t.organization_id = ${ctx.organizationId} AND t.deleted_at IS NULL
+      AND t.status NOT IN ('completed', 'cancelled')
+      AND t.assignee_id IS NOT NULL
+      AND t.due_at BETWEEN ${from} AND ${to}
+    ORDER BY t.due_at
+    LIMIT ${options.limit ?? 200}`
+
+  let opened = 0
+  for (const task of due) {
+    const outcome = await scheduleLadder(ctx, {
+      recipientUserId: task.assigneeId,
+      subjectType: 'task',
+      subjectId: task.id,
+      subjectLabel: task.title,
+      dueAt: task.dueAt,
+      now,
+    })
+    opened += outcome.scheduled
+  }
+  return { opened, considered: due.length }
+}
+
+/**
  * Delivers what is due, inside each person's shared budget. Returns what went out and
  * what was held back, because a silently dropped nudge is indistinguishable from a bug.
  */

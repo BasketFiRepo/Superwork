@@ -204,6 +204,35 @@ try {
   }
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/watchers.png`, fullPage: true })
 
+  // ---- Reminders ----------------------------------------------------------
+  // The ladder's last two rungs are declared in-app and there was no in-app anything; every
+  // delivery wrote a notification nothing read. This is where they arrive now.
+  await page.goto(`${BASE}/reminders`)
+  await page.waitForSelector('[data-testid="reminders-open"]', { timeout: 15_000 })
+  const remindersText = await page.locator('main').innerText()
+  ok('Reminders says how often you can be contacted at all',
+    /times a day in total/i.test(remindersText) && /cannot be raised by configuration/i.test(remindersText))
+  ok('And that nobody else can read the page',
+    /Nobody but you can read this page/i.test(remindersText))
+  ok('Notifications have somewhere to arrive',
+    (await page.locator('[data-testid="notifications"]').count()) === 1)
+
+  // The preferences the briefing scheduler has read since Phase 2, which nothing could set.
+  await page.waitForSelector('[data-testid="notification-preferences"]', { timeout: 15_000 })
+  await page.selectOption('#briefing-hour', '6')
+  await page.locator('[data-testid="preferences-save"]').click()
+  const prefsSaved = await page
+    .waitForFunction(
+      () => /the next briefing follows this/i.test(document.querySelector('main')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('When you hear from it is something you can set', prefsSaved)
+  ok('And what is stored but not yet honoured says so rather than pretending',
+    /Coming soon/i.test(await page.locator('[data-testid="notification-preferences"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/reminders.png`, fullPage: true })
+
   // ---- Personal record ----------------------------------------------------
   await page.goto(`${BASE}/me`)
   await page.waitForSelector('[data-testid="tracked"]', { timeout: 15_000 })
@@ -817,6 +846,24 @@ try {
   ok('Tightening a cap lands, and says who set it and why',
     /small budget/i.test(await page.locator('[data-testid="plan"]').innerText()))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/plan.png`, fullPage: true })
+
+  // Put the demo back through the same control, which is the one that clears an
+  // organization's own cap. Leaving £25 in place caps the whole demo at a quarter of its
+  // plan, and the phase 5 loop — which asserts that a *plan* limit reaches the runtime —
+  // then reads this number instead and fails somewhere else entirely.
+  await page.locator('[data-testid="plan-edit"]').click()
+  await page.waitForSelector('[data-testid="plan-editor"]', { timeout: 15_000 })
+  await page.fill('#cap-monthly', '')
+  await page.fill('#cap-reason', 'The walkthrough is finished with it.')
+  await page.locator('[data-testid="plan-save"]').click()
+  const capCleared = await page
+    .waitForFunction(
+      () => /finished with it/i.test(document.querySelector('[data-testid="plan"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And clearing it puts the plan’s own limit back', capCleared)
 
   // ---- Adding a person to the organization --------------------------------
   await page.goto(`${BASE}/settings/members`)
