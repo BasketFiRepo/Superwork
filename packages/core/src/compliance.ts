@@ -385,18 +385,41 @@ export async function worksCouncilReview(ctx: TenantContext, actor: Actor): Prom
   })
 
   // 6 — Escalation beyond the owner, where the profile forbids it.
+  //
+  // This counted `stage >= 5`, which was evidence about something that had never happened:
+  // every rung was delivered to the owner whatever its declared audience, so no stage-5
+  // nudge had ever reached a manager. What is counted now is what actually left the
+  // person — a nudge carrying `about_user_id`, meaning it went to somebody else about them.
   const escalated = await count(sql<{ count: string }[]>`
     SELECT count(*)::text AS count FROM nudges
-    WHERE organization_id = ${org} AND deleted_at IS NULL AND stage >= 5`)
+    WHERE organization_id = ${org} AND deleted_at IS NULL
+      AND about_user_id IS NOT NULL AND delivered_at IS NOT NULL`)
+  // Every one of those must appear on the subject's own record, or "nothing reaches your
+  // manager that you have not seen" is a claim with nothing behind it.
+  const undisclosed = await count(sql<{ count: string }[]>`
+    SELECT count(*)::text AS count FROM nudges n
+    WHERE n.organization_id = ${org} AND n.deleted_at IS NULL
+      AND n.about_user_id IS NOT NULL AND n.delivered_at IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM disclosures d
+        WHERE d.organization_id = n.organization_id AND d.subject_user_id = n.about_user_id
+          AND d.source_type = n.subject_type AND d.source_id = n.subject_id
+          AND d.deleted_at IS NULL
+      )`)
   findings.push({
     id: 'manager_escalation',
     question: 'Does anything about an employee’s work reach their manager automatically?',
     why: 'Automatic escalation to a line manager is performance monitoring by another name in a co-determined workplace.',
-    status: rules.allowsManagerEscalation || escalated === 0 ? 'pass' : 'fail',
-    evidence: rules.allowsManagerEscalation
-      ? `This profile permits manager escalation once the person has seen it first (${rules.noSurprisesReviewHours}h). ` +
-        `${escalated} escalation(s) recorded.`
-      : `This profile forbids automatic manager escalation, and ${escalated} have occurred.`,
+    status:
+      undisclosed > 0 ? 'fail' : rules.allowsManagerEscalation || escalated === 0 ? 'pass' : 'fail',
+    evidence:
+      undisclosed > 0
+        ? `${undisclosed} escalation(s) reached somebody without appearing on the subject’s own record.`
+        : rules.allowsManagerEscalation
+          ? `This profile permits manager escalation once the person has seen it first (${rules.noSurprisesReviewHours}h), ` +
+            `which is enforced when the rung is scheduled. ${escalated} escalation(s) have gone to a manager, ` +
+            `and each appears on the record of the person it was about.`
+          : `This profile forbids automatic manager escalation, and ${escalated} have occurred.`,
     route: '/commitments',
   })
 

@@ -714,6 +714,28 @@ try {
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
 
+  // ---- Who is answerable for whom -----------------------------------------
+  await page.goto(`${BASE}/settings/reporting`)
+  await page.waitForSelector('[data-testid="org-chart"]', { timeout: 15_000 })
+  const chartRows = await page.locator('[data-testid="org-chart-row"]').count()
+  ok('The org chart seeded in migration 0001 is on a screen at last', chartRows >= 10, `${chartRows} lines`)
+  ok('It says what a reporting line is for, and what it is not',
+    /not.*a view onto/i.test(await page.locator('[data-testid="org-chart-purpose"]').innerText()))
+  ok('A dotted line is shown as distinct from the escalation path',
+    (await page.locator('[data-testid="org-chart-row"]', { hasText: 'dotted' }).count()) > 0)
+
+  await page.locator('[data-testid="org-chart-add"]').click()
+  await page.waitForSelector('[data-testid="org-chart-editor"]', { timeout: 15_000 })
+  ok('Nothing is recorded without a reason',
+    await page.locator('[data-testid="org-chart-save"]').isDisabled())
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/reporting-lines.png`, fullPage: true })
+
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="reporting-line"]', { timeout: 15_000 })
+  const lineText = await page.locator('[data-testid="reporting-line"]').innerText()
+  ok('A person can see their own line on their own record', /You report to/i.test(lineText))
+  ok('And is told it is not a window onto their work', /not a window onto your work/i.test(lineText))
+
   // ---- The rules that decide what stops for a person ----------------------
   await page.goto(`${BASE}/settings/approvals`)
   await page.waitForSelector('[data-testid="approval-policies"]', { timeout: 15_000 })

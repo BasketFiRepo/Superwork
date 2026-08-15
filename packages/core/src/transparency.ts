@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import type { Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
 import { writeAudit } from './audit.js'
+import { reportingFor } from './org-chart.js'
 
 /**
  * The personal record (§29.3, §24 Phase 3 acceptance).
@@ -55,6 +56,14 @@ export interface PersonalRecord {
     noSurprisesReviewHours: number
     nudgeBudgetPerDay: number
   }
+  /**
+   * Your own place in the chart. It is here rather than on an org screen because the line
+   * decides where an escalation about you goes, which makes it something held about you.
+   */
+  reporting: {
+    managers: { name: string; type: string }[]
+    reports: { name: string; type: string }[]
+  }
   rights: { label: string; description: string; action: string }[]
 }
 
@@ -84,6 +93,9 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
   const [me] = await sql<{ name: string; email: string }[]>`
     SELECT name, email FROM users WHERE id = ${userId}`
   if (!me) throw new ValidationError('That person is not a member of this organization.')
+
+  // Where an escalation about you would go, and who you would receive one about.
+  const reporting = await reportingFor(ctx, actor, userId)
 
   const [counts] = await sql<
     {
@@ -225,6 +237,10 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
       jurisdictionProfile: policy?.jurisdiction_profile ?? 'strict',
       noSurprisesReviewHours: policy?.no_surprises_review_hours ?? 24,
       nudgeBudgetPerDay: policy?.nudge_budget_per_person_per_day ?? 3,
+    },
+    reporting: {
+      managers: reporting.managers.map((line) => ({ name: line.managerName, type: line.type })),
+      reports: reporting.reports.map((line) => ({ name: line.personName, type: line.type })),
     },
     rights: [
       {

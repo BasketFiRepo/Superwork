@@ -89,6 +89,7 @@ export function Sidebar({
         { href: '/settings/retention', label: 'Retention and erasure' },
         { href: '/settings/holds', label: 'Legal holds' },
         { href: '/settings/teams', label: 'Teams' },
+        { href: '/settings/reporting', label: 'Reporting lines' },
         { href: '/settings/features', label: 'Features' },
         { href: '/settings/queue', label: 'Agent queue' },
         { href: '/settings/billing', label: 'Usage and cost' },

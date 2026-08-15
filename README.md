@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 716 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 732 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces → approval rules → reporting lines
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -525,6 +525,41 @@ were columns nothing filled, so an approval could not say why it was being asked
 
 **Settings → Approvals**, behind step-up in both directions. See ADR 0026.
 
+## Who is answerable, and what that is allowed to mean
+
+`reporting_relationships` was seeded with a real org chart in migration 0001 — eleven lines
+including one dotted — and read by nothing. Three controls sat on top of it, all hollow:
+the ladder's fifth rung declares `audience: 'manager'` and **every rung was delivered to the
+owner**, carrying a message written in the third person about them; `noSurprisesReviewHours`
+was defined on every profile, quoted in the compliance review's evidence, and enforced
+nowhere; and the review counted stage-5 nudges as escalations that had reached a manager,
+which none of them had.
+
+This is the point at which a work product becomes a surveillance product, so the decision is
+as much about what is refused as what is built.
+
+- **A reporting line routes accountability to a person.** It decides who an overdue item
+  escalates to after the person has been asked themselves, and who may be asked to decide
+  what they proposed. **It is not a window onto anybody** — there is no view of a report's
+  activity, no rollup, no metric, and no setting that adds one. The screen where somebody
+  would look for that says so instead of having it.
+- **Every escalation is disclosed to its subject**, in the same transaction as the delivery.
+  "Nothing reaches your manager that you have not seen" is a claim until it is evidenced,
+  and the compliance review now fails if an escalation exists without a disclosure.
+- **A rung with nobody to address is not sent to the owner as a fallback.** No manager
+  recorded means no escalation, and the screen lists who that applies to rather than letting
+  the ladder quietly stop.
+- **One functional manager**, enforced by a partial unique index; dotted lines are context
+  and are never walked for routing.
+- **A loop is refused by the database**, because the thing that eventually writes one is a
+  directory sync, not somebody clicking a button.
+- **A line is closed, not deleted** — "who did they report to in March" is a question an
+  audit asks.
+- **An approval goes to the person answerable**, closing the gap ADR 0026 named: a policy
+  saying `manager` meant "anybody senior enough".
+
+**Settings → Reporting lines**, and your own line on your own record. See ADR 0027.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -869,6 +904,11 @@ away. They are evidence about query shape, not a 100,000-user result.
   needs a department on the approval, which is a schema change and a separate decision.
 - `approvals.delegated_to` is still a column nothing writes. Handing an approval to a named
   person for a period is a real feature and is not the one that was built.
+- Nothing walks *down* the reporting chain. There is no "my reports' overdue work" query,
+  and adding one would be the §29.5 prohibition wearing a different name.
+- The demo organization has no legal entity, so it resolves to the strictest profile and
+  escalates nothing to anybody. The escalation path is exercised only where a profile
+  permits it.
 - The rule form is constrained: one tool, or a number of changes, or a risk level. Rules
   combining conditions can be seeded but not written from the interface.
 - `project_members` is written by the seed and read by nothing. It carries one row per
@@ -981,6 +1021,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0024](docs/adr/0024-a-container-lends-a-read.md) | A container lends a read, never a say |
 | [0025](docs/adr/0025-a-shelf-is-a-container-an-account-is-not.md) | A shelf is a container, an account is not |
 | [0026](docs/adr/0026-a-policy-can-only-tighten.md) | A policy can only tighten |
+| [0027](docs/adr/0027-a-reporting-line-routes-accountability-not-visibility.md) | A reporting line routes accountability, not visibility |
 
 ## Configuration
 

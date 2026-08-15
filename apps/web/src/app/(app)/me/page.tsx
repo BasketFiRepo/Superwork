@@ -96,6 +96,49 @@ export default async function MePage() {
         </div>
       </section>
 
+      <section className="panel" data-testid="reporting-line">
+        <div className="panel-header">
+          <h2>Your reporting line</h2>
+          <span className="small muted">where an escalation about you would go</span>
+        </div>
+        <div className="panel-body stack stack-4">
+          <div className="row wrap">
+            <span className="micro" style={{ flex: '0 0 140px' }}>You report to</span>
+            {record.reporting.managers.length === 0 ? (
+              <span className="small muted">Nobody. An escalation about your work has nowhere to go.</span>
+            ) : (
+              record.reporting.managers.map((line) => (
+                <span className="chip" key={`${line.name}-${line.type}`}>
+                  {line.name}
+                  {line.type === 'dotted' ? ' · dotted' : ''}
+                </span>
+              ))
+            )}
+          </div>
+          <div className="row wrap">
+            <span className="micro" style={{ flex: '0 0 140px' }}>Reporting to you</span>
+            {record.reporting.reports.length === 0 ? (
+              <span className="small muted">Nobody.</span>
+            ) : (
+              record.reporting.reports.map((line) => (
+                <span className="chip" key={`${line.name}-${line.type}`}>
+                  {line.name}
+                  {line.type === 'dotted' ? ' · dotted' : ''}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="panel-body hairline-top small muted">
+          A reporting line decides who an overdue item of yours is escalated to, and who may be
+          asked to decide something you proposed. It is not a window onto your work: there is no
+          view here or anywhere else that shows a manager what their reports are doing. When
+          something about you does reach somebody, it appears in{' '}
+          <strong>what has been shared about you</strong> below — you see it because it happened,
+          not because you asked.
+        </div>
+      </section>
+
       <section className="panel" data-testid="tracked">
         <div className="panel-header">
           <h2>What is held</h2>

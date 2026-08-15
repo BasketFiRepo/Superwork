@@ -3,7 +3,9 @@ import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
 import { writeActivity } from './audit.js'
+import { recordDisclosure } from './transparency.js'
 import { PROFILES, strictestProfile, type JurisdictionProfile } from './compliance.js'
+import { managerOf } from './org-chart.js'
 
 /**
  * The nudge ladder and its shared budget (§29.2, §29.5).
@@ -157,15 +159,6 @@ export async function scheduleLadder(
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL`
   const rules = PROFILES[strictestProfile(entities)]
 
-  const [existing] = await ctx.sql<{ id: string }[]>`
-    SELECT id FROM nudges
-    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
-      AND recipient_user_id = ${input.recipientUserId}
-      AND subject_type = ${input.subjectType} AND subject_id = ${input.subjectId}
-      AND cancelled_at IS NULL AND responded_at IS NULL
-    LIMIT 1`
-  if (existing) return { scheduled: 0, skipped: 'A ladder is already open for this, so a second agent adds nothing.' }
-
   const now = input.now ?? new Date()
 
   // Which rung is due. A ladder opened on something already overdue starts at the rung
@@ -184,29 +177,121 @@ export async function scheduleLadder(
   }
   if (!chosen) return { scheduled: 0, skipped: 'Every rung of the ladder is disallowed by this jurisdiction profile.' }
 
-  let scheduled = 0
+  const { stage, at } = chosen
 
-  {
-    const { stage, at } = chosen
-    const message = stage.template
-      .replace('{due}', input.dueAt.toISOString().slice(0, 10))
-      .replace('{owner}', input.ownerName ?? 'The owner')
-      .replace('{days}', String(Math.max(0, stage.offsetDays)))
+  // Who this rung actually goes to.
+  //
+  // Every rung used to be delivered to `recipientUserId` — the owner — whatever its
+  // declared audience. So the escalation rung sent the owner a message written in the third
+  // person about themselves, and the `waiter` rung told the owner that their own dependency
+  // was late. The `audience` field had never selected a recipient; it only ever decided
+  // whether a rung was skipped.
+  const audience = await resolveAudience(ctx, stage, input)
+  if (!audience.userId) return { scheduled: 0, skipped: audience.reason }
 
-    await ctx.sql`
-      INSERT INTO nudges (
-        organization_id, recipient_user_id, subject_type, subject_id, stage, channel,
-        message, actions, scheduled_for, agent_id, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${input.recipientUserId}, ${input.subjectType}, ${input.subjectId},
-        ${stage.stage}, ${stage.channel}, ${`${input.subjectLabel} — ${message}`},
-        ${ctx.sql.json(asJson(NUDGE_ACTIONS))}, ${at}, ${input.agentId ?? null}, ${ctx.userId}
-      )
-      ON CONFLICT DO NOTHING`
-    scheduled += 1
+  // "Nothing about a person reaches their manager before the person has seen it" (§29.2) is
+  // a promise every profile makes and nothing enforced. A rung that goes to somebody else
+  // waits until the owner has actually been contacted and had the review window to answer.
+  if (audience.userId !== input.recipientUserId) {
+    const [seen] = await ctx.sql<{ hours: number | null }[]>`
+      SELECT (EXTRACT(EPOCH FROM (${now}::timestamptz - max(delivered_at))) / 3600)::float8 AS hours
+      FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND recipient_user_id = ${input.recipientUserId}
+        AND subject_type = ${input.subjectType} AND subject_id = ${input.subjectId}
+        AND delivered_at IS NOT NULL`
+    const hours = seen?.hours ?? null
+    if (hours === null) {
+      return {
+        scheduled: 0,
+        skipped: `Nothing about ${input.ownerName ?? 'this person'} goes past them before they have seen it. They have not been contacted about this yet.`,
+      }
+    }
+    if (hours < rules.noSurprisesReviewHours) {
+      return {
+        scheduled: 0,
+        skipped: `They were contacted ${hours.toFixed(1)}h ago and this profile gives them ${rules.noSurprisesReviewHours}h to answer first.`,
+      }
+    }
   }
 
-  return { scheduled, skipped: null }
+  // One open ladder per recipient and subject, so two agents cannot chase the same person
+  // about the same thing. Checked against the *resolved* recipient: an owner rung still
+  // open is exactly the situation an escalation exists for, and testing the owner here is
+  // what made escalation unreachable for precisely the unresponsive case.
+  const [existing] = await ctx.sql<{ id: string }[]>`
+    SELECT id FROM nudges
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND recipient_user_id = ${audience.userId}
+      AND subject_type = ${input.subjectType} AND subject_id = ${input.subjectId}
+      AND cancelled_at IS NULL AND responded_at IS NULL
+    LIMIT 1`
+  if (existing) return { scheduled: 0, skipped: 'A ladder is already open for this, so a second agent adds nothing.' }
+
+  const message = stage.template
+    .replace('{due}', input.dueAt.toISOString().slice(0, 10))
+    .replace('{owner}', input.ownerName ?? 'The owner')
+    .replace('{days}', String(Math.max(0, stage.offsetDays)))
+
+  await ctx.sql`
+    INSERT INTO nudges (
+      organization_id, recipient_user_id, about_user_id, subject_type, subject_id, stage,
+      channel, message, actions, scheduled_for, agent_id, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${audience.userId},
+      ${audience.userId === input.recipientUserId ? null : input.recipientUserId},
+      ${input.subjectType}, ${input.subjectId},
+      ${stage.stage}, ${stage.channel}, ${`${input.subjectLabel} — ${message}`},
+      ${ctx.sql.json(asJson(NUDGE_ACTIONS))}, ${at}, ${input.agentId ?? null}, ${ctx.userId}
+    )
+    ON CONFLICT DO NOTHING`
+
+  return { scheduled: 1, skipped: null }
+}
+
+/**
+ * The person a rung is addressed to.
+ *
+ * A rung with nobody to address is not sent to the owner as a fallback. Telling somebody
+ * that they are late in the third person is worse than saying nothing, and a fallback here
+ * is how the audience field stopped meaning anything in the first place.
+ */
+async function resolveAudience(
+  ctx: TenantContext,
+  stage: LadderStage,
+  input: ScheduleInput,
+): Promise<{ userId: string | null; reason: string }> {
+  if (stage.audience === 'owner') return { userId: input.recipientUserId, reason: '' }
+
+  if (stage.audience === 'manager') {
+    const manager = await managerOf(ctx, input.recipientUserId)
+    return {
+      userId: manager,
+      reason: manager
+        ? ''
+        : 'This rung escalates to a manager and nobody is recorded as theirs, so it is not sent at all.',
+    }
+  }
+
+  // `waiter` — whoever is held up by this. Resolved from the dependency graph rather than
+  // guessed at; a task nobody is waiting on has no waiter rung.
+  if (input.subjectType !== 'task') {
+    return { userId: null, reason: 'Only a task has dependants, so there is nobody waiting on this.' }
+  }
+  const [waiting] = await ctx.sql<{ assigneeId: string | null }[]>`
+    SELECT t.assignee_id AS "assigneeId"
+    FROM task_dependencies d
+    JOIN tasks t ON t.id = d.task_id AND t.deleted_at IS NULL
+    WHERE d.organization_id = ${ctx.organizationId} AND d.depends_on_task_id = ${input.subjectId}
+      AND d.deleted_at IS NULL AND t.assignee_id IS NOT NULL
+      AND t.assignee_id <> ${input.recipientUserId}
+      AND t.status NOT IN ('completed', 'cancelled')
+    ORDER BY t.due_at NULLS LAST
+    LIMIT 1`
+  return {
+    userId: waiting?.assigneeId ?? null,
+    reason: 'Nobody is waiting on this, so there is nobody to tell.',
+  }
 }
 
 /**
@@ -215,7 +300,16 @@ export async function scheduleLadder(
  */
 export async function deliverDueNudges(
   ctx: TenantContext,
-  options: { now?: Date; limit?: number } = {},
+  options: {
+    now?: Date
+    limit?: number
+    /**
+     * Deliver only what is due about one thing. The budget is per person and shared across
+     * every agent, so a caller that wants to push one reminder through must be able to say
+     * so rather than draining somebody else's queue on the way past.
+     */
+    subjectId?: string
+  } = {},
 ): Promise<{ delivered: number; heldByBudget: number; cancelled: number }> {
   const now = options.now ?? new Date()
 
@@ -231,10 +325,21 @@ export async function deliverDueNudges(
       )
     RETURNING id`
 
-  const due = await ctx.sql<{ id: string; recipient_user_id: string; channel: string; message: string }[]>`
-    SELECT id, recipient_user_id, channel, message FROM nudges
+  const due = await ctx.sql<
+    {
+      id: string
+      recipient_user_id: string
+      about_user_id: string | null
+      subject_type: string
+      subject_id: string
+      channel: string
+      message: string
+    }[]
+  >`
+    SELECT id, recipient_user_id, about_user_id, subject_type, subject_id, channel, message FROM nudges
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
       AND delivered_at IS NULL AND cancelled_at IS NULL AND scheduled_for <= ${now}
+      ${options.subjectId ? ctx.sql`AND subject_id = ${options.subjectId}` : ctx.sql``}
     ORDER BY scheduled_for
     LIMIT ${options.limit ?? 200}`
 
@@ -268,6 +373,25 @@ export async function deliverDueNudges(
         ${ctx.organizationId}, ${nudge.recipient_user_id}, 'nudge', 'A reminder',
         ${nudge.message}, ${channel}, 'immediate', 'nudge', ${nudge.id}, false, ${ctx.userId}
       )`
+
+    // Something about a person reached somebody else, so that person's own record says so —
+    // in the same transaction as the delivery, because a disclosure written afterwards is
+    // one that can be forgotten (§29.3). This is what turns "nothing reaches your manager
+    // that you have not seen" from a claim into something with evidence behind it.
+    if (nudge.about_user_id) {
+      const [recipient] = await ctx.sql<{ name: string }[]>`
+        SELECT name FROM users WHERE id = ${nudge.recipient_user_id}`
+      await recordDisclosure(ctx, {
+        subjectUserId: nudge.about_user_id,
+        recipientUserId: nudge.recipient_user_id,
+        recipientLabel: recipient?.name ?? 'a colleague',
+        kind: 'manager_rollup',
+        summary: `An overdue ${nudge.subject_type} of yours was escalated to ${recipient?.name ?? 'a colleague'}, after you were contacted about it first.`,
+        fields: [`${nudge.subject_type}.due_at`, `${nudge.subject_type}.status`],
+        sourceType: nudge.subject_type,
+        sourceId: nudge.subject_id,
+      })
+    }
     delivered += 1
   }
 
