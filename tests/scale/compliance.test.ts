@@ -81,12 +81,19 @@ describe('jurisdiction profiles', () => {
         justification: 'No works council exists at this entity; confirmed with counsel.',
         approvedBy: org.memberId,
       })
-      const [change] = await ctx.sql<{ from_profile: string; to_profile: string; justification: string }[]>`
-        SELECT from_profile, to_profile, justification FROM jurisdiction_changes
-        WHERE organization_id = ${ctx.organizationId} ORDER BY changed_at DESC LIMIT 1`
-      expect(change?.from_profile).toBe('works_council')
-      expect(change?.to_profile).toBe('gdpr')
+      // The row is written by the trigger now, not by `setJurisdiction`, and the columns
+      // are generic because a consultation change is history too (migration 0025).
+      const [change] = await ctx.sql<
+        { from_state: string; to_state: string; justification: string; justified: boolean; approved_by: string | null }[]
+      >`
+        SELECT from_state, to_state, justification, justified, approved_by FROM jurisdiction_changes
+        WHERE organization_id = ${ctx.organizationId} AND change_kind = 'profile'
+        ORDER BY changed_at DESC LIMIT 1`
+      expect(change?.from_state).toBe('works_council')
+      expect(change?.to_state).toBe('gdpr')
       expect(change?.justification).toMatch(/counsel/i)
+      expect(change?.justified).toBe(true)
+      expect(change?.approved_by).toBe(org.memberId)
 
       // Put it back — the rest of the suite reviews against the strictest profile.
       await setJurisdiction(ctx, actor, {

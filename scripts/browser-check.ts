@@ -239,6 +239,12 @@ try {
   const reviewText = await page.locator('[data-testid="review"]').innerText()
   ok('Each answer carries evidence', /constraint/i.test(reviewText))
   ok('It names the profile it reviewed against', /works council/i.test(reviewText))
+  ok('It can answer who changed a jurisdiction profile and why',
+    /every change to a jurisdiction profile/i.test(reviewText))
+
+  await page.waitForSelector('[data-testid="jurisdiction-history"]', { timeout: 15_000 })
+  ok('And the history is on the screen, not just in the answer',
+    /written by the database/i.test(await page.locator('[data-testid="history-note"]').innerText()))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/compliance.png`, fullPage: true })
 
   // ---- Workflow authoring -------------------------------------------------
