@@ -807,6 +807,36 @@ UTC — so a milestone due yesterday read as not yet late, everywhere in Europe.
 
 **Settings → Teams; any project; Knowledge.** See ADR 0036.
 
+## A question you can keep, and work you can follow
+
+The last two tables nothing had ever touched. `saved_views` meant the tasks list offered five
+fixed filters and a search box that every person retyped their own question into every day.
+`task_watchers` meant the only person a task ever told anything to was its assignee — so the
+manager who asked for the work and the colleague waiting on it both had to go and look.
+
+- **The query is whitelisted on read, not only on write.** `saved_views.query` is a `jsonb`
+  blob a list screen would otherwise trust. Only the keys the lists accept survive, every time
+  a row is read — the row can be changed by a restore or a support script between the day it
+  is saved and the day it is pressed.
+- **A saved view is a question, not a share.** Applying one runs the same scope-aware read as
+  the screen it belongs to, so two people opening the same shared view can see different rows.
+  It stays its maker's to change or remove.
+- **A watch grants nothing**, and **the fan-out re-checks at delivery**: every message is
+  written only after `can()` says that person could open the task *now*, so a watch that
+  outlives the access it was made under goes quiet instead of leaking. Both ends of a watch
+  must be in one organization, which a trigger enforces rather than the callers.
+- **Only your own watch.** There is no user id in the API — choosing what a colleague is told
+  about, and learning what they are told, is the shape §29.5 prohibits. Unfollowing still
+  works on a task you can no longer open.
+- **Four changes are worth a message** — status, assignee, due date, title. A description
+  tidy-up is not, because a subscription that fires on every edit is one people turn off.
+
+This also found that the phase-5 loop was not repeatable: its follow-up beat turned the demo's
+one outbound thread inbound and never put it back, so a *second* run on the same database had
+nothing to chase. Running the loop twice is what surfaced it.
+
+**Tasks; any task; Inbox.** See ADR 0037.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1288,6 +1318,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0034](docs/adr/0034-a-note-nobody-can-read-is-not-a-note.md) | A note nobody can read is not a note |
 | [0035](docs/adr/0035-a-ceiling-you-can-only-look-at.md) | A ceiling you can only look at |
 | [0036](docs/adr/0036-the-structure-a-product-is-governed-by-should-be-buildable-in-it.md) | The structure a product is governed by should be buildable in it |
+| [0037](docs/adr/0037-a-saved-view-is-a-question-and-a-watch-is-not-a-grant.md) | A saved view is a question, and a watch is not a grant |
 
 ## Configuration
 

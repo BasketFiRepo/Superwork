@@ -413,6 +413,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['restricted'] = await seedCirculationList(ctx, userIds, departmentIds)
     counts['dependencies'] = await seedTaskDependencies(ctx, userIds)
     counts['teams'] = await seedTeams(ctx, userIds, departmentIds)
+    counts['views'] = await seedViewsAndWatchers(ctx, userIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -1030,6 +1031,55 @@ async function seedTaskDependencies(ctx: TenantContext, userIds: Map<string, str
       ) ON CONFLICT DO NOTHING`
     count += 1
   }
+  return count
+}
+
+/**
+ * Saved views and watchers (ADR 0037).
+ *
+ * Both surfaces are invisible when empty, and both are the sort of thing a person only tries
+ * once they have seen somebody else do it. The demo therefore arrives with one private view,
+ * one a colleague has shared, and Maya following two pieces of work she is not doing herself
+ * — which is the case the feature exists for.
+ */
+async function seedViewsAndWatchers(ctx: TenantContext, userIds: Map<string, string>): Promise<number> {
+  const maya = userIds.get('maya')!
+  const david = userIds.get('david')!
+
+  const views: { user: string; name: string; entity: string; query: Record<string, string>; shared: boolean }[] = [
+    { user: maya, name: 'Overdue, mine', entity: 'task', query: { filter: 'overdue' }, shared: false },
+    { user: david, name: 'Blocked right now', entity: 'task', query: { filter: 'blocked' }, shared: true },
+    { user: maya, name: 'Waiting on somebody', entity: 'inbox', query: { view: 'waiting' }, shared: false },
+  ]
+
+  let count = 0
+  for (const view of views) {
+    await ctx.sql`
+      INSERT INTO saved_views (organization_id, user_id, name, entity, query, shared, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${view.user}, ${view.name}, ${view.entity},
+              ${ctx.sql.json(view.query)}, ${view.shared}, true, ${ctx.userId})
+      ON CONFLICT (organization_id, user_id, entity, lower(btrim(name))) WHERE deleted_at IS NULL
+      DO NOTHING`
+    count += 1
+  }
+
+  // Work somebody else is carrying: following your own tasks tells you what you already know.
+  const followable = await ctx.sql<{ id: string }[]>`
+    SELECT id FROM tasks
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND assignee_id IS NOT NULL AND assignee_id <> ${maya}
+      AND status NOT IN ('completed', 'cancelled')
+    ORDER BY due_at NULLS LAST
+    LIMIT 2`
+
+  for (const task of followable) {
+    await ctx.sql`
+      INSERT INTO task_watchers (organization_id, task_id, user_id, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${task.id}, ${maya}, true, ${ctx.userId})
+      ON CONFLICT (task_id, user_id) WHERE deleted_at IS NULL DO NOTHING`
+    count += 1
+  }
+
   return count
 }
 

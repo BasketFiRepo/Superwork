@@ -102,6 +102,22 @@ const PLAN: {
       WHERE organization_id = ${ctx.organizationId} AND user_id = ${id}`),
   },
   {
+    table: 'task_watchers',
+    label: 'The tasks they were following',
+    disposition: 'delete',
+    basis: 'A subscription of this person’s alone. The tasks stay; the following stops.',
+    count: (ctx, id) => tally(ctx, ctx.sql`SELECT count(*)::text AS count FROM task_watchers
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${id} AND deleted_at IS NULL`),
+  },
+  {
+    table: 'saved_views',
+    label: 'Their saved views',
+    disposition: 'delete',
+    basis: 'Questions this person saved, including any they shared — a shared view is still theirs.',
+    count: (ctx, id) => tally(ctx, ctx.sql`SELECT count(*)::text AS count FROM saved_views
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${id} AND deleted_at IS NULL`),
+  },
+  {
     table: 'tasks',
     label: 'Tasks assigned to them',
     disposition: 'anonymise',
@@ -308,6 +324,8 @@ export async function erasePerson(
   await sql`DELETE FROM briefings WHERE organization_id = ${org} AND user_id = ${id}`
   await sql`DELETE FROM notification_preferences WHERE organization_id = ${org} AND user_id = ${id}`
   await sql`DELETE FROM memory_facts WHERE organization_id = ${org} AND scope = 'user' AND scope_id = ${id}`
+  await sql`DELETE FROM task_watchers WHERE organization_id = ${org} AND user_id = ${id}`
+  await sql`DELETE FROM saved_views WHERE organization_id = ${org} AND user_id = ${id}`
   await adminSql()`DELETE FROM sessions WHERE user_id = ${id}`
 
   await sql`UPDATE tasks SET assignee_id = ${tombstoneId} WHERE organization_id = ${org} AND assignee_id = ${id}`

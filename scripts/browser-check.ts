@@ -811,6 +811,21 @@ try {
   ok('And can take their own words back again',
     await page.locator('[data-testid="comment-remove"]').first().isEnabled())
 
+  // Following: the task told nobody but its assignee anything until now.
+  const watchText = await page.locator('[data-testid="task-watchers"]').innerText()
+  ok('A task can be followed by somebody who is not doing it',
+    /Follow this task/i.test(watchText) && /changes hands, changes status, is renamed/i.test(watchText))
+  await page.locator('[data-testid="task-watch"]').click()
+  const followedOn = await page
+    .waitForSelector('[data-testid="task-unwatch"]', { timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('Following it says so, and offers the way back out', followedOn)
+  await page.locator('[data-testid="task-unwatch"]').click()
+  const unfollowed = await page
+    .waitForSelector('[data-testid="task-watch"]', { timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And stopping is one press, on the same button', unfollowed)
+
   // ---- Sharing one thing with one person ------------------------------------
   // Stays on the task opened above, which has the share panel beside its dependencies.
   await page.locator('[data-testid="share-add"]').click()
@@ -842,6 +857,44 @@ try {
   ok('And says which projects you are on, and what that lends you',
     /Being on a project lets you read it/i.test(onProjects))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/sharing.png`, fullPage: true })
+
+  // ---- A question asked of a list, kept ------------------------------------
+  // `saved_views` was written by nothing, so every person retyped their own question daily.
+  await page.goto(`${BASE}/tasks?filter=blocked`)
+  await page.waitForSelector('[data-testid="saved-views"]', { timeout: 15_000 })
+  const seeded = await page.locator('[data-testid="saved-view"]').count()
+  ok('The list offers the questions somebody already saved', seeded > 0, `${seeded} views`)
+
+  await page.locator('[data-testid="saved-view-add"]').click()
+  await page.waitForSelector('[data-testid="saved-view-editor"]', { timeout: 15_000 })
+  ok('Nothing is saved until it has a name',
+    await page.locator('[data-testid="saved-view-confirm"]').isDisabled())
+  ok('It says a shared view hands over the question and not the rows',
+    /saved question, not access/i.test(await page.locator('[data-testid="saved-views"]').innerText()))
+  await page.fill('#saved-view-name', 'Browser check view')
+  await page.locator('[data-testid="saved-view-confirm"]').click()
+  const savedView = await page
+    .waitForFunction(
+      () =>
+        /Browser check view/.test(document.querySelector('[data-testid="saved-views"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('What is on screen can be kept and pressed again tomorrow', savedView)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/saved-views.png`, fullPage: true })
+
+  // Put the demo back: the check leaves no view of its own behind.
+  await page.locator('[aria-label="Delete the view Browser check view"]').click()
+  const removedView = await page
+    .waitForFunction(
+      () =>
+        !/Browser check view/.test(document.querySelector('[data-testid="saved-views"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And taken off the list again by whoever made it', removedView)
 
   // ---- Who can find a document --------------------------------------------
   // The seed restricts the Coldstore agreement, so the populated state is on screen.

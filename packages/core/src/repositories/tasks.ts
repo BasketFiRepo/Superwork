@@ -5,6 +5,7 @@ import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
 import { startOfDay } from '../time.js'
 import { notifyUnblocked, unfinishedPrerequisites } from './task-dependencies.js'
+import { isMaterialChange, notifyWatchers, watchedTaskIds } from './task-watchers.js'
 
 export interface TaskView {
   id: string
@@ -70,6 +71,12 @@ export interface ListTasksFilter {
   overdueOnly?: boolean
   dueBefore?: Date
   search?: string
+  /**
+   * Narrows to the tasks this person follows. A narrowing only: the visibility clause below
+   * still applies, so a watch on something you may no longer read shows nothing rather than
+   * becoming a way in.
+   */
+  watching?: boolean
   limit?: number
   /** Keyset pagination (§26.2): never OFFSET. */
   cursor?: { updatedAt: Date; id: string }
@@ -134,10 +141,13 @@ export async function listTasks(
   const assignee =
     filter.assigneeId === 'me' ? actor.userId : filter.assigneeId === 'unassigned' ? null : filter.assigneeId
 
+  const watched = filter.watching ? await watchedTaskIds(ctx, actor) : null
+
   const rows = await sql<TaskView[]>`
     ${SELECT_TASK(ctx)}
     WHERE t.organization_id = ${ctx.organizationId}
       AND t.deleted_at IS NULL
+      ${watched ? sql`AND t.id = ANY(${watched}::uuid[])` : sql``}
       ${filter.status?.length ? sql`AND t.status = ANY(${filter.status}::sw_task_status[])` : sql``}
       ${filter.assigneeId === 'unassigned' ? sql`AND t.assignee_id IS NULL` : assignee ? sql`AND t.assignee_id = ${assignee}` : sql``}
       ${filter.projectId ? sql`AND t.project_id = ${filter.projectId}` : sql``}
@@ -348,6 +358,16 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
   // stop. Only those whose last prerequisite this was — see `notifyUnblocked`.
   if (status === 'completed' && before.status !== 'completed') {
     await notifyUnblocked(ctx, actor, after.id, after.title)
+  }
+
+  // Followers hear about the four changes worth interrupting somebody for, and only after
+  // `can()` confirms each of them could still open the task — see `notifyWatchers`.
+  if (isMaterialChange(before, after)) {
+    await notifyWatchers(ctx, actor, {
+      taskId: after.id,
+      title: after.title,
+      summary: describeChange(before, after),
+    })
   }
 
   await writeActivity(ctx, {

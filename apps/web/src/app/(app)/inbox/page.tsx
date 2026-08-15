@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { inboxCounts, listConversations } from '@superwork/core'
+import { inboxCounts, listConversations, listSavedViews } from '@superwork/core'
+import { SavedViews } from '@/components/SavedViews'
 import { InboxQueue } from '@/components/InboxQueue'
 import { TriageButton } from '@/components/TriageButton'
 
@@ -20,10 +21,13 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
   const params = await searchParams
   const view = (params.view ?? 'queue') as (typeof VIEWS)[number]['id']
 
-  const { conversations, counts } = await withActor(session, async (ctx, actor) => ({
+  const { conversations, counts, views } = await withActor(session, async (ctx, actor) => ({
     conversations: await listConversations(ctx, actor, { view, limit: 100 }),
     counts: await inboxCounts(ctx),
+    views: await listSavedViews(ctx, actor, 'inbox'),
   }))
+
+  const active = views.find((saved) => saved.query.view === view) ?? null
 
   return (
     <div className="stack stack-8">
@@ -40,6 +44,13 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
         </div>
         <TriageButton untriaged={counts.untriaged} />
       </header>
+
+      <SavedViews
+        entity="inbox"
+        views={views}
+        current={view === 'queue' ? {} : { view }}
+        activeId={active?.id ?? null}
+      />
 
       <div className="row wrap">
         {VIEWS.map((option) => (

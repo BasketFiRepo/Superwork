@@ -120,6 +120,12 @@ import {
   monitoringPolicy,
   nudgeBudget,
   removeAgentGrant,
+  saveView,
+  listSavedViews,
+  deleteSavedView,
+  watchTask,
+  unwatchTask,
+  taskWatchers,
   setAgentGrant,
   setMonitoringPolicy,
 } from '@superwork/core'
@@ -1923,18 +1929,23 @@ try {
 
   const followed = await withTenant(session, async (ctx) => {
     const actor = await loadActor(ctx)
-    const [thread] = await ctx.sql<{ id: string }[]>`
-      SELECT id FROM conversations
+    const [thread] = await ctx.sql<{ id: string; lastMessageAt: Date }[]>`
+      SELECT id, last_message_at AS "lastMessageAt" FROM conversations
       WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND last_direction = 'outbound'
       ORDER BY last_message_at DESC LIMIT 1`
+    if (!thread) {
+      throw new Error(
+        'No outbound thread to chase. The demo has one; a previous run turned it inbound and did not put it back.',
+      )
+    }
     const made = await createFollowUp(ctx, actor, {
-      conversationId: thread!.id,
+      conversationId: thread.id,
       dueAt: new Date(Date.now() - 3_600_000),
       reason: 'Chase the signed addendum if they have not sent it.',
     })
     const swept = await sweepFollowUps(ctx)
     const mine = await listNotifications(ctx, actor)
-    return { threadId: thread!.id, made, swept, mine }
+    return { threadId: thread.id, threadLastMessageAt: thread.lastMessageAt, made, swept, mine }
   })
   ok('A follow-up that is due resurfaces, which is what the tool always promised',
     followed.swept.surfaced > 0 && followed.mine.some((row) => row.type === 'follow_up'),
@@ -1976,6 +1987,13 @@ try {
       DELETE FROM task_comments WHERE organization_id = ${ctx.organizationId} AND task_id = ${said.taskId}`
     await ctx.sql`
       DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop comment —%'`
+    // The thread was turned inbound to prove a follow-up closes itself when the customer
+    // writes back. Left that way it is the only outbound thread the demo has, so the next
+    // run of this loop had nothing to chase — which is how a loop stops being repeatable.
+    await ctx.sql`
+      UPDATE conversations
+      SET last_direction = 'outbound', last_message_at = ${followed.threadLastMessageAt}
+      WHERE organization_id = ${ctx.organizationId} AND id = ${followed.threadId}`
   })
 
   // ---- The two ceilings an admin could see and not set ----------------------
@@ -2127,6 +2145,81 @@ try {
   ok('And an empty one can be put away again',
     !shelved.gone.some((row) => row.name === 'Loop shelf'))
 
+  // ---- Saved views and watchers -------------------------------------------
+  //
+  // Each actor gets its own `withTenant`: they are separate transactions on separate
+  // connections, and a colleague cannot be shown a row that has not been committed yet.
+  const [colleagueId, followableId] = await withTenant(session, async (ctx) => {
+    const [colleague] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM users WHERE lower(email) = 'david@northwind.example'`
+    const [task] = await ctx.sql<{ id: string }[]>`
+      SELECT t.id FROM tasks t
+      WHERE t.organization_id = ${ctx.organizationId} AND t.deleted_at IS NULL
+        AND t.assignee_id = ${colleague!.id} AND t.status NOT IN ('completed', 'cancelled')
+      ORDER BY t.created_at LIMIT 1`
+    return [colleague!.id, task!.id] as const
+  })
+  const colleagueSession = { ...session, userId: colleagueId }
+
+  const savedView = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    // Saving the same name twice is a correction, not a second menu entry.
+    await saveView(ctx, actor, { name: 'Loop view', entity: 'task', query: { filter: 'mine' } })
+    const views = await saveView(ctx, actor, {
+      name: 'loop VIEW ',
+      entity: 'task',
+      query: { filter: 'blocked' },
+      shared: true,
+    })
+    await watchTask(ctx, actor, followableId)
+    return views.filter((row) => row.name.toLowerCase().trim() === 'loop view')
+  })
+  ok('A list screen can be asked a question once and keep it',
+    savedView.length === 1 && savedView[0]!.query.filter === 'blocked',
+    `${savedView.length} entry named “Loop view”`)
+
+  const theirs = await withTenant(colleagueSession, async (ctx) => {
+    const them = await loadActor(ctx)
+    const offered = await listSavedViews(ctx, them, 'task')
+    const refusal = await deleteSavedView(ctx, them, { id: savedView[0]!.id }).then(
+      () => null,
+      (error: Error) => error.message,
+    )
+    // Two changes to work Maya is following: one worth interrupting her for, one not.
+    await updateTask(ctx, them, { id: followableId, priority: 'high' })
+    await updateTask(ctx, them, { id: followableId, status: 'in_progress' })
+    return { offered: offered.some((row) => row.id === savedView[0]!.id), refusal }
+  })
+  ok('Sharing it offers a colleague the question, not the rows', theirs.offered)
+  ok('And the view stays its maker’s to change',
+    theirs.refusal !== null && /belongs to somebody else/i.test(theirs.refusal ?? ''))
+
+  const following = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const watchers = await taskWatchers(ctx, actor, followableId)
+    const [told] = await ctx.sql<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
+        AND type = 'task_changed' AND entity_id = ${followableId}`
+
+    // Put the demo back.
+    await unwatchTask(ctx, actor, followableId)
+    await deleteSavedView(ctx, actor, { id: savedView[0]!.id })
+    await ctx.sql`
+      DELETE FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
+        AND type = 'task_changed' AND entity_id = ${followableId}`
+    await ctx.sql`
+      UPDATE tasks SET status = 'todo', priority = 'medium'
+      WHERE organization_id = ${ctx.organizationId} AND id = ${followableId}`
+
+    return { watching: watchers.some((row) => row.isYou), told: Number(told!.count) }
+  })
+  ok('Work somebody else is carrying can be followed', following.watching)
+  // Two updates, one message: a priority change is not worth interrupting somebody for.
+  ok('A follower hears when it moves, once, and not about every edit',
+    following.told === 1, `${following.told} notification`)
+
   // Put the demo back.
   await withTenant(session, async (ctx) => {
     const actor = await loadActor(ctx)
@@ -2170,7 +2263,9 @@ try {
         'system may chase people, and what an agent may do at all — can be tightened from the \n' +
         'screen the refusals have always pointed at; and the structure the product is governed \n' +
         'by — its departments, its milestones and its shelves — can be built by the people it \n' +
-        'governs rather than only by the seed.\n',
+        'governs rather than only by the seed; and a question asked of a list can be kept, \n' +
+        'shared as a question rather than as access, and work somebody else is carrying \n' +
+        'can be followed without being able to see any more of it than before.\n',
   )
 } catch (error) {
   console.error(error)

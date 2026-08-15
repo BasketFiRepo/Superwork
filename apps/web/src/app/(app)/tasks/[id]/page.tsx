@@ -11,10 +11,12 @@ import {
   shareableRelations,
   taskComments,
   taskDependencies,
+  taskWatchers,
 } from '@superwork/core'
 import { TaskComments } from '@/components/TaskComments'
 import { TaskDependencies } from '@/components/TaskDependencies'
 import { TaskTeam } from '@/components/TaskTeam'
+import { TaskWatchers } from '@/components/TaskWatchers'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -28,7 +30,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people, relations, comments } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -43,6 +45,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         dependencies: deps,
         shares: await listShares(ctx, actor, 'task', id),
         comments: await taskComments(ctx, actor, id),
+        watchers: await taskWatchers(ctx, actor, id),
         relations: shareableRelations(actor, 'task', id, ctx.organizationId),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
@@ -109,6 +112,11 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
 
         <TaskDependencies taskId={task.id} dependencies={dependencies} candidates={candidates} />
+
+        <TaskWatchers
+          taskId={task.id}
+          watchers={watchers.map((row) => ({ userId: row.userId, name: row.name, isYou: row.isYou }))}
+        />
 
         <TaskComments
           taskId={task.id}
