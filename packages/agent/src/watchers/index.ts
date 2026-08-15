@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { withTenant, type TenantContext, asJson } from '@superwork/db'
 import { loadActor, type Actor } from '@superwork/auth'
 import {
+  mutedWatcherReasons,
+  watcherQuality,
+  type WatcherQuality,
   claimDueSchedules,
   describeCron,
   listSchedules,
@@ -354,17 +357,16 @@ export async function runWatchers(session: RunSession, keys?: string[]): Promise
 }
 
 /**
- * Auto-mute any watcher whose dismissal rate exceeds 70% over 20 insights, and say why
- * (§9.2). A watcher nobody acts on is worse than no watcher at all.
+ * Auto-mute a watcher people say is wrong, and say why (§9.2).
+ *
+ * This counted `status = 'dismissed'` and muted at 70%. Dismissal alone cannot tell "you
+ * were wrong" from "you were right and I had already dealt with it" — and the card has been
+ * asking which of the four it is since Phase 3, into a table nothing read. Muting a watcher
+ * whose every insight was real and already handled is switching off something that works
+ * (ADR 0031).
  */
 export async function mutedWatchers(ctx: TenantContext): Promise<string[]> {
-  const rows = await ctx.sql<{ watcher: string; total: number; dismissed: number }[]>`
-    SELECT watcher, count(*)::int AS total,
-           count(*) FILTER (WHERE status = 'dismissed')::int AS dismissed
-    FROM insights
-    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
-    GROUP BY watcher HAVING count(*) >= 20`
-  return rows.filter((r) => r.dismissed / r.total > 0.7).map((r) => r.watcher)
+  return [...(await mutedWatcherReasons(ctx)).keys()]
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +380,12 @@ export interface WatcherScheduleView extends ScheduleView {
   declaredCron: string
   description: string
   muted: boolean
+  /**
+   * What people said about it, and the verdict that follows. `null` for a watcher that has
+   * never produced an insight — no record is not a bad record, and the row says so rather
+   * than showing a rate over nothing.
+   */
+  quality: WatcherQuality | null
 }
 
 /**
@@ -409,18 +417,21 @@ export async function ensureWatcherSchedules(ctx: TenantContext): Promise<number
 export async function watcherSchedules(ctx: TenantContext): Promise<WatcherScheduleView[]> {
   await ensureWatcherSchedules(ctx)
   const rows = await listSchedules(ctx, 'watcher')
-  const muted = await mutedWatchers(ctx)
+  const quality = await watcherQuality(ctx)
   const byKey = new Map(rows.map((row) => [row.targetKey, row]))
+  const qualityByKey = new Map(quality.map((row) => [row.watcher, row]))
 
   return WATCHERS.map((watcher) => {
     const schedule = byKey.get(watcher.key)!
+    const record = qualityByKey.get(watcher.key) ?? null
     return {
       ...schedule,
       key: watcher.key,
       title: watcher.title,
       declaredCron: watcher.cadence,
       description: describeCron(schedule.cron, schedule.timezone),
-      muted: muted.includes(watcher.key),
+      muted: record?.verdict === 'muted',
+      quality: record,
     }
   })
 }
@@ -446,7 +457,7 @@ export async function runDueWatchers(session: RunSession, now = new Date()): Pro
 
   const { claimed, muted } = await withTenant({ ...session, traceId }, async (ctx) => {
     await ensureWatcherSchedules(ctx)
-    return { claimed: await claimDueSchedules(ctx, 'watcher', 20, now), muted: await mutedWatchers(ctx) }
+    return { claimed: await claimDueSchedules(ctx, 'watcher', 20, now), muted: await mutedWatcherReasons(ctx) }
   })
   sweep.claimed = claimed.length
 
@@ -457,8 +468,11 @@ export async function runDueWatchers(session: RunSession, now = new Date()): Pro
       sweep.skipped.push(`${schedule.targetKey}: ${schedule.skippedReason}`)
     }
     if (schedule.runs === 0) continue
-    if (muted.includes(schedule.targetKey)) {
-      sweep.skipped.push(`${schedule.targetKey}: muted — more than 70% of its insights were dismissed.`)
+    // The reason, not a restatement of a threshold: a watcher can now be muted for two
+    // different things, and "more than 70% dismissed" was only ever true of one of them.
+    const mutedFor = muted.get(schedule.targetKey)
+    if (mutedFor) {
+      sweep.skipped.push(`${schedule.targetKey}: muted — ${mutedFor}`)
       continue
     }
     keys.push(schedule.targetKey)

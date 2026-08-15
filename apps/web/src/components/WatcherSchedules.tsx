@@ -10,6 +10,11 @@ import { useRouter } from 'next/navigation'
  * row says when it last looked, when it looks next, and — when a watcher has been muted for
  * being noise — that it is muted and why, because a watcher that has silently stopped is
  * indistinguishable from one that has nothing to say.
+ *
+ * The verdict comes from what people said when they dismissed an insight, which is a
+ * question the card has asked since Phase 3 into a table nothing read. It is shown in full
+ * rather than as a rate: "already handled" and "wrong" are opposite verdicts on a watcher
+ * and a single dismissal percentage cannot tell them apart (ADR 0031).
  */
 
 export interface WatcherRow {
@@ -22,6 +27,21 @@ export interface WatcherRow {
   muted: boolean
   lastRunAt: string | null
   nextRunAt: string | null
+  quality: {
+    verdict: 'good' | 'late' | 'misrouted' | 'muted' | 'quiet'
+    reason: string
+    shown: number
+    rated: number
+  } | null
+}
+
+/** What each verdict is called on the row, and how loudly. */
+const VERDICT: Record<string, { label: string; chip: string }> = {
+  muted: { label: 'muted', chip: 'chip-attention' },
+  late: { label: 'right, but late', chip: 'chip-attention' },
+  misrouted: { label: 'reaching the wrong people', chip: 'chip-attention' },
+  quiet: { label: 'not enough ratings to judge', chip: '' },
+  good: { label: 'worth having', chip: '' },
 }
 
 const PRESETS = ['@hourly', '0 8 * * 1-5', '@daily', '@weekly']
@@ -82,11 +102,17 @@ export function WatcherSchedules({ watchers, canEdit }: { watchers: WatcherRow[]
               <tr key={watcher.key} data-testid="watcher-row">
                 <td>
                   <div>{watcher.title}</div>
-                  {watcher.muted ? (
-                    <span className="chip chip-attention">muted — over 70% dismissed</span>
-                  ) : !watcher.enabled ? (
-                    <span className="chip chip-attention">stopped</span>
-                  ) : null}
+                  {!watcher.enabled ? <span className="chip chip-attention">stopped</span> : null}
+                  {watcher.quality && watcher.quality.shown > 0 ? (
+                    <div className="stack stack-2" data-testid="watcher-verdict">
+                      <span className={`chip ${VERDICT[watcher.quality.verdict]?.chip ?? ''}`}>
+                        {VERDICT[watcher.quality.verdict]?.label ?? watcher.quality.verdict}
+                      </span>
+                      <span className="small muted">{watcher.quality.reason}</span>
+                    </div>
+                  ) : (
+                    <span className="small muted">Nothing found yet — nothing to judge.</span>
+                  )}
                 </td>
                 <td className="small secondary">
                   {watcher.description}

@@ -173,6 +173,35 @@ try {
   ok('Re-timing one previews before it saves',
     /every day at 00:00/i.test(await page.locator('[data-testid="watcher-preview"]').innerText()))
   await page.getByRole('button', { name: 'Cancel' }).first().click()
+
+  // A watcher with nothing to judge says so rather than showing a rate over no ratings.
+  ok('A watcher that has found nothing yet says so, rather than scoring itself',
+    /Nothing found yet/.test(watcherText))
+
+  // Dismissing asks why, and says what each answer will do — the card used to ask into a
+  // table nothing read. The watchers are run first so this is asserted against a real card
+  // rather than skipped on a demo that happens to have no insights open.
+  await page.getByRole('button', { name: 'Check for new insights' }).click()
+  const raised = await page
+    .waitForSelector('button:has-text("Dismiss")', { timeout: 30_000 })
+    .then(() => true, () => false)
+  ok('Running the watchers raises something to act on', raised)
+  if (raised) {
+    await page.locator('button', { hasText: 'Dismiss' }).first().click()
+    const reasons = await page.locator('main').innerText()
+    ok('Dismissing asks why, and says what each answer changes',
+      /Why are you dismissing this\?/i.test(reasons) && /already handled/i.test(reasons))
+    await page.getByRole('button', { name: 'Cancel' }).first().click()
+
+    // And now that a watcher has found something, its row carries a verdict from what
+    // people have said about it — "not enough ratings to judge" until they have.
+    await page.reload()
+    await page.waitForSelector('[data-testid="watcher-verdict"]', { timeout: 15_000 })
+    const judged = await page.locator('[data-testid="watcher-verdict"]').first().innerText()
+    ok('A watcher that has found something carries a verdict from what people said',
+      /not enough ratings to judge|worth having|muted|late|wrong people/i.test(judged),
+      judged.split('\n')[0] ?? '')
+  }
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/watchers.png`, fullPage: true })
 
   // ---- Personal record ----------------------------------------------------
@@ -713,9 +742,19 @@ try {
   await page.selectOption('#share-subject', { index: 1 })
   await page.fill('#share-reason', 'Reviewing the delivery plan with us this month.')
   await page.locator('[data-testid="share-confirm"]').click()
-  await page.waitForSelector('[data-testid="share-row"]', { timeout: 20_000 })
-  ok('A project share lands, with its reason on the row',
-    /Reviewing the delivery plan/i.test(await page.locator('[data-testid="share-object"]').innerText()))
+  // Wait for *this* share, not for any row: the project may already be shared with somebody
+  // else, in which case a row exists before the click and the panel is read mid-refresh.
+  const shareLanded = await page
+    .waitForFunction(
+      () =>
+        /Reviewing the delivery plan/i.test(
+          document.querySelector('[data-testid="share-object"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A project share lands, with its reason on the row', shareLanded)
   ok('And the owner can take it back again',
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
@@ -873,6 +912,10 @@ try {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company-share.png`, fullPage: true })
 
   // ---- Deleting a document, and everything derived from it ----------------
+  // This is destructive on purpose: it deletes a *seeded* document to exercise the real
+  // cascade. The check therefore expects a fresh demo — CI bootstraps the database before
+  // it runs — and locally the evals should run before this, not after, because two golden
+  // fixtures cite the document this removes.
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
   const documentsBefore = await page.locator('[data-testid="document-row"]').count()

@@ -63,8 +63,9 @@ export default async function InsightsPage() {
 
       {dismissalRate > 0.5 ? (
         <div className="banner banner-attention">
-          {(dismissalRate * 100).toFixed(0)}% of insights are being dismissed. Watchers above 70%
-          over twenty insights are muted automatically and the admin is told why.
+          {(dismissalRate * 100).toFixed(0)}% of insights are being dismissed. Say why when you
+          dismiss one: a watcher people call wrong stops running, while one people had already
+          handled is re-timed rather than switched off. Each watcher&apos;s verdict is below.
         </div>
       ) : null}
 
@@ -80,6 +81,14 @@ export default async function InsightsPage() {
           muted: watcher.muted,
           lastRunAt: watcher.lastRunAt ? watcher.lastRunAt.toISOString() : null,
           nextRunAt: watcher.nextRunAt ? watcher.nextRunAt.toISOString() : null,
+          quality: watcher.quality
+            ? {
+                verdict: watcher.quality.verdict,
+                reason: watcher.quality.reason,
+                shown: watcher.quality.shown,
+                rated: watcher.quality.rated,
+              }
+            : null,
         }))}
       />
 
