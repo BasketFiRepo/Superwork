@@ -514,6 +514,44 @@ try {
   ok('A released hold stays on the record with who released it and why',
     /Ahlgren v\. Northwind/.test(releasedText) && /counsel withdrew/i.test(releasedText))
 
+  // ---- Who can find a document --------------------------------------------
+  // The seed restricts the Coldstore agreement, so the populated state is on screen.
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="document-row"] a', { hasText: 'Coldstore Nordics' }).first().click()
+  await page.waitForSelector('[data-testid="document-audience"]', { timeout: 15_000 })
+  const audienceText = await page.locator('[data-testid="document-audience"]').innerText()
+  const audienceRows = await page.locator('[data-testid="audience-row"]').count()
+  ok('A restricted document lists who can find it', audienceRows >= 3, `${audienceRows} on the list`)
+  ok('It says administrators are not exempt', /including administrators/i.test(audienceText))
+  ok('Every entry says why they are on it', /Signs the storage agreements/i.test(audienceText))
+
+  // Reopening is its own control, not the side effect of removing the last name.
+  await page.locator('[data-testid="audience-open"]').click()
+  await page.waitForSelector('[data-testid="audience-open-editor"]', { timeout: 15_000 })
+  ok('Reopening will not happen without a reason',
+    await page.locator('[data-testid="audience-open-confirm"]').isDisabled())
+  await page.fill('#audience-open-reason', 'Agreement executed; the terms are internal now.')
+  await page.locator('[data-testid="audience-open-confirm"]').click()
+  await page.waitForFunction(
+    () =>
+      /Anybody whose classification allows it/i.test(
+        document.querySelector('[data-testid="document-audience"]')?.textContent ?? '',
+      ),
+    undefined,
+    { timeout: 20_000 },
+  )
+  ok('Removing the restriction says what it did', true)
+
+  // And restricting again warns before the first name, because that is the moment
+  // everybody else loses it.
+  await page.locator('[data-testid="audience-add"]').click()
+  await page.waitForSelector('[data-testid="audience-editor"]', { timeout: 15_000 })
+  const firstGrant = await page.locator('[data-testid="audience-editor"]').innerText()
+  ok('The first name on a new list warns that everybody else loses it',
+    /everybody else loses the ability to find this document/i.test(firstGrant))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-audience.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })

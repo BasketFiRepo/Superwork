@@ -1,8 +1,9 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { getDocumentBody, NotFoundError, PermissionError } from '@superwork/core'
+import { documentAudience, getDocumentBody, NotFoundError, PermissionError } from '@superwork/core'
 import { DeleteDocument } from '@/components/DeleteDocument'
+import { DocumentAudience } from '@/components/DocumentAudience'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,7 +12,20 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body } = await withActor(session, (ctx, actor) => getDocumentBody(ctx, actor, id))
+    const { document, body, audience, people, departments } = await withActor(session, async (ctx, actor) => {
+      const loaded = await getDocumentBody(ctx, actor, id)
+      return {
+        ...loaded,
+        audience: await documentAudience(ctx, actor, id),
+        people: await ctx.sql<{ id: string; name: string }[]>`
+          SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+          WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+          ORDER BY u.name`,
+        departments: await ctx.sql<{ id: string; name: string }[]>`
+          SELECT id, name FROM departments
+          WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY name`,
+      }
+    })
 
     return (
       <div className="stack stack-8">
@@ -33,6 +47,25 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             <div className="banner banner-attention">{document.indexError}</div>
           ) : null}
         </header>
+
+        <DocumentAudience
+          documentId={document.id}
+          audience={{
+            restricted: audience.restricted,
+            sensitivity: audience.sensitivity,
+            entries: audience.entries.map((entry) => ({
+              id: entry.id,
+              subjectType: entry.subjectType,
+              subjectName: entry.subjectName,
+              relation: entry.relation,
+              reason: entry.reason,
+              grantedByName: entry.grantedByName,
+            })),
+            blockedByClassification: audience.blockedByClassification,
+          }}
+          people={people}
+          departments={departments}
+        />
 
         <DeleteDocument
           documentId={document.id}

@@ -13,8 +13,9 @@ and depth) and Phase 4 (enterprise scale) of the build specification, end to end
 zero external credentials** — then the three things the build itself had listed as not yet
 true (natural-language workflow authoring, approve-with-edits, admin-authored HTTP tools),
 and then the controls the interface had been claiming and the product did not have: step-up
-authentication, retention and erasure, legal holds, and the agent memory whose table had
-been designed since Phase 0 with nothing ever written to it.
+authentication, retention and erasure, legal holds, the agent memory whose table had been
+designed since Phase 0 with nothing ever written to it, and the document circulation lists
+the retrieval ACL had been checking for against an empty table.
 
 ---
 
@@ -36,14 +37,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 619 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 630 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -372,6 +373,42 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Who can find a document
+
+`document_permissions` was created in migration 0004 and never written to, while being read
+by the ACL predicate in **both** arms of retrieval and, since memory shipped, by recall. Its
+branch had been evaluated on every search since Phase 1 and had never matched anything.
+
+Meanwhile `share()` writes a **relation tuple**, and retrieval does not consult tuples at
+all. So sharing a document left "I shared it with you" and "the assistant cannot find it"
+both true, with nothing saying so. That was a live bug, not a gap.
+
+The two mechanisms have opposite shapes, which is why both exist. A tuple is **additive** —
+one subject, one relation, one object, nothing taken away. A circulation list is
+**restrictive** — while any row exists for a document, only the subjects named may retrieve
+it. An HR file or a signed contract needs the second, and neither can be expressed as the
+other.
+
+- **A list can only narrow.** The classification ceiling is a separate condition, ANDed, so
+  naming a member on a `restricted` document does not let them retrieve it. Adding a *role*
+  below the ceiling is refused outright, naming the classification as the thing to change if
+  that is really what is meant, rather than storing a grant that silently does nothing.
+- **Nobody is exempt, including the owner.** An administrator not on the list will not see
+  the document in retrieval or cited in an answer. They can add themselves — which leaves a
+  row saying they did, and that is better than a bypass nobody can audit. Opening the
+  document's page is a separate question, governed by `can()`; the screen says so.
+- **Sharing a restricted document adds the recipient to the list**, so the two stop
+  disagreeing. On an open document it does nothing, because that is what a tuple already
+  means.
+- **The first grant is its own event.** It is the moment everybody else loses the document,
+  so it audits differently, writes an activity entry, and the interface warns before it.
+- **Reopening is never a side effect.** Removing the last name is refused; clearing the list
+  is a separate control with its own reason and audit action.
+- **Every row says why, and who added them.** A list that cannot explain itself is one nobody
+  will ever prune.
+
+See ADR 0019.
+
 ## What the assistant remembers
 
 `memory_facts` had existed since migration 0006 with a complete design and no writer. Two
@@ -530,10 +567,13 @@ route, because verifying that a request came from the person it names is a probl
 product does not solve, and a self-service endpoint with a weak identity check is worse than
 none. Memory extraction is only as good as its rule: the mock brain notices a fact only when
 a cited sentence reads as a plain "X is Y" statement, so anything phrased another way is not
-noticed at all. Seven tables are dead schema that nothing reads or writes — `agent_messages`,
-`email_accounts`, `events`, `ingestion_jobs`, `invitations`, `saved_views` and
-`task_watchers` — left in place rather than dropped, and listed here so nobody has to
-rediscover them. The scale
+noticed at all. A circulation list can name a team, and no team can exist: `teams` and `team_members` are
+still tables nothing writes, so that branch of the retrieval ACL never matches. It is kept so
+that building teams later needs no change to retrieval. Seven tables are dead schema that
+nothing reads or writes — `agent_messages`, `email_accounts`, `events`, `ingestion_jobs`,
+`invitations`, `saved_views` and `task_watchers` — left in place rather than dropped, and
+listed here so nobody has to rediscover them. A restriction has no expiry: a list is removed
+by somebody deciding to, not by a clock. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -571,6 +611,9 @@ disabled with the reason named. Nothing in the interface pretends to work.
   and memories go in the same transaction, and the count of each is reported to the caller and
   written to the audit trail (§25.13). The memory count is now a real number rather than a
   fact about an empty table.
+- **A document can be taken out of general circulation, and the restriction bites.** While a
+  circulation list exists, only the subjects on it retrieve the document — enforced inside
+  both arms of hybrid search and in memory recall, with no exemption for administrators.
 - **The assistant cannot decide what the company believes.** Nothing it notices is recalled
   until a person agrees; `confirmed_by` is NOT NULL and a non-human actor is refused. Recall
   never reaches past the permissions of the document a fact was drawn from.
