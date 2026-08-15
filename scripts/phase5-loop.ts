@@ -123,6 +123,10 @@ import {
   saveView,
   listSavedViews,
   documentIngestions,
+  listRunMessages,
+  ledgerReport,
+  monthPeriod,
+  spendSnapshot,
   holidaysIn,
   workingCalendarFor,
   restDaysAhead,
@@ -2432,6 +2436,53 @@ try {
   ok('And it arrives on the next working day rather than being lost',
     workingDays.afterwards.delivered === 1)
 
+
+  // ---- What the model was asked, and what it cost -------------------------
+  console.log('\nWhere the model spend actually went…\n')
+
+  const spend = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [run] = await ctx.sql<{ id: string }[]>`
+      SELECT r.id FROM agent_runs r
+      JOIN agent_messages m ON m.run_id = r.id
+      WHERE r.organization_id = ${ctx.organizationId}
+      GROUP BY r.id ORDER BY max(m.created_at) DESC LIMIT 1`
+    const messages = await listRunMessages(ctx, run!.id)
+    const [totals] = await ctx.sql<{ tokensIn: number; cost: number }[]>`
+      SELECT tokens_in AS "tokensIn", cost_cents::float8 AS cost FROM agent_runs WHERE id = ${run!.id}`
+    const [metered] = await ctx.sql<{ total: string; runCost: string }[]>`
+      SELECT coalesce(sum(cost_cents), 0)::text AS total,
+             coalesce(sum(cost_cents) FILTER (WHERE unit = 'agent_run'), 0)::text AS "runCost"
+      FROM usage_records
+      WHERE organization_id = ${ctx.organizationId} AND agent_run_id = ${run!.id}`
+    const report = await ledgerReport(ctx, actor, monthPeriod(new Date(), ctx.timezone))
+    const snapshot = await spendSnapshot(ctx)
+    const [monthly] = await ctx.sql<{ cost: string }[]>`
+      SELECT coalesce(sum(cost_cents), 0)::text AS cost FROM agent_messages
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND created_at >= date_trunc('month', now())`
+    return { messages, totals: totals!, metered: metered!, report, snapshot, monthly: Number(monthly!.cost) }
+  })
+
+  ok('A run says which step cost what, which it never could',
+    spend.messages.length > 0 && spend.messages.every((m) => m.model !== null && m.taskClass !== null),
+    spend.messages.map((m) => `${m.taskClass} ${m.tokensIn}→${m.tokensOut}`).join(', '))
+  ok('The run’s totals are the sum of them, kept by the database rather than by a caller',
+    Math.abs(spend.totals.cost - spend.messages.reduce((t, m) => t + m.costCents, 0)) < 0.0001,
+    `${spend.totals.cost}c`)
+  // The bug this found: both run paths also metered the run's whole cost on top of the
+  // per-call rows, so month-to-date spend was counted roughly twice.
+  ok('The spend is metered once, not once per call and again per run',
+    Number(spend.metered.runCost) === 0 &&
+      Math.abs(Number(spend.metered.total) - spend.totals.cost) < 0.0001,
+    `${spend.metered.total}c metered against ${spend.totals.cost}c spent`)
+  ok('So the cap counts what was actually spent',
+    Math.abs(spend.snapshot.monthToDateCents - spend.monthly) < 0.0001,
+    `${spend.snapshot.monthToDateCents}c month to date`)
+  ok('And the ledger can say where it went, by model and by the kind of call',
+    spend.report.models.length > 0,
+    spend.report.models.map((m) => `${m.taskClass}@${m.model}`).slice(0, 3).join(', '))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2467,7 +2518,8 @@ try {
         'can be followed without being able to see any more of it than before; and a document \n' +
         'that will not index says so, is retried on a widening delay, gives up out loud rather \n' +
         'than for ever, and can be put back into memory by a person; and nobody is chased on a \n' +
-        'day they do not work — not at a weekend, and not on Christmas Day.\n',
+        'day they do not work — not at a weekend, and not on Christmas Day; and what the model \n' +
+        'was asked, what it answered and what that cost is on the record, counted once.\n',
   )
 } catch (error) {
   console.error(error)

@@ -160,3 +160,39 @@ export async function listToolCalls(
     WHERE organization_id = ${ctx.organizationId} AND run_id = ${runId}
     ORDER BY created_at`
 }
+
+export interface RunMessageView {
+  id: string
+  role: string
+  content: string
+  taskClass: string | null
+  model: string | null
+  tokensIn: number
+  tokensOut: number
+  costCents: number
+  latencyMs: number | null
+  simulated: boolean
+  createdAt: Date
+}
+
+/**
+ * What the model was asked to do at each step, what it said, and what that cost (ADR 0040).
+ *
+ * `agent_messages` was written by nothing until now, so a run could say it cost four cents
+ * and not which step, which model, or how long any of it took. The run's own totals are the
+ * sum of these rows — kept by a trigger rather than by whichever caller remembered — so the
+ * figure at the top of the page and the rows underneath it cannot disagree.
+ *
+ * Gated by the run, like its steps, citations and tool calls: reading a run is what entitles
+ * somebody to what the run did.
+ */
+export async function listRunMessages(ctx: TenantContext, runId: string): Promise<RunMessageView[]> {
+  return ctx.sql<RunMessageView[]>`
+    SELECT id, role, content, task_class AS "taskClass", model,
+           tokens_in AS "tokensIn", tokens_out AS "tokensOut",
+           cost_cents::float8 AS "costCents", latency_ms AS "latencyMs", simulated,
+           created_at AS "createdAt"
+    FROM agent_messages
+    WHERE organization_id = ${ctx.organizationId} AND run_id = ${runId} AND deleted_at IS NULL
+    ORDER BY created_at`
+}

@@ -4,7 +4,6 @@ import { loadActor, type Actor } from '@superwork/auth'
 import {
   composeBriefingFacts,
   pickRecommendation,
-  record as recordUsageRecord,
   startOfDay,
   formatInZone,
   type BriefingFacts,
@@ -12,7 +11,7 @@ import {
   type Recommendation,
 } from '@superwork/core'
 import { completeWithFallback, type BriefingGrounding } from '@superwork/ai'
-import { insertRun, saveReport, setRunStatus, recordStep, addUsage } from './persistence.js'
+import { insertRun, saveReport, setRunStatus, recordStep, recordMessage } from './persistence.js'
 import type { RunSession } from './runtime.js'
 
 /**
@@ -128,15 +127,13 @@ export async function generateBriefing(
 
   return withTenant({ ...session, userId: targetUserId }, async (ctx) => {
     if (response.usage) {
-      await addUsage(ctx, runId, response.usage)
-      await recordUsageRecord(ctx, {
-        unit: 'tokens_out',
-        quantity: response.usage.tokensOut,
-        costCents: response.usage.costCents,
-        model: response.usage.model,
+      // `ctx.userId` is the briefing's subject here, so the metering row is attributed to
+      // them exactly as it was when it was written by hand.
+      await recordMessage(ctx, runId, {
         taskClass: 'briefing.narrative',
-        agentRunId: runId,
-        userId: targetUserId,
+        content: narrative,
+        simulated: response.simulated,
+        usage: response.usage,
       })
     }
 

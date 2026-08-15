@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { listCitations, listSteps, listToolCalls, listUndoOperations, getRun } from '@superwork/core'
+import { listCitations, listRunMessages, listSteps, listToolCalls, listUndoOperations, getRun } from '@superwork/core'
 import { TraceRail } from '@/components/TraceRail'
 import { UndoRunButton } from '@/components/UndoRunButton'
 
@@ -47,7 +47,7 @@ export default async function ActivityPage({
       ORDER BY occurred_at DESC
       LIMIT 60`
 
-    if (!params.run) return { activities, run: null, steps: [], citations: [], toolCalls: [], undo: [] }
+    if (!params.run) return { activities, run: null, steps: [], citations: [], toolCalls: [], undo: [], messages: [] }
 
     return {
       activities,
@@ -55,6 +55,7 @@ export default async function ActivityPage({
       steps: await listSteps(ctx, params.run),
       citations: await listCitations(ctx, params.run),
       toolCalls: await listToolCalls(ctx, params.run),
+      messages: await listRunMessages(ctx, params.run),
       undo: await listUndoOperations(ctx, params.run),
     }
   })
@@ -118,6 +119,53 @@ export default async function ActivityPage({
                 This run read untrusted external content that attempted to give it instructions. It
                 was reported, not obeyed, and the run was capability-downgraded.
               </div>
+            ) : null}
+
+            {data.messages.length > 0 ? (
+              <details data-testid="run-messages">
+                <summary className="small" style={{ cursor: 'pointer', color: 'var(--ink-secondary)' }}>
+                  Model calls — {data.messages.length}
+                </summary>
+                <div className="table-scroll" style={{ marginTop: 'var(--s-4)' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 170 }}>What for</th>
+                        <th style={{ width: 150 }}>Model</th>
+                        <th style={{ width: 110 }}>Tokens</th>
+                        <th style={{ width: 90 }}>Took</th>
+                        <th style={{ width: 90 }}>Cost</th>
+                        <th>What it said</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.messages.map((message) => (
+                        <tr key={message.id} data-testid="run-message-row">
+                          <td className="small secondary">
+                            {message.taskClass ?? '—'}
+                            {message.simulated ? (
+                              <div>
+                                <span className="chip">simulated</span>
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="mono small">{message.model ?? '—'}</td>
+                          <td className="num small">
+                            {message.tokensIn} in · {message.tokensOut} out
+                          </td>
+                          <td className="num small">{message.latencyMs ?? 0}ms</td>
+                          <td className="num small">{(message.costCents / 100).toFixed(4)}</td>
+                          <td className="small secondary">{message.content.slice(0, 140)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="small muted" style={{ marginTop: 'var(--s-3)' }}>
+                  The run’s tokens and cost are the sum of these rows — kept by the database, so
+                  the figure above and the rows here cannot disagree.
+                </p>
+              </details>
             ) : null}
 
             {data.toolCalls.length > 0 ? (

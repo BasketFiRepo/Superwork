@@ -19,7 +19,7 @@ import {
   type ConversationView,
 } from '@superwork/core'
 import { completeWithFallback, resolveDueHint, type MeetingSummary, type TriageResult } from '@superwork/ai'
-import { addUsage, insertRun, markUntrusted, recordStep, saveReport, setRunStatus } from '../persistence.js'
+import { insertRun, markUntrusted, recordMessage, recordStep, saveReport, setRunStatus } from '../persistence.js'
 import type { RunSession } from '../runtime.js'
 
 /**
@@ -140,7 +140,16 @@ export async function triageInbox(
         sentiment: triage.sentiment,
         agentRunId: runId,
       })
-      if (response.usage) await addUsage(ctx, runId, response.usage)
+      // This call reached the run's totals and never reached metering, so triage spend was
+      // invisible to the cap it counted against.
+      if (response.usage) {
+        await recordMessage(ctx, runId, {
+          taskClass: 'inbox.classify',
+          content: JSON.stringify(triage),
+          simulated: response.simulated,
+          usage: response.usage,
+        })
+      }
     })
 
     results.push({
@@ -176,7 +185,9 @@ export async function triageInbox(
       injectionWarnings: [],
     })
     await setRunStatus(ctx, runId, 'succeeded')
-    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents, agentRunId: runId })
+    // Counts the run. Its cost is on the per-call message rows; carrying it here as well
+    // is what doubled month-to-date spend (ADR 0040).
+    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents: 0, agentRunId: runId })
   })
 
   return { runId, classified: results.length, commitmentsProposed, flagged, costCents, results }
@@ -235,7 +246,14 @@ async function proposeCommitmentsFromConversation(
           sourceExcerpt: item.excerpt,
           agentRunId: runId,
         })
-        if (response.usage) await addUsage(ctx, runId, response.usage)
+        if (response.usage) {
+          await recordMessage(ctx, runId, {
+            taskClass: 'inbox.extract_commitments',
+            content: JSON.stringify(item),
+            simulated: response.simulated,
+            usage: response.usage,
+          })
+        }
       })
       proposed += 1
     }
@@ -411,14 +429,11 @@ export async function summarizeMeetingRun(session: RunSession, meetingId: string
     }
 
     if (response.usage) {
-      await addUsage(ctx, runId, response.usage)
-      await recordUsageRecord(ctx, {
-        unit: 'tokens_out',
-        quantity: response.usage.tokensOut,
-        costCents: response.usage.costCents,
-        model: response.usage.model,
+      await recordMessage(ctx, runId, {
         taskClass: 'meeting.summarize',
-        agentRunId: runId,
+        content: summary.summary,
+        simulated: response.simulated,
+        usage: response.usage,
       })
     }
 
@@ -574,14 +589,11 @@ export async function narrateAccount(session: RunSession, companyId: string): Pr
 
   await withTenant(session, async (ctx) => {
     if (response.usage) {
-      await addUsage(ctx, runId, response.usage)
-      await recordUsageRecord(ctx, {
-        unit: 'tokens_out',
-        quantity: response.usage.tokensOut,
-        costCents: response.usage.costCents,
-        model: response.usage.model,
+      await recordMessage(ctx, runId, {
         taskClass: 'crm.summary',
-        agentRunId: runId,
+        content: narrated.text,
+        simulated: response.simulated,
+        usage: response.usage,
       })
     }
     // Each claim is cited back to the row it came from.

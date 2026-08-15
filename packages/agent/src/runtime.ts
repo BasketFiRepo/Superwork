@@ -43,7 +43,7 @@ import { gatePlan } from './gate.js'
 import { checkAutopilotCaps, pauseForCap } from './autopilot.js'
 import { publish } from './bus.js'
 import {
-  addUsage,
+  recordMessage,
   findCompletedCall,
   insertRun,
   markUntrusted,
@@ -350,14 +350,13 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
   if (planResponse.usage) {
     recordUsage(budget, planResponse.usage)
     await withTenant(session, async (ctx) => {
-      await addUsage(ctx, runId, planResponse.usage!)
-      await recordUsageRecord(ctx, {
-        unit: 'tokens_in',
-        quantity: planResponse.usage!.tokensIn,
-        costCents: planResponse.usage!.costCents,
-        model: planResponse.usage!.model,
+      // One writer: the message row carries the cost, the metering row is written from the
+      // same numbers, and the run's totals are recomputed from the messages by a trigger.
+      await recordMessage(ctx, runId, {
         taskClass: 'agent.plan',
-        agentRunId: runId,
+        content: JSON.stringify(planResponse.json ?? planResponse.text),
+        simulated: planResponse.simulated,
+        usage: planResponse.usage!,
       })
     })
   }
@@ -709,7 +708,14 @@ async function executeApprovedPlan(
     })
     if (narrativeResponse.usage) {
       recordUsage(budget, narrativeResponse.usage)
-      await addUsage(ctx, runId, narrativeResponse.usage)
+      // This call reached the run's totals and never reached metering at all, so the
+      // narrative's spend was invisible to the cap it counted against.
+      await recordMessage(ctx, runId, {
+        taskClass: 'agent.report',
+        content: String((narrativeResponse.json as { text?: string })?.text ?? narrativeResponse.text),
+        simulated: narrativeResponse.simulated,
+        usage: narrativeResponse.usage,
+      })
     }
 
     const citations = grounded ? await persistCitations(ctx, runId, grounded) : []
@@ -726,7 +732,9 @@ async function executeApprovedPlan(
     await saveReport(ctx, runId, built)
     await setRunStatus(ctx, runId, outcome.failed.length && !outcome.created && !outcome.updated ? 'failed' : 'succeeded')
     await emitStep(ctx, runId, phase, { phase: 'report', label: 'Reported what changed', status: 'succeeded' })
-    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents: budget.costCents, agentRunId: runId })
+    // Counts the run. Its cost is already on the per-call rows above — carrying it here as
+    // well is what doubled month-to-date spend and tripped the cap at half the real figure.
+    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents: 0, agentRunId: runId })
     await writeActivity(ctx, {
       actorType: 'agent',
       actorUserId: session.userId,
@@ -930,14 +938,11 @@ async function answerAndFinish(
   const report = await withTenant(session, async (ctx) => {
     if (response.usage) {
       recordUsage(budget, response.usage)
-      await addUsage(ctx, runId, response.usage)
-      await recordUsageRecord(ctx, {
-        unit: 'tokens_out',
-        quantity: response.usage.tokensOut,
-        costCents: response.usage.costCents,
-        model: response.usage.model,
+      await recordMessage(ctx, runId, {
         taskClass: 'agent.answer',
-        agentRunId: runId,
+        content: text,
+        simulated: response.simulated,
+        usage: response.usage,
       })
     }
     const citations = await persistCitations(ctx, runId, grounded, answer.citations)
@@ -973,7 +978,9 @@ async function answerAndFinish(
     await saveReport(ctx, runId, built)
     await setRunStatus(ctx, runId, 'succeeded')
     await emitStep(ctx, runId, phase, { phase: 'report', label: 'Answered with citations', status: 'succeeded' })
-    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents: budget.costCents, agentRunId: runId })
+    // Counts the run. Its cost is already on the per-call rows above — carrying it here as
+    // well is what doubled month-to-date spend and tripped the cap at half the real figure.
+    await recordUsageRecord(ctx, { unit: 'agent_run', quantity: 1, costCents: 0, agentRunId: runId })
     return built
   })
 
