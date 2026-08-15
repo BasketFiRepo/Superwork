@@ -5,6 +5,7 @@ import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
 import { ingestDocument } from '../retrieval/ingest.js'
+import { recordIngestion } from '../retrieval/ingestion-queue.js'
 
 /**
  * Meetings and the transcript pipeline (§12.5).
@@ -324,7 +325,7 @@ export async function attachTranscript(
       ${meeting.companyId}, ${meeting.projectId}, ${actor.userId}, 'internal', 'pending', ${ctx.userId}
     ) RETURNING id`
 
-  await ingestDocument(ctx, {
+  const transcriptIngest = await ingestDocument(ctx, {
     documentId: docRow!.id,
     body: markdown,
     title: `Transcript — ${meeting.title}`,
@@ -334,6 +335,11 @@ export async function attachTranscript(
     ownerId: actor.userId,
     // Participant speech includes external voices; scan it like any untrusted source.
     untrusted: input.segments.some((s) => !s.speakerUserId),
+  })
+  await recordIngestion(ctx, {
+    documentId: docRow!.id,
+    reason: `Transcript of “${meeting.title}”`,
+    result: transcriptIngest,
   })
 
   await ctx.sql`

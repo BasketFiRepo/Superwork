@@ -246,6 +246,9 @@ async function verifyIndex(
 export async function purgeDocument(ctx: TenantContext, documentId: string): Promise<void> {
   const sql = ctx.sql
   await sql`DELETE FROM document_chunks WHERE organization_id = ${ctx.organizationId} AND document_id = ${documentId}`
+  // The FK cascades, but the guarantee should not depend on a schema detail written two
+  // migrations away: a purged document leaves no record that it was ever indexed.
+  await sql`DELETE FROM ingestion_jobs WHERE organization_id = ${ctx.organizationId} AND document_id = ${documentId}`
   await sql`DELETE FROM document_versions WHERE organization_id = ${ctx.organizationId} AND document_id = ${documentId}`
   await sql`
     UPDATE memory_facts SET state = 'forgotten', deleted_at = now()
