@@ -22,7 +22,11 @@ export function RunWatchersButton({ label = 'Check for new insights' }: { label?
     const parts = [`${result.created} new`]
     if (result.deduped) parts.push(`${result.deduped} already raised`)
     if (result.suppressed) parts.push(`${result.suppressed} held back by the daily cap`)
-    if (result.muted?.length) parts.push(`${result.muted.length} watcher muted for a high dismissal rate`)
+    // Muting is no longer one rule with one number behind it, so the summary counts them
+    // and the row on the screen below says which watcher and why.
+    if (result.muted?.length) {
+      parts.push(`${result.muted.length} muted by what people said about them — see the rows below`)
+    }
     setNote(parts.join(' · '))
     router.refresh()
   }

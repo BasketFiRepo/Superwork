@@ -74,8 +74,16 @@ try {
   console.log('\nCreating, simulating and publishing an agent…\n')
   const agentId = await withTenant(session, async (ctx) => {
     const actor = await loadActor(ctx)
+    // A previous run leaves this agent published with the wider grants it asked for, and a
+    // change request against a configuration that already matches is refused — correctly —
+    // as "nothing changed". The beat owns this key, so it starts by clearing its own agent
+    // rather than by asking for a change that cannot exist.
     const existing = (await listAgents(ctx, actor)).find((agent) => agent.key === 'phase3_watch')
-    if (existing) return existing.agentId
+    if (existing) {
+      await ctx.sql`
+        UPDATE agents SET deleted_at = now()
+        WHERE organization_id = ${ctx.organizationId} AND id = ${existing.agentId}`
+    }
     const created = await createAgentDraft(ctx, actor, {
       key: 'phase3_watch',
       name: 'Quiet Account Watch',

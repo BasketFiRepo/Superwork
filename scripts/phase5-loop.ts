@@ -94,6 +94,7 @@ import {
   previewSchedule,
   setWorkflowSchedule,
   trustLedger,
+  recordInsightFeedback,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -102,6 +103,8 @@ import {
   continueWorkflowAfterApproval,
   runDueWatchers,
   runDueWorkflows,
+  runWatchers,
+  mutedWatchers,
   runWorkflow,
   simulateWorkflow,
   watcherSchedules,
@@ -577,6 +580,19 @@ try {
     hold.released ?? 'it was allowed')
   ok('And the hold is on the record while it stands', hold.all.some((entry) => entry.id === hold.placed.id && entry.live))
 
+  // And then it comes off. The beat used to end with the refusal, which meant every run
+  // left a live legal hold on the demo — suspending retention and blocking erasure for one
+  // person, for good. A loop that leaves the product in a state it would not choose is not
+  // a loop that ran.
+  const releasedProperly = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+    releaseHold(ctx, await loadActor(ctx), {
+      holdId: hold.placed.id,
+      reason: 'The matter is closed; the loop is finished with it.',
+    }),
+  )
+  ok('And it comes off once somebody confirms who they are', !releasedProperly.live,
+    `released by ${releasedProperly.releasedByName ?? 'nobody'}`)
+
   // ---- What it learns, and who decides ------------------------------------
   console.log('\nThe assistant notices something, and a person decides…\n')
 
@@ -592,6 +608,21 @@ try {
   }
 
   const memoryDoc = await withTenant(session, async (ctx) => {
+    // Anything this beat left behind on an earlier run, cleared through the product's own
+    // delete. Extraction dedupes: ingesting the same standard twice produces no new
+    // candidates, so a run that left its document behind starves the next one of anything
+    // to agree with. The beat owns this title, so it is safe to own the cleanup too.
+    const stale = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND title = 'Reefer handling standard'
+        AND deleted_at IS NULL`
+    for (const old of stale) {
+      await deleteDocument(ctx, await loadActor(ctx), {
+        documentId: old.id,
+        reason: 'Left behind by an earlier run of the acceptance loop.',
+      })
+    }
+
     const [doc] = await ctx.sql<{ id: string }[]>`
       INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, is_demo, created_by)
       VALUES (${ctx.organizationId}, 'Reefer handling standard', 'policy', 'internal', 'pending', true, ${session.userId})
@@ -619,7 +650,19 @@ try {
     `${inUse.length} already agreed, none of them from this run`)
   ok('The first answer had to read the document to say it', firstAnswer.length > 0)
 
-  const candidate = noticed.candidates[0]!
+  // The candidate this beat agrees with has to come from the document this beat just
+  // ingested, and has to be one nothing is already agreed for — the demo is seeded with
+  // agreed facts about the same subject, and taking whichever candidate happened to sort
+  // first made the beat pass or fail on the order of a list.
+  const alreadyAgreed = new Set(inUse.map((fact) => `${fact.subject}|${fact.predicate}`))
+  const candidate = noticed.candidates.find(
+    (fact) =>
+      fact.citation?.documentId === memoryDoc && !alreadyAgreed.has(`${fact.subject}|${fact.predicate}`),
+  )
+  ok('There is something to agree with that nothing is already agreed for', Boolean(candidate),
+    candidate ? `${candidate.subject} ${candidate.predicate}` : 'none from this document')
+  if (!candidate) throw new Error('The memory beat has nothing it can agree with.')
+
   const agreed = await withTenant(session, async (ctx) => confirmMemory(ctx, await loadActor(ctx), candidate.id))
   ok('A person agrees, and is named on it', agreed.state === 'confirmed' && Boolean(agreed.confirmedByName),
     agreed.confirmedByName ?? 'nobody')
@@ -658,6 +701,19 @@ try {
     `${forgotten.removed.memories} forgotten`)
   ok('And it stops being recalled',
     !forgotten.recalled.some((fact) => fact.citation?.documentId === memoryDoc))
+
+  // Put the demo back. The candidate this beat agreed with can cite a *seeded* document
+  // rather than the one the beat made, in which case deleting the beat's document leaves a
+  // confirmed fact behind — and the next run of the loop cannot agree with anything on the
+  // same subject, because something is already agreed for it. The loop failed on its second
+  // run for exactly that reason: a beat that only cleans up what it can see is not clean.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE memory_facts SET deleted_at = now()
+      WHERE organization_id = ${ctx.organizationId}
+        AND id IN (${agreed.id}, ${corrected.id})
+        AND deleted_at IS NULL`
+  })
 
   // ---- Who can find a document --------------------------------------------
   console.log('\nOne document is taken out of general circulation…\n')
@@ -1578,6 +1634,71 @@ try {
   const restoredPlan = await withTenant(session, async (ctx) => checkSpendLimits(ctx, 'business'))
   ok('The demo is left running again', restoredPlan.allow)
 
+  // ---- What people said when they threw an insight away ---------------------
+  console.log('\nThe question the card has always asked is finally read…\n')
+
+  // Twenty-two of one watcher's insights, every one of them dismissed as *already handled*.
+  // Under the rule this replaces — dismissals over 70% — that watcher would be switched off
+  // for being right. One person can rate twenty-two different insights; the vote that is
+  // capped at one is per insight, not per watcher.
+  const rateMany = async (watcher: string, reason: string, count: number) =>
+    withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      for (let index = 0; index < count; index += 1) {
+        const [row] = await ctx.sql<{ id: string }[]>`
+          INSERT INTO insights (
+            organization_id, watcher, type, severity, title, body, evidence, entities,
+            recommended_actions, dedupe_key, assigned_to, created_by
+          ) VALUES (
+            ${ctx.organizationId}, ${watcher}, 'loop', 'medium', ${`loop feedback ${watcher} ${index}`},
+            'Raised by the acceptance loop.', '[{"claim":"the loop made this","sourceType":"company"}]'::jsonb,
+            '[]'::jsonb, '[{"label":"Look","tool":"navigate","args":{"route":"/insights"}}]'::jsonb,
+            ${`loop-feedback-${watcher}-${index}`}, ${ctx.userId}, ${ctx.userId}
+          )
+          ON CONFLICT (organization_id, dedupe_key) WHERE deleted_at IS NULL DO NOTHING
+          RETURNING id`
+        if (!row) continue
+        await recordInsightFeedback(ctx, actor, {
+          insightId: row.id,
+          helpful: false,
+          reason: reason as 'already_handled',
+          status: 'dismissed',
+        })
+      }
+    })
+
+  await rateMany('knowledge_gap', 'already_handled', 22)
+  await rateMany('approval_aging', 'wrong', 22)
+
+  const verdicts = await withTenant(session, async (ctx) => watcherSchedules(ctx))
+  const late = verdicts.find((row) => row.key === 'knowledge_gap')
+  const bad = verdicts.find((row) => row.key === 'approval_aging')
+
+  ok('A watcher everybody said was right, and late, keeps running',
+    late?.quality?.verdict === 'late' && late.muted === false, late?.quality?.reason.slice(0, 64) ?? '')
+  ok('A watcher people said was wrong stops',
+    bad?.quality?.verdict === 'muted' && bad.muted === true, bad?.quality?.reason.slice(0, 64) ?? '')
+
+  const feedbackSweep = await runWatchers(session, ['knowledge_gap', 'approval_aging'])
+  ok('And the sweep skips the muted one by name, not the late one',
+    feedbackSweep.muted.includes('approval_aging') && !feedbackSweep.muted.includes('knowledge_gap'),
+    feedbackSweep.muted.join(', '))
+
+  // Put the demo back: twenty-two dismissals apiece is the loop's opinion, not the demo's.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM insight_feedback
+      WHERE organization_id = ${ctx.organizationId}
+        AND insight_id IN (
+          SELECT id FROM insights
+          WHERE organization_id = ${ctx.organizationId} AND dedupe_key LIKE 'loop-feedback-%')`
+    await ctx.sql`
+      DELETE FROM insights
+      WHERE organization_id = ${ctx.organizationId} AND dedupe_key LIKE 'loop-feedback-%'`
+  })
+  const afterCleanup = await withTenant(session, async (ctx) => mutedWatchers(ctx))
+  ok('The demo is left with nothing muted', !afterCleanup.includes('approval_aging'), afterCleanup.join(', '))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1597,7 +1718,9 @@ try {
         'escalation reached a manager instead of the person it was written about, after they had been \n' +
         'asked themselves and told that it happened; and a person was invited into the company, joined, \n' +
         'and could not be invited above the role of whoever invited them; and the plan a company pays \n' +
-        'for became one number, read from the database, that an organization can tighten and never widen.\n',
+        'for became one number, read from the database, that an organization can tighten and never widen; \n' +
+        'and what people say when they throw an insight away is read at last, so a watcher they call wrong \n' +
+        'stops and one they had already handled keeps running.\n',
   )
 } catch (error) {
   console.error(error)

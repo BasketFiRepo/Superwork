@@ -648,6 +648,33 @@ bug report.
 
 **Settings → Usage and cost.** See ADR 0030.
 
+## What people said when they threw an insight away
+
+The card has asked *why* since Phase 3 — not useful, wrong, already handled, not my job —
+and written the answer to `insight_feedback`, under a comment saying the reasons *"tune
+future thresholds per organization and per user"*. Nothing read the table. Being asked a
+question implies the answer matters.
+
+What was read instead was the raw dismissal rate: above 70% over twenty insights, a watcher
+was switched off. That treats four different sentences as one. **"You were wrong" and "you
+were right and I had already dealt with it" are opposite verdicts**, and muting on the
+second switches off something that works — invisibly, because a muted watcher looks exactly
+like a quiet one.
+
+- **Only *wrong* and *not useful* count against a watcher.** Above 70% of twenty ratings it
+  stops running, and the row says the arithmetic.
+- ***Already handled* reads as late, not bad** — the answer is to run it earlier.
+- ***Not my job* reads as misrouted** — it is right, and reaching the wrong people.
+- **Below twenty ratings nothing is decided from what people said.** A rate from three votes
+  is a guess with a percentage sign on it, and the old dismissal rule still applies
+  underneath so a watcher thrown away repeatedly with nothing said is still muted.
+- **One vote per person per insight.** Otherwise one person can mute a watcher alone.
+- **Rating needs `insight:read`; dismissing needs `insight:update`** — and both are checked
+  before anything is written. The route had no permission check at all: a `guest` could rate
+  any insight and dismiss it for everybody.
+
+**Insights → each watcher's row.** See ADR 0031.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1123,6 +1150,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0028](docs/adr/0028-the-database-writes-the-history.md) | The database writes the history |
 | [0029](docs/adr/0029-an-invitation-is-a-credential.md) | An invitation is a credential |
 | [0030](docs/adr/0030-a-limit-a-tenant-can-raise-is-not-a-limit.md) | A limit a tenant can raise is not a limit |
+| [0031](docs/adr/0031-a-watcher-that-is-right-and-unwelcome-is-not-one-that-is-wrong.md) | A watcher that is right and unwelcome is not one that is wrong |
 
 ## Configuration
 

@@ -31,6 +31,7 @@ import {
   scheduleLadder,
   setQuota,
   share,
+  unshare,
   worksCouncilReview,
 } from '@superwork/core'
 import { demoSession } from '@superwork/agent/evals/harness'
@@ -171,7 +172,7 @@ try {
       WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'viewer' AND m.deleted_at IS NULL LIMIT 1`
     if (!project || !viewer) return null
 
-    await share(ctx, actor, {
+    const grant = await share(ctx, actor, {
       subjectType: 'user',
       subjectId: viewer.id,
       relation: 'editor',
@@ -188,6 +189,11 @@ try {
       organizationId: ctx.organizationId,
       riskTier: 'low',
     })
+
+    // Put the demo back. This beat's point is that a share grants one thing; leaving it in
+    // place means every later run — and the browser check — reads a demo that somebody
+    // silently handed a project to.
+    await unshare(ctx, actor, { objectType: 'project', objectId: project.id, tupleId: grant.id })
     return { role: after.role, allowed: decision.allow, reason: decision.reason, name: viewer.name }
   })
 

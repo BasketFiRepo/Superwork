@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation'
 
 /**
  * An insight with no evidence must not render; one with no recommended action is noise
- * (§9.2). Thumbs-down asks *why*, and the reason tunes future thresholds.
+ * (§9.2). Dismissing asks *why*, and the answer is read: a watcher people call wrong stops
+ * running, one people had already handled is re-timed instead (ADR 0031). The four answers
+ * are not four ways of saying the same thing, so the question does not lead with one.
  */
 
 export interface InsightView {
@@ -32,6 +34,8 @@ export function InsightCard({ insight }: { insight: InsightView }) {
   const [asking, setAsking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  /** Set when a dismissal was refused for permission — the rating alone is still allowed. */
+  const [refusedReason, setRefusedReason] = useState<string | null>(null)
 
   if (insight.evidence.length === 0 || insight.recommendedActions.length === 0) return null
 
@@ -47,8 +51,19 @@ export function InsightCard({ insight }: { insight: InsightView }) {
     })
     setBusy(false)
     setAsking(false)
-    if (response.ok) router.refresh()
-    else setNote('That could not be saved. Try again.')
+    if (response.ok) {
+      setRefusedReason(null)
+      router.refresh()
+      return
+    }
+    // The server's words, not a shrug. When dismissing is refused for permission it says so
+    // and says the rating on its own would be accepted — so offer exactly that, rather than
+    // quietly sending something different from what was pressed.
+    const payload = await response.json().catch(() => ({ error: 'That could not be saved. Try again.' }))
+    setNote(payload.error ?? 'That could not be saved. Try again.')
+    setRefusedReason(
+      payload.failureClass === 'permission' && body['status'] ? String(body['reason'] ?? '') : null,
+    )
   }
 
   async function act(action: InsightView['recommendedActions'][number]) {
@@ -107,9 +122,29 @@ export function InsightCard({ insight }: { insight: InsightView }) {
 
         {note ? <div className="banner banner-accent">{note}</div> : null}
 
+        {refusedReason ? (
+          <div className="row wrap" data-testid="insight-rating-only">
+            <button
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() => send({ helpful: false, reason: refusedReason })}
+            >
+              Record what I said, without dismissing it
+            </button>
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setRefusedReason(null)}>
+              Leave it
+            </button>
+          </div>
+        ) : null}
+
         {asking ? (
           <div className="stack stack-4">
-            <span className="micro">Why is this not useful?</span>
+            <span className="micro">Why are you dismissing this?</span>
+            <span className="small muted">
+              Read, not filed: &ldquo;wrong&rdquo; and &ldquo;not useful&rdquo; count against the
+              watcher, &ldquo;already handled&rdquo; means it was right and slow, and &ldquo;not my
+              job&rdquo; means it reached the wrong person.
+            </span>
             <div className="row wrap">
               {DISMISS_REASONS.map((reason) => (
                 <button

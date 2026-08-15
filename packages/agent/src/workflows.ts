@@ -37,6 +37,40 @@ import type { RunSession } from './runtime.js'
  * activation gate, and it is the only kind of run a draft workflow can have.
  */
 
+/**
+ * The plan a workflow run is working from.
+ *
+ * It is not invented for the record: it is the compiled graph of the version being run, the
+ * readback a person approved when they activated it, and the version's ordinal — so the
+ * question "what was this going to do, and who agreed to it" is answerable from the run
+ * alone. There is no gate outcome beside it, because a workflow is gated per stopping step
+ * as it walks rather than once up front; the approval nodes are in the steps below.
+ */
+function planFromGraph(workflow: WorkflowView, graph: WorkflowGraph): Record<string, unknown> {
+  return {
+    plan: {
+      intent: workflow.name,
+      summary: workflow.readback,
+      answerOnly: false,
+      steps: graph.nodes
+        .filter((node) => node.type === 'action' || node.type === 'notify' || node.type === 'approval')
+        .map((node) => ({
+          id: node.id,
+          tool: node.ref ?? node.type,
+          args: node.args ?? {},
+          intent: node.label,
+        })),
+      needsAttention: [],
+    },
+    source: {
+      workflowId: workflow.id,
+      versionId: workflow.currentVersionId,
+      versionOrdinal: workflow.currentVersionOrdinal,
+      trigger: graph.trigger,
+    },
+  }
+}
+
 export interface WorkflowStepOutcome {
   nodeId: string
   nodeType: string
@@ -134,6 +168,14 @@ async function execute(
       await ctx.sql`
         UPDATE workflow_runs SET agent_run_ids = array_append(agent_run_ids, ${agentRunId}::uuid)
         WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
+      // What this run intends to do, before it does any of it. An agent run stores the plan
+      // its planner produced; a workflow run had one all along — the compiled graph a person
+      // read back and activated — and was storing nothing, so the compliance review's
+      // question "for any action, can you show what was proposed beforehand?" answered *no*
+      // for every action a workflow ever took.
+      await ctx.sql`
+        UPDATE agent_runs SET plan = ${ctx.sql.json(asJson(planFromGraph(workflow, workflow.graph!)))}
+        WHERE organization_id = ${ctx.organizationId} AND id = ${agentRunId}`
       await setRunStatus(ctx, agentRunId, 'running')
     }
     return { workflow, runId, agentRunId, actor, capacity }
