@@ -45,6 +45,7 @@ import {
   correctMemory,
   deleteDocument,
   documentAudience,
+  getDocument,
   getRun,
   getTask,
   grantDocumentAccess,
@@ -54,6 +55,7 @@ import {
   listDocuments,
   listMemories,
   listProjects,
+  listSpaces,
   listShares,
   listTasks,
   openDocumentToEveryone,
@@ -63,6 +65,7 @@ import {
   unshare,
   placeHold,
   previewErasure,
+  relationship360,
   releaseHold,
   retentionPolicies,
   saveCustomTool,
@@ -1007,6 +1010,124 @@ try {
       listTasks(ctx, await loadActor(ctx), { projectId: project.id, limit: 200 }),
     )).tasks.length === 0)
 
+  // ---- A shelf, and the account it is not ----------------------------------
+  console.log('\nA knowledge space is shared, and a company is shared differently…\n')
+
+  const space = await withTenant(session, async (ctx) => {
+    const spaces = await listSpaces(ctx, await loadActor(ctx))
+    return spaces[0] ?? null
+  })
+  ok('The seeded knowledge space is read by something at last', space !== null,
+    space ? `${space.name} · ${space.documentCount} filed` : 'no spaces')
+  ok('And the documents in it kept their shelf through indexing', (space?.documentCount ?? 0) > 0,
+    `${space?.documentCount ?? 0} filed`)
+
+  if (space) {
+    const spaceShare = await withTenant(session, async (ctx) =>
+      share(ctx, await loadActor(ctx), {
+        subjectType: 'user',
+        subjectId: contractor!.id,
+        relation: 'viewer',
+        objectType: 'knowledge_space',
+        objectId: space.id,
+        reason: 'Working through the operating procedures with us.',
+      }),
+    )
+    ok('A knowledge space can be shared at all — the permission catalogue spells it differently',
+      spaceShare.objectLabel === space.name, spaceShare.objectLabel ?? 'no label')
+
+    // Every seeded document is `internal` and a contractor reads up to `public`, so the
+    // shelf opens and everything on it stays shut. That is the guarantee, asserted first.
+    const stillShut = await withTenant(asContractor, async (ctx) => {
+      const actor = await loadActor(ctx)
+      return {
+        spaces: (await listSpaces(ctx, actor)).map((row) => row.id),
+        documents: (await listDocuments(ctx, actor, { spaceId: space.id, limit: 200 })).length,
+      }
+    })
+    ok('It opens the shelf', stillShut.spaces.includes(space.id))
+    ok('While everything on it classified above them stays shut',
+      stillShut.documents === 0, `${stillShut.documents} of ${space.documentCount} readable`)
+
+    // Publish one — chunks carry their own classification, so retrieval needs both moved
+    // or search and the page would disagree about the same document.
+    const published = await withTenant(session, async (ctx) => {
+      const [row] = await ctx.sql<{ id: string; title: string }[]>`
+        SELECT id, title FROM documents
+        WHERE organization_id = ${ctx.organizationId} AND space_id = ${space.id}
+          AND deleted_at IS NULL AND index_status = 'indexed'
+        ORDER BY title LIMIT 1`
+      await ctx.sql`UPDATE documents SET sensitivity = 'public' WHERE id = ${row!.id}`
+      await ctx.sql`UPDATE document_chunks SET sensitivity = 'public' WHERE document_id = ${row!.id}`
+      return row!
+    })
+
+    const onTheShelf = await withTenant(asContractor, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const documents = await listDocuments(ctx, actor, { spaceId: space.id, limit: 200 })
+      return {
+        documents: documents.map((row) => row.id),
+        opens: await getDocument(ctx, actor, published.id).then((doc) => doc.spaceName, () => null),
+        cited: (await hybridSearch(ctx, actor, published.title)).chunks.some(
+          (chunk) => chunk.documentId === published.id,
+        ),
+      }
+    })
+    ok('One they are cleared for comes through', onTheShelf.documents.includes(published.id),
+      `${onTheShelf.documents.length} readable · “${published.title}”`)
+    ok('Anything listed can be opened, and knows its shelf', onTheShelf.opens === space.name,
+      onTheShelf.opens ?? 'refused')
+    ok('And the assistant can cite it, so search and the page agree', onTheShelf.cited)
+
+    await withTenant(session, async (ctx) =>
+      unshare(ctx, await loadActor(ctx), {
+        objectType: 'knowledge_space',
+        objectId: space.id,
+        tupleId: spaceShare.id,
+      }),
+    )
+    ok('Handing the shelf back takes what was on it',
+      (await withTenant(asContractor, async (ctx) =>
+        listDocuments(ctx, await loadActor(ctx), { spaceId: space.id, limit: 200 }),
+      )).length === 0)
+  }
+
+  const account = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ id: string; name: string }[]>`
+      SELECT id, name FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY name LIMIT 1`
+    return row!
+  })
+  const companyShare = await withTenant(session, async (ctx) =>
+    share(ctx, await loadActor(ctx), {
+      subjectType: 'user',
+      subjectId: contractor!.id,
+      relation: 'viewer',
+      objectType: 'company',
+      objectId: account.id,
+      reason: 'Covering this account while David is away.',
+    }),
+  )
+  ok('A company can be shared, and the grant names it', companyShare.objectLabel === account.name,
+    companyShare.objectLabel ?? 'no label')
+
+  const asAccount = await withTenant(asContractor, async (ctx) =>
+    relationship360(ctx, await loadActor(ctx), account.id),
+  )
+  ok('It hands over the account view', asAccount.company.id === account.id)
+  ok('But a company is not a folder — its work is not handed over with it',
+    asAccount.openTasks.length === 0, `${asAccount.openTasks.length} tasks`)
+  ok('And neither are documents they could not open themselves',
+    asAccount.documents.length === 0, `${asAccount.documents.length} documents`)
+
+  await withTenant(session, async (ctx) =>
+    unshare(ctx, await loadActor(ctx), {
+      objectType: 'company',
+      objectId: account.id,
+      tupleId: companyShare.id,
+    }),
+  )
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1020,7 +1141,8 @@ try {
         'another until it was actually done; a contractor saw exactly one team’s work and nothing else; and \n' +
         'one feature was turned off for everybody while one person kept it; and one task was handed to one \n' +
         'colleague and taken back; and a whole project was handed over with the work inside it, which came \n' +
-        'back when it did.\n',
+        'back when it did; and a shelf of knowledge was lent with what is on it while an account was lent \n' +
+        'without what is filed against it.\n',
   )
 } catch (error) {
   console.error(error)

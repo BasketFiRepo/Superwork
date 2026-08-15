@@ -1,5 +1,5 @@
 import type { IndexStatus, Sensitivity, TenantContext } from '@superwork/db'
-import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
+import { can, grantedScope, readCeiling, sensitivityAtMost, sharedObjectIds, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
@@ -20,6 +20,9 @@ export interface DocumentView {
   ownerName: string | null
   departmentId: string | null
   teamId: string | null
+  /** The shelf it sits on. Written on every document since 0004 and selected by nothing. */
+  spaceId: string | null
+  spaceName: string | null
   chunkCount: number
   createdAt: Date
   updatedAt: Date
@@ -35,47 +38,66 @@ const SELECT_DOC = (ctx: TenantContext) => ctx.sql`
          -- team-scoped list matched on d.team_id and then getDocument passed an empty
          -- teamIds and refused the very row the list had just shown.
          d.team_id AS "teamId",
+         d.space_id AS "spaceId", ks.name AS "spaceName",
          (SELECT count(*)::int FROM document_chunks ch
            WHERE ch.document_id = d.id AND ch.version_id = d.current_version_id) AS "chunkCount",
          d.created_at AS "createdAt", d.updated_at AS "updatedAt"
   FROM documents d
   LEFT JOIN companies c ON c.id = d.company_id
-  LEFT JOIN users u ON u.id = d.owner_id`
+  LEFT JOIN users u ON u.id = d.owner_id
+  LEFT JOIN knowledge_spaces ks ON ks.id = d.space_id`
 
 export async function listDocuments(
   ctx: TenantContext,
   actor: Actor,
-  filter: { search?: string; companyId?: string; limit?: number } = {},
+  filter: { search?: string; companyId?: string; spaceId?: string; limit?: number } = {},
 ): Promise<DocumentView[]> {
   // Which documents may this actor consider, rather than "may they read all of them".
   const scope = grantedScope(actor, 'document:read', 'document')
-  if (scope === null) {
+  const sql = ctx.sql
+  const shared = sharedObjectIds(actor, 'document')
+  // A knowledge space shared with somebody reaches the documents filed in it, the way a
+  // project reaches its tasks (ADR 0024). A space is where a document lives; lending the
+  // shelf without what is on it would be a share of a name.
+  const sharedSpaces = sharedObjectIds(actor, 'knowledge_space')
+
+  // A role with no grant of this kind at all can still have been *given* a row, and a gate
+  // that throws before any row is considered denies the one thing a tuple exists to allow.
+  // Refuse only when there is genuinely nothing to ask about.
+  if (scope === null && shared.length === 0 && sharedSpaces.length === 0) {
     const decision = can(actor, 'document:read', { type: 'document', organizationId: ctx.organizationId })
     throw new PermissionError(decision.reason)
   }
-  const sql = ctx.sql
-  const shared = sharedObjectIds(actor, 'document')
+
   const visible =
     scope === 'org'
       ? sql``
       : sql`AND (
             ${
-              scope === 'department'
+              scope === null
+                ? sql`false`
+                : scope === 'department'
                 ? sql`d.department_id = ANY(${actor.departmentIds}::uuid[])`
                 : scope === 'team'
                   ? sql`d.team_id = ANY(${actor.teamIds}::uuid[])`
                   : sql`d.owner_id = ${actor.userId}`
             }
             ${shared.length ? sql`OR d.id = ANY(${shared}::uuid[])` : sql``}
+            ${sharedSpaces.length ? sql`OR d.space_id = ANY(${sharedSpaces}::uuid[])` : sql``}
           )`
-  return sql<DocumentView[]>`
+  const rows = await sql<DocumentView[]>`
     ${SELECT_DOC(ctx)}
     WHERE d.organization_id = ${ctx.organizationId} AND d.deleted_at IS NULL
       ${visible}
+      ${filter.spaceId ? sql`AND d.space_id = ${filter.spaceId}` : sql``}
       ${filter.search ? sql`AND d.title ILIKE ${'%' + filter.search + '%'}` : sql``}
       ${filter.companyId ? sql`AND d.company_id = ${filter.companyId}` : sql``}
     ORDER BY d.created_at DESC
     LIMIT ${Math.min(filter.limit ?? 100, 200)}`
+
+  // Classification is per row and cannot ride in the scope predicate. Dropped here rather
+  // than listed and then refused on open — the list and the page have to agree.
+  return rows.filter((row) => sensitivityAtMost(row.sensitivity, readCeiling(actor)))
 }
 
 export async function getDocument(ctx: TenantContext, actor: Actor, id: string): Promise<DocumentView> {
@@ -93,6 +115,9 @@ export async function getDocument(ctx: TenantContext, actor: Actor, id: string):
     departmentId: doc.departmentId,
     teamIds: doc.teamId ? [doc.teamId] : [],
     sensitivity: doc.sensitivity,
+    // A space carries no classification of its own, so it lends only reach; the document's
+    // own classification is checked above and is what actually gates the read.
+    containers: doc.spaceId ? [{ type: 'knowledge_space', id: doc.spaceId }] : [],
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
   return doc

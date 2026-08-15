@@ -46,14 +46,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 668 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 695 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams → flags → sharing → projects → spaces
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -460,6 +460,39 @@ none of its work"* would both have been true.
 
 See ADR 0024.
 
+### A shelf, and the account that is not one
+
+A knowledge space was not merely unbuilt — it was impossible. A tuple names the object
+`knowledge_space`; the permission catalogue spells the domain `knowledge`. Nothing
+reconciled the two, so `can(actor, 'knowledge_space:read')` matched no grant any role holds:
+the type was declared shareable and nobody below `owner` could share, or even read, one.
+
+- **A shelf is a container, an account is not.** The test is whether the content has another
+  home. A document lives in a space, so sharing the space lends a read of it. A company does
+  not contain its threads, commitments and documents — it is a *party* to them, and each
+  lives in the inbox, the ledger or the library. A company share hands over the account view
+  and the panel says what it does not reach.
+- **A space lends reach and nothing else.** It carries no classification of its own, so each
+  document is checked against its own. Sharing the Operations shelf with a contractor opens
+  the shelf and leaves every `internal` document on it shut.
+- **A space share reaches retrieval**, so the assistant can cite what you were given. A
+  project share does not, because a project has no relationship to the index and a space is
+  what the index is organised by.
+- **A list gate now considers what has been given.** All four scoped lists refused outright
+  when the role held no grant — before any row was considered — so a space *given* to a
+  `guest` was denied by the gate that runs before the predicate the tuple was meant to
+  satisfy. ADR 0021, one level further down.
+- **Indexing no longer unfiles a document.** `ingestDocument` assigned `space_id`,
+  `company_id`, `project_id`, `owner_id` and `department_id` from its own input, so the seed
+  filed every document into a space and the next statement set `space_id` back to `NULL`.
+  The spaces table was never disconnected — the filing was erased a millisecond after it was
+  written.
+- **The company 360 view stopped trusting one check.** Gated once on `company:read`, it
+  returned every task and document filed against the company, including ones the reader
+  could not open from their own screens. A `restricted` contract listed by name is content.
+
+See ADR 0025.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -770,9 +803,9 @@ away. They are evidence about query shape, not a 100,000-user result.
   a hold is released by somebody deciding to, not by a clock.
 - A task dependency has no type. There is one relation, "cannot be completed until", not a
   scheduling calculus.
-- Only the task, document and project lists are scope-aware. The other list endpoints still
-  gate at organization level, which is right for every role above `guest` and wrong in the
-  same way for `guest`.
+- The task, document, project and knowledge-space lists are scope-aware. The other list
+  endpoints still gate at organization level, which is right for every role above `guest`
+  and wrong in the same way for `guest`.
 
 ### Where we refuse on purpose
 
@@ -788,14 +821,17 @@ away. They are evidence about query shape, not a 100,000-user result.
 
 ### What is declared and inert
 
-- The share panel is on tasks, documents and projects. Companies and knowledge spaces are
-  shareable in the type and have no detail page to put a panel on.
-- A container share reaches one level and one relationship: a project's tasks. Documents and
-  meetings belong to things too and are not wired up. A rule with one caller is easier to
-  reason about than one with four and a test pack for one of them.
-- Sharing a project adds nobody to a circulation list, so a restricted document inside a
-  shared project stays restricted. "Shared the project" and "the assistant can cite
-  everything in it" are different statements, deliberately.
+- Every shareable type now has a panel: tasks, documents, projects, knowledge spaces and
+  companies. `ShareableType` and the interface finally agree.
+- A container share reaches two relationships: a project's tasks and a space's documents.
+  Meetings and conversations belong to companies and are deliberately not wired up — under
+  the rule in ADR 0025 they never will be, because each has a home of its own.
+- Sharing a project or a space adds nobody to a circulation list, so a restricted document
+  stays restricted either way. For a space this is load-bearing: adding the first name to a
+  document with no list *removes everybody else*, so syncing a space share across a shelf
+  would silently restrict every document on it.
+- Knowledge spaces are read, shared and filed into, but not authored. There is one seeded
+  space and no way to create a second from the interface.
 - `project_members` is written by the seed and read by nothing. It carries one row per
   project — the owner, who is already on the project row — so it says nothing the product
   does not already know. Sharing is the mechanism that grants project access.
@@ -904,6 +940,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0022](docs/adr/0022-a-switch-that-changes-nothing.md) | A switch that changes nothing |
 | [0023](docs/adr/0023-a-share-only-ever-adds.md) | A share only ever adds |
 | [0024](docs/adr/0024-a-container-lends-a-read.md) | A container lends a read, never a say |
+| [0025](docs/adr/0025-a-shelf-is-a-container-an-account-is-not.md) | A shelf is a container, an account is not |
 
 ## Configuration
 

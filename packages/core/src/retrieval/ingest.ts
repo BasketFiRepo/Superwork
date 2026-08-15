@@ -178,11 +178,16 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
         content_hash = ${contentHash},
         sensitivity = ${classification.sensitivity},
         doc_type = ${docType},
-        company_id = ${input.companyId ?? null},
-        project_id = ${input.projectId ?? null},
-        space_id = ${input.spaceId ?? null},
-        owner_id = ${input.ownerId ?? null},
-        department_id = ${input.departmentId ?? null},
+        -- Filing is kept unless this call restates it. These were assignments, so a
+        -- caller that only asked for indexing silently unfiled the document: the seed
+        -- inserted every document into a knowledge space and the very next statement set
+        -- space_id back to NULL, which is why the spaces table looked disconnected from
+        -- everything. Re-indexing is not a reason to forget where something lives.
+        company_id = coalesce(${input.companyId ?? null}, company_id),
+        project_id = coalesce(${input.projectId ?? null}, project_id),
+        space_id = coalesce(${input.spaceId ?? null}, space_id),
+        owner_id = coalesce(${input.ownerId ?? null}, owner_id),
+        department_id = coalesce(${input.departmentId ?? null}, department_id),
         quarantine_reason = NULL
       WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
 

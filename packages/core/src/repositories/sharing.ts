@@ -27,6 +27,26 @@ export type ShareableType = 'project' | 'document' | 'knowledge_space' | 'compan
 
 const RELATION_RANK: Record<Relation, number> = { viewer: 0, editor: 1, approver: 2, owner: 3 }
 
+/**
+ * The permission resource each shareable type is governed by.
+ *
+ * These are not always the same word. A knowledge space is `knowledge_space` as an object —
+ * it is a row in `knowledge_spaces` and the tuple names it that way — while the permission
+ * catalogue has always spelled the domain `knowledge`. Nothing reconciled the two, so
+ * `can(actor, 'knowledge_space:read')` matched no grant any role holds: a knowledge space
+ * was declared shareable and nobody below `owner` could share, or even read, one.
+ *
+ * Kept as an explicit table rather than a string transform, because the next mismatch will
+ * not be one an `s`-stripping rule would have caught either.
+ */
+const PERMISSION_RESOURCE: Record<ShareableType, string> = {
+  task: 'task',
+  document: 'document',
+  project: 'project',
+  company: 'company',
+  knowledge_space: 'knowledge',
+}
+
 export interface ShareView {
   id: string
   subjectType: 'user' | 'team' | 'department'
@@ -88,7 +108,7 @@ export function shareableRelations(
 ): Relation[] {
   return (Object.keys(VERB_FOR_RELATION) as Relation[]).filter(
     (relation) =>
-      can(actor, `${objectType}:${VERB_FOR_RELATION[relation]}`, {
+      can(actor, `${PERMISSION_RESOURCE[objectType]}:${VERB_FOR_RELATION[relation]}`, {
         type: objectType,
         id: objectId,
         organizationId,
@@ -111,7 +131,7 @@ export async function share(
   },
 ): Promise<ShareView> {
   // You cannot grant what you do not hold.
-  const decision = can(actor, `${input.objectType}:${VERB_FOR_RELATION[input.relation]}`, {
+  const decision = can(actor, `${PERMISSION_RESOURCE[input.objectType]}:${VERB_FOR_RELATION[input.relation]}`, {
     type: input.objectType,
     id: input.objectId,
     organizationId: ctx.organizationId,
@@ -199,7 +219,7 @@ export async function unshare(
   // A grant you cannot withdraw is worse than one you cannot make.
   const mine = tuple.grantedBy === actor.userId
   if (!mine) {
-    const decision = can(actor, `${input.objectType}:update`, {
+    const decision = can(actor, `${PERMISSION_RESOURCE[input.objectType]}:update`, {
       type: input.objectType,
       id: input.objectId,
       organizationId: ctx.organizationId,
@@ -232,14 +252,14 @@ export async function listShares(
   objectType: ShareableType,
   objectId: string,
 ): Promise<ShareView[]> {
-  const decision = can(actor, `${objectType}:read`, {
+  const decision = can(actor, `${PERMISSION_RESOURCE[objectType]}:read`, {
     type: objectType,
     id: objectId,
     organizationId: ctx.organizationId,
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
 
-  const mayRevokeAny = can(actor, `${objectType}:update`, {
+  const mayRevokeAny = can(actor, `${PERMISSION_RESOURCE[objectType]}:update`, {
     type: objectType,
     id: objectId,
     organizationId: ctx.organizationId,

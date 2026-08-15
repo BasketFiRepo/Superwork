@@ -709,6 +709,46 @@ try {
     await page.locator('[data-testid="share-revoke"]').first().isEnabled())
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
 
+  // ---- A shelf of knowledge, and an account -------------------------------
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="knowledge-spaces"]', { timeout: 15_000 })
+  ok('The library says which shelf things live on',
+    /where a document lives/i.test(await page.locator('[data-testid="knowledge-spaces"]').innerText()))
+  await page.locator('[data-testid="knowledge-spaces"] a').first().click()
+  await page.waitForSelector('[data-testid="space-documents"]', { timeout: 15_000 })
+
+  const spaceRows = await page.locator('[data-testid="space-document-row"]').count()
+  ok('A space lists what is filed on it — the column was written and read by nothing until now',
+    spaceRows > 0, `${spaceRows} documents`)
+  const spaceShareText = await page.locator('[data-testid="share-object"]').innerText()
+  ok('Sharing a space says it reaches the documents in it',
+    /read the documents filed in it/i.test(spaceShareText))
+  ok('And that it does not lift a document’s own classification',
+    /does not lift a document/i.test(spaceShareText))
+
+  await page.locator('[data-testid="share-add"]').click()
+  await page.waitForSelector('[data-testid="share-editor"]', { timeout: 15_000 })
+  await page.selectOption('#share-subject', { index: 1 })
+  await page.fill('#share-reason', 'Working through the operating procedures with us.')
+  await page.locator('[data-testid="share-confirm"]').click()
+  await page.waitForSelector('[data-testid="share-row"]', { timeout: 20_000 })
+  ok('A space share lands',
+    /Working through the operating procedures/i.test(
+      await page.locator('[data-testid="share-object"]').innerText(),
+    ))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/knowledge-space.png`, fullPage: true })
+
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('a[href^="/companies/"]', { timeout: 15_000 })
+  await page.locator('a[href^="/companies/"]').first().click()
+  await page.waitForSelector('[data-testid="share-object"]', { timeout: 15_000 })
+  const companyShareText = await page.locator('[data-testid="share-object"]').innerText()
+  ok('Sharing a company says it hands over the account view',
+    /hands over the account view/i.test(companyShareText))
+  ok('And says plainly what it does not reach',
+    /does not reach the documents or work filed against it/i.test(companyShareText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/company-share.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
