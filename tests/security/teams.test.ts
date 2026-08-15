@@ -110,6 +110,24 @@ describe('the role that could do nothing', () => {
     expect(before.one).toBe(false)
   })
 
+  it('still applies every other filter alongside the scope predicate', async () => {
+    // The scope is interpolated as a nested fragment beside the status array, the search
+    // term and the cursor. Composing those is where parameter binding goes wrong, and it
+    // goes wrong as a malformed array literal at runtime rather than at compile time.
+    for (const who of [session, guestSession]) {
+      await expect(
+        withTenant(who, async (ctx) =>
+          listTasks(ctx, await loadActor(ctx), {
+            status: ['backlog', 'todo', 'in_progress', 'waiting', 'blocked', 'review'],
+            overdueOnly: true,
+            search: 'the',
+            limit: 50,
+          }),
+        ),
+      ).resolves.toBeDefined()
+    }
+  })
+
   it('sees exactly its team’s work once it joins, and nothing else', async () => {
     await withTenant(session, async (ctx) =>
       addTeamMember(ctx, await loadActor(ctx), {

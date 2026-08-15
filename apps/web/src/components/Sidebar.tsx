@@ -66,7 +66,7 @@ export function Sidebar({
       title: 'Operate',
       items: [
         { href: '/approvals', label: 'Approvals', count: approvals, attention: approvals > 0 },
-        { href: '/insights', label: 'Insights', count: insights },
+        { href: '/insights', label: 'Insights', count: insights, flag: 'insights' },
         { href: '/workflows', label: 'Workflows', flag: 'workflows' },
         { href: '/analytics', label: 'AI ledger' },
         { href: '/activity', label: 'Activity' },
@@ -88,6 +88,7 @@ export function Sidebar({
         { href: '/settings/retention', label: 'Retention and erasure' },
         { href: '/settings/holds', label: 'Legal holds' },
         { href: '/settings/teams', label: 'Teams' },
+        { href: '/settings/features', label: 'Features' },
         { href: '/settings/queue', label: 'Agent queue' },
         { href: '/settings/billing', label: 'Usage and cost' },
         { href: '/settings/ai-governance', label: 'AI governance' },
