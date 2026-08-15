@@ -72,6 +72,19 @@ export function startOfDay(instant: Date, timeZone: string): Date {
   return zonedTimeToUtc({ year: p.year, month: p.month, day: p.day }, timeZone)
 }
 
+/**
+ * The organization's calendar date, as `YYYY-MM-DD`.
+ *
+ * `startOfDay(...)` returns the *instant* the day began, which is the right answer for
+ * comparing timestamps and the wrong one for comparing against a `date` column: cast to
+ * `::date` in a UTC session, midnight in any timezone ahead of UTC lands on the previous
+ * day. That made a milestone due yesterday read as not yet late (§26.5).
+ */
+export function calendarDate(timeZone: string, instant: Date = new Date()): string {
+  const p = localParts(instant, timeZone)
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
+}
+
 export function endOfDay(instant: Date, timeZone: string): Date {
   return new Date(addDays(startOfDay(instant, timeZone), 1, timeZone).getTime() - 1)
 }

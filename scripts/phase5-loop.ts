@@ -107,6 +107,16 @@ import {
   listNotifications,
   sweepFollowUps,
   agentGrants,
+  addMilestone,
+  archiveDepartment,
+  archiveSpace,
+  computeProjectHealth,
+  createDepartment,
+  createSpace,
+  listDepartments,
+  projectMilestones,
+  removeMilestone,
+  updateDepartment,
   monitoringPolicy,
   nudgeBudget,
   removeAgentGrant,
@@ -2054,6 +2064,82 @@ try {
     })
   })
 
+  // ---- Three things the product showed and could not make -------------------
+  console.log('\nThe structure it was governed by can finally be built…\n')
+
+  const structure = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const made = await createDepartment(ctx, actor, { name: 'Loop Customs' })
+    const parent = made.find((row) => row.name === 'Loop Customs')!
+    const nested = await createDepartment(ctx, actor, { name: 'Brokerage', parentId: parent.id })
+    const renamed = await updateDepartment(ctx, actor, { id: parent.id, name: 'Loop Trade' })
+    return { parent, nested, renamed }
+  })
+  ok('A department can be made, and the database writes its path',
+    structure.nested.find((row) => row.name === 'Brokerage')?.path === 'Loop Customs / Brokerage')
+  ok('Renaming the parent rewrites everything underneath it',
+    structure.renamed.find((row) => row.name === 'Brokerage')?.path === 'Loop Trade / Brokerage',
+    structure.renamed.find((row) => row.name === 'Brokerage')?.path ?? 'no path')
+
+  const archiveRefused = await withTenant(session, async (ctx) =>
+    archiveDepartment(ctx, await loadActor(ctx), {
+      id: structure.parent.id,
+      reason: 'Trying to archive one with something in it.',
+    }).then(() => null, (error: Error) => error.message),
+  )
+  ok('And one with something still in it cannot be archived',
+    /sub-departments/i.test(archiveRefused ?? ''), (archiveRefused ?? 'it was allowed').slice(0, 70))
+
+  const milestoned = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const projects = await listProjects(ctx, actor)
+    const target = projects[0]!
+    const before = await computeProjectHealth(ctx, target.id)
+    const added = await addMilestone(ctx, actor, {
+      projectId: target.id,
+      name: 'loop milestone — signed off',
+      dueOn: new Date(Date.now() - 2 * 86_400_000),
+    })
+    const after = await computeProjectHealth(ctx, target.id)
+    return { projectId: target.id, added, before, after }
+  })
+  ok('A milestone can be added to a project at last',
+    milestoned.added.some((row) => row.name === 'loop milestone — signed off'))
+  // The date is a calendar date in the organization's timezone: casting an instant to
+  // ::date in a UTC session lands on yesterday anywhere ahead of UTC, and a milestone due
+  // yesterday read as not yet late.
+  ok('One past its date is counted late, and the score says so',
+    milestoned.after.score < milestoned.before.score,
+    `${milestoned.before.score} → ${milestoned.after.score}`)
+
+  const shelved = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const made = await createSpace(ctx, actor, {
+      name: 'Loop shelf',
+      description: 'Made by the acceptance loop.',
+    })
+    const space = made.find((row) => row.name === 'Loop shelf')!
+    const gone = await archiveSpace(ctx, actor, { id: space.id, reason: 'The loop is finished with it.' })
+    return { space, gone }
+  })
+  ok('A knowledge space can be made, with a slug a link can carry',
+    shelved.space.slug === 'loop-shelf', shelved.space.slug)
+  ok('And an empty one can be put away again',
+    !shelved.gone.some((row) => row.name === 'Loop shelf'))
+
+  // Put the demo back.
+  await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const milestones = await projectMilestones(ctx, milestoned.projectId)
+    const mine = milestones.find((row) => row.name === 'loop milestone — signed off')
+    if (mine) await removeMilestone(ctx, actor, { projectId: milestoned.projectId, milestoneId: mine.id })
+    const departments = await listDepartments(ctx, actor)
+    for (const name of ['Brokerage', 'Loop Trade']) {
+      const row = departments.find((entry) => entry.name === name)
+      if (row) await archiveDepartment(ctx, actor, { id: row.id, reason: 'The loop is finished with it.' })
+    }
+  })
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2082,7 +2168,9 @@ try {
         'reaches the person named, and a follow-up either comes back or closes itself because \n' +
         'the customer wrote first; and the two ceilings an admin could only see — how hard the \n' +
         'system may chase people, and what an agent may do at all — can be tightened from the \n' +
-        'screen the refusals have always pointed at.\n',
+        'screen the refusals have always pointed at; and the structure the product is governed \n' +
+        'by — its departments, its milestones and its shelves — can be built by the people it \n' +
+        'governs rather than only by the seed.\n',
   )
 } catch (error) {
   console.error(error)

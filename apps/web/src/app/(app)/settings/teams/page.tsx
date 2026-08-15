@@ -1,4 +1,6 @@
-import { listTeams, PermissionError } from '@superwork/core'
+import { listDepartments, listTeams, PermissionError } from '@superwork/core'
+import { can } from '@superwork/auth'
+import { Departments } from '@/components/Departments'
 import { requireSession, withActor } from '@/lib/session'
 import { TeamsAdmin } from '@/components/TeamsAdmin'
 
@@ -14,6 +16,8 @@ export default async function TeamsPage() {
 
   let data: {
     teams: Awaited<ReturnType<typeof listTeams>>
+    departments: Awaited<ReturnType<typeof listDepartments>>
+    canEdit: boolean
     people: { id: string; name: string; role: string }[]
   } | null = null
   let denied: string | null = null
@@ -21,6 +25,14 @@ export default async function TeamsPage() {
   try {
     data = await withActor(session, async (ctx, actor) => ({
       teams: await listTeams(ctx, actor),
+      // The other half of the sentence this page opens with: a department is where somebody
+      // sits, and until now it could be read and never made.
+      departments: await listDepartments(ctx, actor),
+      canEdit: can(actor, 'member:update', {
+        type: 'member',
+        organizationId: ctx.organizationId,
+        riskTier: 'low',
+      }).allow,
       people: await ctx.sql<{ id: string; name: string; role: string }[]>`
         SELECT u.id, u.name, m.role FROM memberships m JOIN users u ON u.id = m.user_id
         WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -49,6 +61,19 @@ export default async function TeamsPage() {
           <div className="empty small secondary">{denied}</div>
         </div>
       ) : (
+        <>
+        <Departments
+          canEdit={data?.canEdit ?? false}
+          departments={(data?.departments ?? []).map((department) => ({
+            id: department.id,
+            name: department.name,
+            path: department.path,
+            depth: department.depth,
+            parentId: department.parentId,
+            counts: department.counts,
+          }))}
+        />
+
         <TeamsAdmin
           teams={(data?.teams ?? []).map((team) => ({
             id: team.id,
@@ -65,6 +90,7 @@ export default async function TeamsPage() {
           }))}
           people={data?.people ?? []}
         />
+        </>
       )}
     </div>
   )

@@ -14,6 +14,7 @@ import {
   projectRoster,
   shareableRelations,
 } from '@superwork/core'
+import { Milestones } from '@/components/Milestones'
 import { ProjectRoster } from '@/components/ProjectRoster'
 import { ShareObject } from '@/components/ShareObject'
 
@@ -164,44 +165,17 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           </div>
         </section>
 
-        <section className="panel">
-          <div className="panel-header">
-            <h2>Milestones</h2>
-            <span className="small muted">{milestones.length === 0 ? 'None set' : `${milestones.length}`}</span>
-          </div>
-          {milestones.length === 0 ? (
-            <div className="panel-body">
-              <div className="empty small secondary">No milestones on this project.</div>
-            </div>
-          ) : (
-            <div className="panel-body-flush table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Milestone</th>
-                    <th style={{ width: 140 }}>Due</th>
-                    <th style={{ width: 120 }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {milestones.map((milestone) => (
-                    <tr key={milestone.id}>
-                      <td>{milestone.name}</td>
-                      <td className="small secondary">
-                        {milestone.dueOn ? new Date(milestone.dueOn).toISOString().slice(0, 10) : '—'}
-                      </td>
-                      <td>
-                        <span className={milestone.late ? 'chip chip-critical' : 'chip'}>
-                          {milestone.late ? 'past due' : milestone.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
+        <Milestones
+          projectId={project.id}
+          canEdit={canStaff}
+          milestones={milestones.map((milestone) => ({
+            id: milestone.id,
+            name: milestone.name,
+            dueOn: milestone.dueOn ? new Date(milestone.dueOn).toISOString() : null,
+            status: milestone.status,
+            late: milestone.late,
+          }))}
+        />
 
         <section className="panel" data-testid="project-tasks">
           <div className="panel-header">
