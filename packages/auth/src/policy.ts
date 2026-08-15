@@ -59,6 +59,18 @@ export interface Resource {
   departmentId?: string | null
   teamIds?: string[]
   sensitivity?: Sensitivity
+  /**
+   * What this row belongs to — a task's project, say (§4.6).
+   *
+   * A share of a container reaches what the container holds, for *reading only*. Without
+   * it, "I shared the project with you" and "you can see none of its work" are both true,
+   * which is the same hole circulation lists had before ADR 0023.
+   *
+   * `sensitivity` is the *container's* classification, and it is not optional in spirit: a
+   * container the actor is not cleared to open cannot lend a read of what is inside it,
+   * or a classification becomes a door with a window next to it.
+   */
+  containers?: Array<{ type: string; id: string; sensitivity?: Sensitivity }>
   /** For tool authorization: the risk tier of the operation being attempted. */
   riskTier?: RiskTier
 }
@@ -159,16 +171,40 @@ const RELATION_FOR_VERB: Record<string, string[]> = {
 }
 
 function relationGrant(actor: Actor, resourceType: string, verb: string, resource: Resource): string | null {
-  if (!actor.relations || actor.relations.size === 0 || !resource.id) return null
+  if (!actor.relations || actor.relations.size === 0) return null
   const accepted = RELATION_FOR_VERB[verb]
   if (!accepted) return null
-  for (const relation of accepted) {
-    if (actor.relations.has(`${relation}:${resourceType}:${resource.id}`)) {
-      return `Allowed because this ${resourceType.replace(/_/g, ' ')} is shared with you as ${relation}.`
+
+  if (resource.id) {
+    for (const relation of accepted) {
+      if (actor.relations.has(`${relation}:${resourceType}:${resource.id}`)) {
+        return `Allowed because this ${resourceType.replace(/_/g, ' ')} is shared with you as ${relation}.`
+      }
+    }
+  }
+
+  // A container grant is deliberately read-only, whatever relation it carries. Sharing a
+  // project is a coarse act — the set of tasks inside it changes daily and the granter
+  // cannot see what they are handing over — so it lends the ability to look, never the
+  // ability to change. Write access is granted on the row itself, where it can be seen.
+  if (verb !== 'read') return null
+  for (const container of resource.containers ?? []) {
+    // Being handed a container you are not cleared to open lends you nothing inside it.
+    // Without this, a project classified above the recipient stayed shut while its tasks
+    // opened — a locked door with the window left ajar.
+    if (container.sensitivity !== undefined && !sensitivityAtMost(container.sensitivity, readCeiling(actor))) {
+      continue
+    }
+    for (const relation of ALL_RELATIONS) {
+      if (actor.relations.has(`${relation}:${container.type}:${container.id}`)) {
+        return `Allowed because the ${container.type.replace(/_/g, ' ')} it belongs to is shared with you as ${relation}. That lends you a read of what is inside it, not a say over it.`
+      }
     }
   }
   return null
 }
+
+const ALL_RELATIONS = ['viewer', 'editor', 'approver', 'owner'] as const
 
 function scopeSatisfied(scope: PermissionScope, actor: Actor, resource: Resource): boolean {
   switch (scope) {
@@ -221,9 +257,7 @@ function checkClearance(actor: Actor, resource: Resource): Decision {
   // classification — documents, chunks — still passes it and is still checked.
   if (resource.sensitivity === undefined) return ALLOW('This resource carries no data classification.')
   const sensitivity: Sensitivity = resource.sensitivity
-  const ceiling = actor.agent
-    ? lowerSensitivity(ROLE_MAX_SENSITIVITY[actor.role], actor.agent.maxSensitivity)
-    : ROLE_MAX_SENSITIVITY[actor.role]
+  const ceiling = readCeiling(actor)
 
   if (!sensitivityAtMost(sensitivity, ceiling)) {
     return DENY(
@@ -231,6 +265,17 @@ function checkClearance(actor: Actor, resource: Resource): Decision {
     )
   }
   return ALLOW('Within data classification clearance.')
+}
+
+/**
+ * The highest classification this actor may read — their role's ceiling, lowered again by
+ * the agent's own limit when one is acting. Exported because a list query needs the same
+ * answer as `can()` does, and two implementations of it would drift.
+ */
+export function readCeiling(actor: Actor): Sensitivity {
+  return actor.agent
+    ? lowerSensitivity(ROLE_MAX_SENSITIVITY[actor.role], actor.agent.maxSensitivity)
+    : ROLE_MAX_SENSITIVITY[actor.role]
 }
 
 function lowerSensitivity(a: Sensitivity, b: Sensitivity): Sensitivity {

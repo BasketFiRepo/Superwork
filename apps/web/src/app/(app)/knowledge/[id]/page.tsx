@@ -8,6 +8,7 @@ import {
   listTeams,
   NotFoundError,
   PermissionError,
+  shareableRelations,
 } from '@superwork/core'
 import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
@@ -20,12 +21,13 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body, audience, people, departments, shares, teams } = await withActor(session, async (ctx, actor) => {
+    const { document, body, audience, people, departments, shares, teams, relations } = await withActor(session, async (ctx, actor) => {
       const loaded = await getDocumentBody(ctx, actor, id)
       return {
         ...loaded,
         audience: await documentAudience(ctx, actor, id),
         shares: await listShares(ctx, actor, 'document', id),
+        relations: shareableRelations(actor, 'document', id, ctx.organizationId),
         teams: await listTeams(ctx, actor).catch(() => []),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
@@ -80,6 +82,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
         <ShareObject
           objectType="document"
           objectId={document.id}
+          relations={relations}
           shares={shares.map((entry) => ({
             id: entry.id,
             subjectType: entry.subjectType,
@@ -89,6 +92,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             grantedByName: entry.grantedByName,
             expiresAt: entry.expiresAt ? entry.expiresAt.toISOString() : null,
             expired: entry.expired,
+            canRevoke: entry.canRevoke,
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}

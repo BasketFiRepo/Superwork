@@ -8,6 +8,7 @@ import {
   listTeams,
   NotFoundError,
   PermissionError,
+  shareableRelations,
   taskDependencies,
 } from '@superwork/core'
 import { TaskDependencies } from '@/components/TaskDependencies'
@@ -25,7 +26,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people, relations } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -39,6 +40,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         task: loaded,
         dependencies: deps,
         shares: await listShares(ctx, actor, 'task', id),
+        relations: shareableRelations(actor, 'task', id, ctx.organizationId),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -85,6 +87,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         <ShareObject
           objectType="task"
           objectId={task.id}
+          relations={relations}
           shares={shares.map((entry) => ({
             id: entry.id,
             subjectType: entry.subjectType,
@@ -94,6 +97,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             grantedByName: entry.grantedByName,
             expiresAt: entry.expiresAt ? entry.expiresAt.toISOString() : null,
             expired: entry.expired,
+            canRevoke: entry.canRevoke,
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}

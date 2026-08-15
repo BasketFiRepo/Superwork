@@ -9,6 +9,7 @@ import {
   getTask,
   hybridSearch,
   ingestDocument,
+  getDocument,
   listDocuments,
   listTasks,
   listTeams,
@@ -146,12 +147,17 @@ describe('the role that could do nothing', () => {
         documents: (await listDocuments(ctx, actor)).map((doc) => doc.id),
         theirs: await getTask(ctx, actor, teamTaskId).then(() => true, () => false),
         notTheirs: await getTask(ctx, actor, otherTaskId).then(() => true, () => false),
+        // `DocumentView` declared `teamId` and the select never fetched it, so this arrived
+        // undefined and `getDocument` passed an empty `teamIds` — refusing the very row the
+        // list had just shown. Listing a thing you cannot open is worse than not listing it.
+        opensTheirDocument: await getDocument(ctx, actor, teamDocId).then((doc) => doc.teamId, () => null),
       }
     })
 
     expect(after.tasks).toEqual([teamTaskId])
     expect(after.documents).toEqual([teamDocId])
     expect(after.theirs).toBe(true)
+    expect(after.opensTheirDocument).toBe(teamId)
     // The point of a scope is what it excludes.
     expect(after.notTheirs).toBe(false)
   })
