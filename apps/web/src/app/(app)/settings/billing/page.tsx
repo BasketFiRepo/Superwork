@@ -1,6 +1,14 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { ledgerReport, parseMonthKey, shiftMonth, spendSnapshot, PermissionError } from '@superwork/core'
+import {
+  ledgerReport,
+  parseMonthKey,
+  shiftMonth,
+  spendSnapshot,
+  subscription,
+  PermissionError,
+} from '@superwork/core'
+import { PlanCaps } from '@/components/PlanCaps'
 
 export const dynamic = 'force-dynamic'
 
@@ -24,6 +32,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         byTaskClass: { taskClass: string; runs: number; costCents: number }[]
         api: { calls: number; keys: number; errors: number }
         tier: string
+        plan: Awaited<ReturnType<typeof subscription>>
       }
     | null = null
   let denied: string | null = null
@@ -70,6 +79,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
           errors: Number(api[0]?.errors ?? 0),
         },
         tier,
+        plan: await subscription(ctx, actor),
       }
     })
   } catch (error) {
@@ -103,6 +113,30 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
             <span className="chip chip-accent">{period.label}</span>
             <span className="chip">plan: {data.tier}</span>
           </div>
+
+          <PlanCaps
+            plan={{
+              tier: data.plan.tier,
+              status: data.plan.status,
+              seatsPurchased: data.plan.seatsPurchased,
+              seatsUsed: data.plan.seatsUsed,
+              seatsRemaining: data.plan.seatsRemaining,
+              capsReason: data.plan.capsReason,
+              capsSetByName: data.plan.capsSetByName,
+              limits: {
+                aiSpendCapCents: data.plan.limits.aiSpendCapCents,
+                perUserDailySpendCapCents: data.plan.limits.perUserDailySpendCapCents,
+                seats: data.plan.limits.seats,
+                agentRunsPerMonth: data.plan.limits.agentRunsPerMonth,
+                autopilotAllowed: data.plan.limits.autopilotAllowed,
+                tightened: data.plan.limits.tightened,
+                source: data.plan.limits.source,
+              },
+              // Resolved the same way as the limits, not read from the config constant —
+              // that constant is exactly what this work stopped trusting.
+              planCaps: data.plan.planCaps,
+            }}
+          />
 
           <section className="panel">
             <div className="panel-header">
