@@ -1,8 +1,9 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { getTask, listTasks, NotFoundError, PermissionError, taskDependencies } from '@superwork/core'
+import { getTask, listTasks, listTeams, NotFoundError, PermissionError, taskDependencies } from '@superwork/core'
 import { TaskDependencies } from '@/components/TaskDependencies'
+import { TaskTeam } from '@/components/TaskTeam'
 
 export const dynamic = 'force-dynamic'
 
@@ -15,7 +16,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -23,9 +24,16 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         limit: 100,
       })
       const already = new Set(deps.blockedBy.map((edge) => edge.taskId))
+      // Teams are admin-visible only; a member simply sees no selector rather than an error.
+      const visibleTeams = await listTeams(ctx, actor).catch(() => [])
       return {
         task: loaded,
         dependencies: deps,
+        teams: visibleTeams.map((team) => ({
+          id: team.id,
+          name: team.name,
+          memberCount: team.members.length,
+        })),
         // Anything already a prerequisite, and the task itself, would only be refused.
         candidates: open.tasks
           .filter((candidate) => candidate.id !== id && !already.has(candidate.id))
@@ -58,6 +66,8 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           {task.description ? <p className="prose secondary">{task.description}</p> : null}
         </header>
+
+        {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
 
         <TaskDependencies taskId={task.id} dependencies={dependencies} candidates={candidates} />
       </div>

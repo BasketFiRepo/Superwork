@@ -18,7 +18,7 @@
  *
  * Run with:  pnpm loop:phase5
  */
-import { closePools, withTenant } from '@superwork/db'
+import { adminSql, closePools, withTenant } from '@superwork/db'
 import { can, loadActor } from '@superwork/auth'
 import { compileWorkflow } from '@superwork/ai'
 import {
@@ -33,10 +33,13 @@ import {
   reviewHost,
   saveCompiled,
   addDependency,
+  addTeamMember,
   applyRetention,
+  archiveTeam,
   composeBriefingFacts,
   confirmMemory,
   createTask,
+  createTeam,
   correctMemory,
   deleteDocument,
   documentAudience,
@@ -45,7 +48,9 @@ import {
   hybridSearch,
   ingestDocument,
   listHolds,
+  listDocuments,
   listMemories,
+  listTasks,
   openDocumentToEveryone,
   recallMemories,
   share,
@@ -745,6 +750,67 @@ try {
   ok('Finishing it tells the person who was waiting', Boolean(freed.note), freed.note?.slice(0, 80) ?? 'nobody was told')
   ok('And then it can be completed', freed.status === 'completed')
 
+  // ---- The role that could do nothing --------------------------------------
+  console.log('\nA contractor is given exactly one team’s work…\n')
+
+  const guest = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const team = await createTeam(ctx, actor, {
+      name: `Loop team ${Date.now()}`,
+      purpose: 'Proving the scope is live.',
+    })
+    const scoped = await createTask(ctx, actor, { title: 'Work only this team can see' })
+    await ctx.sql`
+      UPDATE tasks SET team_id = ${team.id}
+      WHERE organization_id = ${ctx.organizationId} AND id = ${scoped.id}`
+
+    return { teamId: team.id, taskId: scoped.id }
+  })
+
+  // A guest: every permission this role holds is team-scoped. The `users` table is not a
+  // tenant table, so the account is created on the owning connection, as it is everywhere
+  // else that makes one.
+  const [contractor] = await adminSql()<{ id: string }[]>`
+    INSERT INTO users (email, name, timezone, is_demo)
+    VALUES (${`loop.guest.${Date.now()}@northwind.example`}, 'Loop Contractor', 'Europe/London', true)
+    RETURNING id`
+  await adminSql()`
+    INSERT INTO memberships (organization_id, user_id, role, is_demo)
+    VALUES (${session.organizationId}, ${contractor!.id}, 'guest', true)`
+
+  const asGuest = { ...session, userId: contractor!.id }
+  const seenByGuest = async () =>
+    withTenant(asGuest, async (ctx) => {
+      const actor = await loadActor(ctx)
+      return {
+        tasks: (await listTasks(ctx, actor, { limit: 200 })).tasks.map((task) => task.id),
+        documents: (await listDocuments(ctx, actor)).length,
+      }
+    })
+
+  const before = await seenByGuest()
+  ok('A guest belonging to no team can read nothing at all',
+    before.tasks.length === 0 && before.documents === 0,
+    `${before.tasks.length} tasks, ${before.documents} documents`)
+
+  await withTenant(session, async (ctx) =>
+    addTeamMember(ctx, await loadActor(ctx), {
+      teamId: guest.teamId,
+      userId: contractor!.id,
+      reason: 'On the loop team for the duration.',
+    }),
+  )
+
+  const after = await seenByGuest()
+  ok('Joining a team gives them that team’s work', after.tasks.includes(guest.taskId))
+  ok('And only that team’s work', after.tasks.length === 1, `${after.tasks.length} task visible`)
+
+  const disband = await withTenant(session, async (ctx) =>
+    archiveTeam(ctx, await loadActor(ctx), { teamId: guest.teamId, reason: 'The loop is finished.' }),
+  ).then(() => null, (error: Error) => error.message)
+  ok('A team cannot be disbanded out from under the work scoped to it',
+    /still scoped to/i.test(disband ?? ''), (disband ?? 'it was allowed').slice(0, 80))
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -755,7 +821,7 @@ try {
         'document and one person; a matter can stop all of it, in the open; and the assistant learned one ' +
         'thing, was agreed with, was corrected, and forgot it when its source went; and one document was \n' +
         'taken out of circulation, shared back, and reopened on purpose; and one piece of work waited for \n' +
-        'another until it was actually done.\n',
+        'another until it was actually done; and a contractor saw exactly one team’s work and nothing else.\n',
   )
 } catch (error) {
   console.error(error)

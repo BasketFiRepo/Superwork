@@ -1,5 +1,5 @@
 import type { Priority, TaskStatus, TenantContext } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
 import { ConflictError, NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
@@ -19,6 +19,7 @@ export interface TaskView {
   companyId: string | null
   companyName: string | null
   departmentId: string | null
+  teamId: string | null
   dueAt: Date | null
   waitingOn: string | null
   blockedReason: string | null
@@ -39,7 +40,7 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
          t.assignee_id AS "assigneeId", u.name AS "assigneeName",
          t.project_id AS "projectId", p.name AS "projectName",
          p.company_id AS "companyId", c.name AS "companyName",
-         t.department_id AS "departmentId",
+         t.department_id AS "departmentId", t.team_id AS "teamId",
          t.due_at AS "dueAt", t.waiting_on AS "waitingOn", t.blocked_reason AS "blockedReason",
          t.created_by_actor_type AS "createdByActorType",
          t.created_by_agent_run_id AS "createdByAgentRunId",
@@ -77,11 +78,32 @@ export async function listTasks(
   actor: Actor,
   filter: ListTasksFilter = {},
 ): Promise<{ tasks: TaskView[]; nextCursor: { updatedAt: Date; id: string } | null }> {
-  const decision = can(actor, 'task:read', { type: 'task', organizationId: ctx.organizationId })
-  if (!decision.allow) throw new PermissionError(decision.reason)
+  // Not an organization-level gate: that asks "may you read every task", which is false
+  // for any role whose grant is narrower and is why the guest role could list nothing at
+  // all. Ask instead which rows this actor may consider, and push that into the query.
+  const scope = grantedScope(actor, 'task:read', 'task')
+  if (scope === null) {
+    const decision = can(actor, 'task:read', { type: 'task', organizationId: ctx.organizationId })
+    throw new PermissionError(decision.reason)
+  }
 
   const limit = Math.min(filter.limit ?? 50, 200)
   const sql = ctx.sql
+  const shared = sharedObjectIds(actor, 'task')
+  // A tuple grants one row regardless of scope, so it is unioned in rather than narrowing.
+  const visible =
+    scope === 'org'
+      ? sql``
+      : sql`AND (
+            ${
+              scope === 'department'
+                ? sql`t.department_id = ANY(${actor.departmentIds}::uuid[])`
+                : scope === 'team'
+                  ? sql`t.team_id = ANY(${actor.teamIds}::uuid[])`
+                  : sql`(t.assignee_id = ${actor.userId} OR t.created_by = ${actor.userId})`
+            }
+            ${shared.length ? sql`OR t.id = ANY(${shared}::uuid[])` : sql``}
+          )`
   const assignee =
     filter.assigneeId === 'me' ? actor.userId : filter.assigneeId === 'unassigned' ? null : filter.assigneeId
 
@@ -101,6 +123,7 @@ export async function listTasks(
       ${filter.dueBefore ? sql`AND t.due_at < ${filter.dueBefore}` : sql``}
       ${filter.search ? sql`AND t.title ILIKE ${'%' + filter.search + '%'}` : sql``}
       ${filter.cursor ? sql`AND (t.updated_at, t.id) < (${filter.cursor.updatedAt}, ${filter.cursor.id})` : sql``}
+      ${visible}
     ORDER BY t.updated_at DESC, t.id DESC
     LIMIT ${limit + 1}`
 
@@ -125,6 +148,7 @@ export async function getTask(ctx: TenantContext, actor: Actor, id: string): Pro
     organizationId: ctx.organizationId,
     assigneeId: task.assigneeId,
     departmentId: task.departmentId,
+    teamIds: task.teamId ? [task.teamId] : [],
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
   return task
@@ -227,6 +251,7 @@ export interface UpdateTaskInput {
   dueAt?: Date | null
   waitingOn?: string | null
   blockedReason?: string | null
+  teamId?: string | null
   agentRunId?: string | null
 }
 
@@ -239,6 +264,7 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
     organizationId: ctx.organizationId,
     assigneeId: before.assigneeId,
     departmentId: before.departmentId,
+    teamIds: before.teamId ? [before.teamId] : [],
     riskTier: 'low',
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
@@ -279,6 +305,7 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
       due_at = ${input.dueAt !== undefined ? input.dueAt : before.dueAt},
       waiting_on = ${waitingOn},
       blocked_reason = ${blockedReason},
+      team_id = ${input.teamId !== undefined ? input.teamId : before.teamId},
       completed_at = ${status === 'completed' ? new Date() : null},
       cancelled_at = ${status === 'cancelled' ? new Date() : null}
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.id} AND deleted_at IS NULL`
@@ -332,6 +359,7 @@ export async function deleteTask(
     organizationId: ctx.organizationId,
     assigneeId: before.assigneeId,
     departmentId: before.departmentId,
+    teamIds: before.teamId ? [before.teamId] : [],
     riskTier: 'low',
   })
   if (!decision.allow) throw new PermissionError(decision.reason)

@@ -1,5 +1,5 @@
 import type { IndexStatus, Sensitivity, TenantContext } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
@@ -19,6 +19,7 @@ export interface DocumentView {
   ownerId: string | null
   ownerName: string | null
   departmentId: string | null
+  teamId: string | null
   chunkCount: number
   createdAt: Date
   updatedAt: Date
@@ -42,12 +43,31 @@ export async function listDocuments(
   actor: Actor,
   filter: { search?: string; companyId?: string; limit?: number } = {},
 ): Promise<DocumentView[]> {
-  const decision = can(actor, 'document:read', { type: 'document', organizationId: ctx.organizationId })
-  if (!decision.allow) throw new PermissionError(decision.reason)
+  // Which documents may this actor consider, rather than "may they read all of them".
+  const scope = grantedScope(actor, 'document:read', 'document')
+  if (scope === null) {
+    const decision = can(actor, 'document:read', { type: 'document', organizationId: ctx.organizationId })
+    throw new PermissionError(decision.reason)
+  }
   const sql = ctx.sql
+  const shared = sharedObjectIds(actor, 'document')
+  const visible =
+    scope === 'org'
+      ? sql``
+      : sql`AND (
+            ${
+              scope === 'department'
+                ? sql`d.department_id = ANY(${actor.departmentIds}::uuid[])`
+                : scope === 'team'
+                  ? sql`d.team_id = ANY(${actor.teamIds}::uuid[])`
+                  : sql`d.owner_id = ${actor.userId}`
+            }
+            ${shared.length ? sql`OR d.id = ANY(${shared}::uuid[])` : sql``}
+          )`
   return sql<DocumentView[]>`
     ${SELECT_DOC(ctx)}
     WHERE d.organization_id = ${ctx.organizationId} AND d.deleted_at IS NULL
+      ${visible}
       ${filter.search ? sql`AND d.title ILIKE ${'%' + filter.search + '%'}` : sql``}
       ${filter.companyId ? sql`AND d.company_id = ${filter.companyId}` : sql``}
     ORDER BY d.created_at DESC
@@ -67,6 +87,7 @@ export async function getDocument(ctx: TenantContext, actor: Actor, id: string):
     organizationId: ctx.organizationId,
     ownerId: doc.ownerId,
     departmentId: doc.departmentId,
+    teamIds: doc.teamId ? [doc.teamId] : [],
     sensitivity: doc.sensitivity,
   })
   if (!decision.allow) throw new PermissionError(decision.reason)

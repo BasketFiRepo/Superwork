@@ -209,7 +209,18 @@ function requiredRoleFor(resourceType: string, verb: string): string {
 }
 
 function checkClearance(actor: Actor, resource: Resource): Decision {
-  const sensitivity: Sensitivity = resource.sensitivity ?? 'internal'
+  // Only a resource that actually carries a classification is checked against one. This
+  // used to default an absent classification to `internal`, which silently put every
+  // unclassified resource — tasks, projects and notes have no classification column at all
+  // — above the guest ceiling of `public`. That was the fourth independent reason the guest
+  // role could read nothing, and the least visible: the denial talked about classification
+  // for a resource that has none.
+  //
+  // The blast radius is exactly the guest role. Every other role's ceiling is `internal` or
+  // higher, so the old default was already satisfied for them. Anything that does carry a
+  // classification — documents, chunks — still passes it and is still checked.
+  if (resource.sensitivity === undefined) return ALLOW('This resource carries no data classification.')
+  const sensitivity: Sensitivity = resource.sensitivity
   const ceiling = actor.agent
     ? lowerSensitivity(ROLE_MAX_SENSITIVITY[actor.role], actor.agent.maxSensitivity)
     : ROLE_MAX_SENSITIVITY[actor.role]
@@ -299,6 +310,46 @@ function matchesGrant(raw: string, resourceType: string, verb: string): boolean 
 /**
  * Plain-language summary of what an agent may do, rendered on the grant surface (§27.2).
  */
+/**
+ * The broadest scope this actor holds for an action, ignoring any particular resource.
+ *
+ * `can()` answers "may this person touch *this* row", which a list query cannot ask before
+ * it has the rows. This answers the question a list query actually has — "which rows am I
+ * allowed to consider" — so the predicate can be pushed into SQL rather than the gate
+ * being taken at organization level and quietly denying every role whose grant is narrower.
+ *
+ * That is what made the `guest` role unusable: all five of its grants are team-scoped, and
+ * every list gated on an organization-level resource, so the answer was always no.
+ */
+export function grantedScope(actor: Actor, action: string, resourceType?: string): PermissionScope | null {
+  const [type, verb] = splitAction(action, resourceType ?? '')
+  const grants = [...ROLE_PERMISSIONS[actor.role], ...actor.extraPermissions]
+  let best: PermissionScope | null = null
+
+  for (const raw of grants) {
+    let grant
+    try {
+      grant = parsePermission(raw)
+    } catch {
+      continue
+    }
+    if (grant.resource !== '*' && grant.resource !== type) continue
+    if (grant.action !== '*' && grant.action !== verb) continue
+    if (best === null || SCOPE_RANK[grant.scope] > SCOPE_RANK[best]) best = grant.scope
+  }
+  return best
+}
+
+/** The ids of objects of one type shared with this actor by relation tuple. */
+export function sharedObjectIds(actor: Actor, resourceType: string): string[] {
+  const ids: string[] = []
+  for (const relation of actor.relations ?? []) {
+    const [, type, id] = relation.split(':')
+    if (type === resourceType && id) ids.push(id)
+  }
+  return [...new Set(ids)]
+}
+
 export function describeEffectiveCapability(actor: Actor): string {
   if (!actor.agent) return 'Acting as a person, not an agent.'
   const { agent } = actor

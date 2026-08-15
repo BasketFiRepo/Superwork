@@ -514,6 +514,40 @@ try {
   ok('A released hold stays on the record with who released it and why',
     /Ahlgren v\. Northwind/.test(releasedText) && /counsel withdrew/i.test(releasedText))
 
+  // ---- Teams ---------------------------------------------------------------
+  await page.goto(`${BASE}/settings/teams`)
+  await page.waitForSelector('[data-testid="teams"]', { timeout: 15_000 })
+  const teamsText = await page.locator('main').innerText()
+  ok('Teams explains what the scope reaches', /every permission it holds is\s+team-scoped|team-scoped/i.test(teamsText))
+  const teamRows = await page.locator('[data-testid="team-row"]').count()
+  ok('The seeded team is there with its work counted', teamRows > 0, `${teamRows} teams`)
+  ok('It says how much is scoped to it', /tasks · \d+ projects · \d+ documents scoped to it/i.test(teamsText))
+
+  await page.locator('[data-testid="team-add-member"]').first().click()
+  await page.waitForSelector('[data-testid="team-member-editor"]', { timeout: 15_000 })
+  ok('Nobody joins without a reason',
+    await page.locator('[data-testid="team-member-confirm"]').isDisabled())
+  ok('And it says what joining actually grants',
+    /becomes readable by them on their next request/i.test(
+      await page.locator('[data-testid="team-member-editor"]').innerText(),
+    ))
+
+  await page.locator('[data-testid="team-archive"]').first().click()
+  await page.waitForSelector('[data-testid="team-archive-editor"]', { timeout: 15_000 })
+  await page.fill('#team-archive-reason', 'Renewal closed; the work moved to Commercial.')
+  expectingRefusal = true
+  await page.locator('[data-testid="team-archive-confirm"]').click()
+  // Matched on text unique to the refusal. "still scoped to" also appears in the editor's
+  // own explanatory copy, so waiting for that resolved instantly against static text — the
+  // assertion passed without the request having happened, and dropped the refusal
+  // exemption early, which is what surfaced the stray 400.
+  const disbandError = page.getByText(/Move them first/i).first()
+  await disbandError.waitFor({ timeout: 20_000 }).catch(() => undefined)
+  ok('Disbanding is refused while work is still scoped to it', (await disbandError.count()) > 0,
+    ((await disbandError.count()) ? await disbandError.innerText() : 'it was allowed').slice(0, 80))
+  expectingRefusal = false
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/teams.png`, fullPage: true })
+
   // ---- Work that waits for other work -------------------------------------
   // The seed puts two tasks behind one of Maya's, so the populated state is on screen.
   await page.goto(`${BASE}/tasks`)

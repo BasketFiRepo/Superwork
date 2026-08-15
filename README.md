@@ -15,8 +15,9 @@ true (natural-language workflow authoring, approve-with-edits, admin-authored HT
 and then the controls the interface had been claiming and the product did not have: step-up
 authentication, retention and erasure, legal holds, the agent memory whose table had been
 designed since Phase 0 with nothing ever written to it, the document circulation lists the
-retrieval ACL had been checking for against an empty table, and the task dependencies the
-daily briefing had been reporting on since Phase 2.
+retrieval ACL had been checking for against an empty table, the task dependencies the daily
+briefing had been reporting on since Phase 2, and the teams that made the `guest` role
+mean something.
 
 ---
 
@@ -38,14 +39,14 @@ Sign in as `maya@northwind.example` / `superwork`.
 real rows from your database and every response it produces is badged **Simulated**.
 
 ```bash
-pnpm test              # 640 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
+pnpm test              # 649 assertions: units, isolation, permissions, briefing, injection, ledger, studio, scale
 pnpm test:isolation    # the cross-tenant pack on its own
 pnpm eval              # the agent eval harness — golden, adversarial and refusal packs
 pnpm loop              # the Phase 1 acceptance loop, start to finish
 pnpm loop:phase2       # triage → meeting → account → briefing, with assertions
 pnpm loop:phase3       # ledger → create/simulate/publish an agent → personal record → API key
 pnpm loop:phase4       # fair scheduling → works-council review → nudge budget → sharing
-pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies
+pnpm loop:phase5       # describe → dry-run → activate → run → approve with edits → custom tool → memory → access → dependencies → teams
 pnpm loadtest          # the §26.9 budgets, measured (SCALE=small|medium|large)
 pnpm check:browser     # walks every screen in a real browser, including authoring a workflow
 ```
@@ -374,6 +375,44 @@ The design choices worth knowing:
 
 See ADR 0015.
 
+## Teams, and the role that could do nothing
+
+`teams` and `team_members` were created in migration 0001 and never written to. That looked
+like two unused tables. It was not: the `team` scope in the policy engine had never once
+evaluated true, and every permission the `guest` role holds is team-scoped —
+`task:read:team`, `project:read:team`, `document:read:team`, `note:create:team`. **A guest
+could read nothing at all**, and the denial said "You need Member access", which reads like a
+policy rather than a missing dimension.
+
+The scope was dead four ways over, and all four had to go:
+
+1. no team existed;
+2. no resource carried a `team_id`;
+3. nothing passed `resource.teamIds` to `can()`, so the check evaluated `[].some(…)`;
+4. **every list gated on an organization-level resource** — "may you read every task" — which
+   is false for any role whose grant is narrower, so the query never ran.
+
+The fourth is the one worth remembering. `grantedScope(actor, action)` returns the broadest
+scope an actor holds, independent of any row, and the list turns it into a SQL predicate. A
+gate taken at organization level silently reduces every narrower role to nothing, and does it
+without ever failing. Relation tuples are unioned in rather than intersected, so a shared
+document still reaches somebody whose scope would not.
+
+Clearance was the fourth-and-a-half. `checkClearance` defaulted an *absent* classification to
+`internal`, putting every unclassified resource above the guest ceiling of `public` — and
+tasks, projects and notes have no classification column at all. It now returns early when
+there is nothing to check; the blast radius is exactly the guest role, and the 376-test
+policy pack passed unchanged.
+
+A team is not a department: a department is where somebody sits and there is one per person,
+a team is what they are working on and there can be several. Membership is a grant of access,
+takes a reason, is audited, and takes effect on the member's next request. A team cannot be
+disbanded while work is still scoped to it — those rows would keep pointing at a team nobody
+can see. And `hybridSearch` applies the same team filter, so search and the detail view never
+disagree.
+
+**Settings → Teams**. See ADR 0021.
+
 ## Work that waits for other work
 
 `task_dependencies` was created in migration 0002 and never written to, while the daily
@@ -609,7 +648,10 @@ listed here so nobody has to rediscover them. A restriction has no expiry: a lis
 by somebody deciding to, not by a clock. A task dependency has no type — there is one
 relation, "cannot be completed until", not a scheduling calculus — and nothing in the planner
 proposes dependencies, because a model inferring "this probably waits for that" and having it
-enforced at completion time is a much larger claim than recording one by hand. The scale
+enforced at completion time is a much larger claim than recording one by hand. Only the task
+and document lists are scope-aware; the other list endpoints still gate at organization level,
+which is right for every role above `guest` and wrong in the same way for `guest`. Nothing
+infers a team: the agent will not scope work it creates to one. The scale
 budgets are measured at the scale this machine can build, and the harness prints that scale next to
 the target rather than rounding the difference away. Controls for anything unbuilt render
 disabled with the reason named. Nothing in the interface pretends to work.
@@ -647,6 +689,10 @@ disabled with the reason named. Nothing in the interface pretends to work.
   and memories go in the same transaction, and the count of each is reported to the caller and
   written to the audit trail (§25.13). The memory count is now a real number rather than a
   fact about an empty table.
+- **A narrow role sees exactly its own slice.** Lists ask the policy engine which rows the
+  actor may consider rather than whether they may read everything, so a contractor on one
+  team sees that team's work and nothing else — in the list, in the detail view and in
+  retrieval alike.
 - **A dependency cannot be walked past.** A task with an unfinished prerequisite refuses to
   complete, a cycle is refused by a database trigger rather than by application code, and
   finishing a prerequisite notifies whoever it was the last thing blocking.
