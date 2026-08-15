@@ -101,6 +101,11 @@ import {
   answerReminder,
   listReminders,
   openLaddersForDueWork,
+  addTaskComment,
+  createFollowUp,
+  listFollowUps,
+  listNotifications,
+  sweepFollowUps,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -1867,6 +1872,96 @@ try {
       WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop reminder —%'`
   })
 
+  // ---- What the assistant said, and a follow-up that comes back --------------
+  console.log('\nThe assistant leaves a note, and a follow-up resurfaces…\n')
+
+  const said = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const task = await createTask(ctx, actor, {
+      title: 'loop comment — confirm the addendum',
+      assigneeId: session.userId,
+    })
+    // Written exactly as the agent's tool writes it, into a table nothing has ever read.
+    await ctx.sql`
+      INSERT INTO task_comments (organization_id, task_id, body, actor_type, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${task.id}, 'Their last reply promised it by Friday.', 'agent', true, ${session.userId})`
+    const withMention = await addTaskComment(ctx, actor, {
+      taskId: task.id,
+      body: 'Can you pick this up while I am away?',
+      mentions: [chased.person.id],
+    })
+    return { taskId: task.id, comments: withMention }
+  })
+
+  ok('A note the assistant left on a task is finally visible',
+    said.comments.some((row) => row.byAgent && /by Friday/.test(row.body)))
+  ok('And it is marked as the assistant’s, not as a colleague’s',
+    said.comments.find((row) => row.byAgent)?.authorName !== null)
+
+  const mentioned = await withTenant({ ...session, userId: chased.person.id }, async (ctx) =>
+    listNotifications(ctx, await loadActor(ctx)),
+  )
+  ok('Mentioning somebody reaches them, which the array never did before',
+    mentioned.some((row) => row.type === 'mention' && row.url === `/tasks/${said.taskId}`),
+    `${mentioned.length} notifications`)
+
+  const followed = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [thread] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM conversations
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND last_direction = 'outbound'
+      ORDER BY last_message_at DESC LIMIT 1`
+    const made = await createFollowUp(ctx, actor, {
+      conversationId: thread!.id,
+      dueAt: new Date(Date.now() - 3_600_000),
+      reason: 'Chase the signed addendum if they have not sent it.',
+    })
+    const swept = await sweepFollowUps(ctx)
+    const mine = await listNotifications(ctx, actor)
+    return { threadId: thread!.id, made, swept, mine }
+  })
+  ok('A follow-up that is due resurfaces, which is what the tool always promised',
+    followed.swept.surfaced > 0 && followed.mine.some((row) => row.type === 'follow_up'),
+    `${followed.swept.surfaced} surfaced`)
+
+  const replied = await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      UPDATE conversations SET last_direction = 'inbound', last_message_at = now()
+      WHERE organization_id = ${ctx.organizationId} AND id = ${followed.threadId}`
+    const swept = await sweepFollowUps(ctx)
+    const all = await listFollowUps(ctx, await loadActor(ctx), {
+      conversationId: followed.threadId,
+      openOnly: false,
+    })
+    return { swept, all }
+  })
+  ok('And one whose customer has written back closes itself rather than chasing them',
+    replied.swept.closedByReply > 0 &&
+      replied.all.some((row) => row.resolution === 'replied'))
+
+  const queuedToSend = await withTenant(session, async (ctx) => {
+    const [row] = await ctx.sql<{ count: number }[]>`
+      SELECT count(*)::int FROM outbox
+      WHERE organization_id = ${ctx.organizationId} AND created_at > ${new Date(Date.now() - 3_600_000)}`
+    return row!.count
+  })
+  ok('None of it sent anything to the customer', queuedToSend === 0, `${queuedToSend} queued to send`)
+
+  // Put the demo back.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND entity_type IN ('follow_up', 'task')
+        AND created_at > ${new Date(Date.now() - 3_600_000)}`
+    await ctx.sql`
+      DELETE FROM follow_ups
+      WHERE organization_id = ${ctx.organizationId} AND created_at > ${new Date(Date.now() - 3_600_000)}`
+    await ctx.sql`
+      DELETE FROM task_comments WHERE organization_id = ${ctx.organizationId} AND task_id = ${said.taskId}`
+    await ctx.sql`
+      DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop comment —%'`
+  })
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1891,7 +1986,9 @@ try {
         'stops and one they had already handled keeps running; and a project can finally say who is on it, \n' +
         'which opens its work for them without handing them a say over it; and a reminder is finally \n' +
         'opened by the product, arrives somewhere a person can see it, and closes the work when they \n' +
-        'answer it.\n',
+        'answer it; and the note the assistant leaves on a task can be read at last, a mention \n' +
+        'reaches the person named, and a follow-up either comes back or closes itself because \n' +
+        'the customer wrote first.\n',
   )
 } catch (error) {
   console.error(error)

@@ -100,6 +100,41 @@ try {
     `${afterArchive} → ${await page.locator('[data-testid="inbox-row"]').count()}`,
   )
 
+  // ---- A follow-up on a thread --------------------------------------------
+  // `create_follow_up@v1` promised one "resurfaces if no reply arrives" and nothing read
+  // the table, so every follow-up the agent ever recorded was still open and invisible.
+  // A queue row opens on double-click, the way it does for somebody triaging by keyboard.
+  await page.locator('[data-testid="inbox-row"]').first().dblclick()
+  await page.waitForSelector('[data-testid="follow-ups"]', { timeout: 15_000 })
+  const followUpText = await page.locator('[data-testid="follow-ups"]').innerText()
+  ok('A thread can carry a follow-up, and says what one does',
+    /closes itself if they write back/i.test(followUpText) || /Nothing is sent to the customer/i.test(followUpText))
+  await page.locator('[data-testid="follow-up-add"]').click()
+  await page.waitForSelector('[data-testid="follow-up-editor"]', { timeout: 15_000 })
+  ok('Nothing is recorded without a date and a reason',
+    await page.locator('[data-testid="follow-up-confirm"]').isDisabled())
+  await page.fill('#follow-up-due', '2026-09-01')
+  await page.fill('#follow-up-reason', 'Chase the signed addendum if they have not sent it.')
+  await page.locator('[data-testid="follow-up-confirm"]').click()
+  const followUpLanded = await page
+    .waitForFunction(
+      () => /signed addendum/i.test(document.querySelector('[data-testid="follow-ups"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A follow-up lands on the thread with what it is for', followUpLanded)
+  await page.locator('[data-testid="follow-up-done"]').first().click()
+  const followUpClosed = await page
+    .waitForFunction(
+      () => /dealt with/i.test(document.querySelector('[data-testid="follow-ups"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And closing one says how it ended, rather than removing the row', followUpClosed)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/follow-ups.png`, fullPage: true })
+
   // ---- Meetings -----------------------------------------------------------
   await page.goto(`${BASE}/meetings`)
   await page.waitForSelector('[data-testid="meeting-row"]', { timeout: 15_000 })
@@ -681,6 +716,25 @@ try {
       await page.locator('[data-testid="dependency-editor"]').innerText(),
     ))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/task-dependencies.png`, fullPage: true })
+
+  // Comments: the agent has been writing here since Phase 0 into a table nothing read, and
+  // no person could add one at all.
+  const commentsText = await page.locator('[data-testid="task-comments"]').innerText()
+  ok('A task has somewhere to say something',
+    /Say something/i.test(commentsText) && /lands on their reminders, not their email/i.test(commentsText))
+  await page.fill('#comment-body', 'Asked them again this morning; nothing back yet.')
+  await page.locator('[data-testid="comment-send"]').click()
+  const commented = await page
+    .waitForFunction(
+      () =>
+        /nothing back yet/i.test(document.querySelector('[data-testid="task-comments"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A person can comment, and it lands on the task', commented)
+  ok('And can take their own words back again',
+    await page.locator('[data-testid="comment-remove"]').first().isEnabled())
 
   // ---- Sharing one thing with one person ------------------------------------
   // Stays on the task opened above, which has the share panel beside its dependencies.

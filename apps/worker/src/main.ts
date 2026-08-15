@@ -6,6 +6,7 @@ import {
   markDispatched,
   markFailed,
   openLaddersForDueWork,
+  sweepFollowUps,
   writeActivity,
 } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
@@ -174,6 +175,16 @@ async function main(): Promise<void> {
             async (ctx) => {
               const laid = await openLaddersForDueWork(ctx)
               if (laid.opened > 0) console.log(`[nudges] ${org.id}: opened ${laid.opened} ladder(s)`)
+              // Follow-ups ride the same pass: one that the customer has already answered
+              // closes itself, and one that is due tells its owner, once. Nothing here
+              // sends anything outward (§25.7).
+              const followUps = await sweepFollowUps(ctx)
+              if (followUps.surfaced > 0 || followUps.closedByReply > 0) {
+                console.log(
+                  `[follow-ups] ${org.id}: ${followUps.surfaced} surfaced, ` +
+                    `${followUps.closedByReply} closed because they replied`,
+                )
+              }
               return deliverDueNudges(ctx)
             },
           )

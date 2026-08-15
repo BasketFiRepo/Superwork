@@ -1,7 +1,8 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { getConversation, listCommitments, listMessages, NotFoundError } from '@superwork/core'
+import { getConversation, listCommitments, listFollowUps, listMessages, NotFoundError } from '@superwork/core'
+import { FollowUps } from '@/components/FollowUps'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,10 +15,13 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
   const { id } = await params
 
   try {
-    const { conversation, messages, commitments } = await withActor(session, async (ctx, actor) => ({
+    const { conversation, messages, commitments, followUps } = await withActor(session, async (ctx, actor) => ({
       conversation: await getConversation(ctx, actor, id),
       messages: await listMessages(ctx, actor, id),
       commitments: await listCommitments(ctx, actor, { limit: 50 }),
+      // Every follow-up on this thread, closed ones included: how one ended — dealt with,
+      // called off, or closed itself because they wrote back — is the useful part.
+      followUps: await listFollowUps(ctx, actor, { conversationId: id, openOnly: false }),
     }))
 
     const threadCommitments = commitments.filter((c) =>
@@ -65,6 +69,22 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
         ) : null}
+
+        <FollowUps
+          conversationId={conversation.id}
+          followUps={followUps.map((row) => ({
+            id: row.id,
+            dueAt: row.dueAt.toISOString(),
+            reason: row.reason,
+            ownerName: row.ownerName,
+            status: row.status,
+            resolution: row.resolution,
+            resolutionNote: row.resolutionNote,
+            resolvedByName: row.resolvedByName,
+            due: row.due,
+            byAgent: row.byAgent,
+          }))}
+        />
 
         {threadCommitments.length > 0 ? (
           <section className="panel">

@@ -9,8 +9,10 @@ import {
   NotFoundError,
   PermissionError,
   shareableRelations,
+  taskComments,
   taskDependencies,
 } from '@superwork/core'
+import { TaskComments } from '@/components/TaskComments'
 import { TaskDependencies } from '@/components/TaskDependencies'
 import { TaskTeam } from '@/components/TaskTeam'
 import { ShareObject } from '@/components/ShareObject'
@@ -26,7 +28,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people, relations } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people, relations, comments } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -40,6 +42,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         task: loaded,
         dependencies: deps,
         shares: await listShares(ctx, actor, 'task', id),
+        comments: await taskComments(ctx, actor, id),
         relations: shareableRelations(actor, 'task', id, ctx.organizationId),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
@@ -106,6 +109,20 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
 
         <TaskDependencies taskId={task.id} dependencies={dependencies} candidates={candidates} />
+
+        <TaskComments
+          taskId={task.id}
+          people={people}
+          comments={comments.map((comment) => ({
+            id: comment.id,
+            body: comment.body,
+            authorName: comment.authorName,
+            byAgent: comment.byAgent,
+            mentions: comment.mentions,
+            canDelete: comment.canDelete,
+            createdAt: comment.createdAt.toISOString(),
+          }))}
+        />
       </div>
     )
   } catch (error) {

@@ -263,9 +263,14 @@ export const cancelFollowUp = register({
   idempotent: true,
   redactions: [],
   async execute(input, ctx: ToolContext) {
+    // Closing one says when and how, because a follow-up that is 'cancelled' with no time
+    // on it cannot be told from one that never opened. The row is kept rather than
+    // soft-deleted: the thread's screen shows how each follow-up ended.
     await ctx.tenantDb.sql`
-      UPDATE follow_ups SET status = 'cancelled', deleted_at = now()
-      WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}`
+      UPDATE follow_ups
+      SET status = 'cancelled', resolution = 'cancelled', resolved_at = now(),
+          resolved_by = ${ctx.principalUserId}, updated_at = now()
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.id} AND status = 'open'`
     return { ok: true as const, value: { id: input.id, cancelled: true } }
   },
 })
