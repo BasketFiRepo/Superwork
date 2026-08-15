@@ -912,6 +912,10 @@ try {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company-share.png`, fullPage: true })
 
   // ---- Deleting a document, and everything derived from it ----------------
+  // This is destructive on purpose: it deletes a *seeded* document to exercise the real
+  // cascade. The check therefore expects a fresh demo — CI bootstraps the database before
+  // it runs — and locally the evals should run before this, not after, because two golden
+  // fixtures cite the document this removes.
   await page.goto(`${BASE}/knowledge`)
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
   const documentsBefore = await page.locator('[data-testid="document-row"]').count()
