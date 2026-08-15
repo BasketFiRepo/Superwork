@@ -24,6 +24,7 @@ export function Sidebar({
   inbox,
   pastSla,
   commitments,
+  reminders,
   flags,
 }: {
   approvals: number
@@ -31,6 +32,7 @@ export function Sidebar({
   inbox: number
   pastSla: number
   commitments: number
+  reminders: number
   flags: FlagSet
 }) {
   const pathname = usePathname()
@@ -74,7 +76,12 @@ export function Sidebar({
     },
     {
       title: 'You',
-      items: [{ href: '/me', label: 'What is known about you' }],
+      items: [
+        // Ahead of the personal record on purpose: this is the one that is waiting for an
+        // answer, and an unanswered reminder is what escalates to somebody's manager.
+        { href: '/reminders', label: 'Reminders', count: reminders, attention: reminders > 0 },
+        { href: '/me', label: 'What is known about you' },
+      ],
     },
     {
       title: 'Admin',

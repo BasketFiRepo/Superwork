@@ -1,5 +1,13 @@
 import { adminSql, closePools, withTenant } from '@superwork/db'
-import { applyRetention, claimBatch, deliverDueNudges, markDispatched, markFailed, writeActivity } from '@superwork/core'
+import {
+  applyRetention,
+  claimBatch,
+  deliverDueNudges,
+  markDispatched,
+  markFailed,
+  openLaddersForDueWork,
+  writeActivity,
+} from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
 
@@ -160,7 +168,14 @@ async function main(): Promise<void> {
         try {
           const outcome = await withTenant(
             { organizationId: org.id, userId: org.ownerId, timezone: org.timezone },
-            (ctx) => deliverDueNudges(ctx),
+            // Open the ladder for anything near its date first. Nothing in the product
+            // ever called `scheduleLadder`, so this pass has always delivered from an
+            // empty queue — the whole ladder was reachable only from the acceptance loops.
+            async (ctx) => {
+              const laid = await openLaddersForDueWork(ctx)
+              if (laid.opened > 0) console.log(`[nudges] ${org.id}: opened ${laid.opened} ladder(s)`)
+              return deliverDueNudges(ctx)
+            },
           )
           if (outcome.delivered || outcome.heldByBudget || outcome.cancelled) {
             console.log(

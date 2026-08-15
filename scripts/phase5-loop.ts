@@ -98,6 +98,9 @@ import {
   addProjectMember,
   projectRoster,
   removeProjectMember,
+  answerReminder,
+  listReminders,
+  openLaddersForDueWork,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
@@ -1773,6 +1776,97 @@ try {
   const afterCleanup = await withTenant(session, async (ctx) => mutedWatchers(ctx))
   ok('The demo is left with nothing muted', !afterCleanup.includes('approval_aging'), afterCleanup.join(', '))
 
+  // ---- A reminder that arrives somewhere, and an answer that means something ----
+  console.log('\nSomebody is chased, sees it, and answers…\n')
+
+  const chased = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [person] = await ctx.sql<{ id: string; name: string }[]>`
+      SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY u.name LIMIT 1`
+    // Age out today's contacts so the beat is not held back by a budget the earlier beats
+    // have already spent on this person.
+    await ctx.sql`
+      UPDATE nudges SET delivered_at = delivered_at - interval '2 days'
+      WHERE organization_id = ${ctx.organizationId} AND recipient_user_id = ${person!.id}
+        AND delivered_at > date_trunc('day', now())`
+    const task = await createTask(ctx, actor, {
+      title: 'loop reminder — send the pre-cool logs',
+      assigneeId: person!.id,
+      dueAt: new Date(Date.now() - 86_400_000),
+    })
+    return { person: person!, taskId: task.id }
+  })
+
+  const remindersBefore = await withTenant(
+    { ...session, userId: chased.person.id },
+    async (ctx) => (await listReminders(ctx, await loadActor(ctx))).length,
+  )
+
+  // The missing link. Nothing in the product ever called `scheduleLadder`, so the delivery
+  // pass ran on an empty queue on every tick and the whole of §29.2 was reachable only from
+  // these loops.
+  const opened = await withTenant(session, async (ctx) => openLaddersForDueWork(ctx))
+  ok('Work that is late has a ladder opened for it by the product, not by a test',
+    opened.opened > 0, `${opened.opened} of ${opened.considered} considered`)
+
+  const sent = await withTenant(session, async (ctx) => deliverDueNudges(ctx, { subjectId: chased.taskId }))
+  ok('And the rung that was due is delivered', sent.delivered > 0, `${sent.delivered} delivered`)
+
+  const asPerson = { ...session, userId: chased.person.id }
+  const arrived = await withTenant(asPerson, async (ctx) => listReminders(ctx, await loadActor(ctx)))
+  const mine = arrived.find((row) => row.subjectId === chased.taskId)
+  ok('The person can see what they were sent, which they never could before',
+    Boolean(mine) && arrived.length > remindersBefore, mine?.message.slice(0, 60) ?? 'nothing arrived')
+  ok('It says what it is about, not just that something is late',
+    mine?.subjectLabel === 'loop reminder — send the pre-cool logs')
+
+  const refusedRead = await withTenant(session, async (ctx) =>
+    listReminders(ctx, await loadActor(ctx), { userId: chased.person.id }).then(
+      () => null,
+      (error: Error) => error.message,
+    ),
+  )
+  ok('And nobody else can read it, an admin included', /29\.5|record of that person/i.test(refusedRead ?? ''),
+    (refusedRead ?? 'it was allowed').slice(0, 60))
+
+  const answered = await withTenant(asPerson, async (ctx) =>
+    answerReminder(ctx, await loadActor(ctx), {
+      nudgeId: mine!.id,
+      action: 'done',
+      note: 'Sent them this morning.',
+    }),
+  )
+  ok('Answering does something to the work itself', /marked done/i.test(answered.effect), answered.effect.slice(0, 60))
+
+  const afterAnswer = await withTenant(session, async (ctx) => {
+    const [task] = await ctx.sql<{ status: string }[]>`SELECT status FROM tasks WHERE id = ${chased.taskId}`
+    const [open] = await ctx.sql<{ count: number }[]>`
+      SELECT count(*)::int FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND subject_id = ${chased.taskId}
+        AND cancelled_at IS NULL AND responded_at IS NULL AND deleted_at IS NULL`
+    return { status: task!.status, open: open!.count }
+  })
+  ok('The task is closed by the answer', afterAnswer.status === 'completed', afterAnswer.status)
+  // Before this, answering did not touch the ladder: you could say "done" three times and
+  // still be escalated to your manager on rung five.
+  ok('And the rest of the chasing is called off', afterAnswer.open === 0)
+
+  // Put the demo back: this beat opened ladders across the whole organization.
+  await withTenant(session, async (ctx) => {
+    await ctx.sql`
+      DELETE FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND entity_type = 'nudge'
+        AND entity_id IN (SELECT id FROM nudges WHERE created_at > ${new Date(Date.now() - 3_600_000)})`
+    await ctx.sql`
+      DELETE FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND created_at > ${new Date(Date.now() - 3_600_000)}`
+    await ctx.sql`
+      DELETE FROM tasks
+      WHERE organization_id = ${ctx.organizationId} AND title LIKE 'loop reminder —%'`
+  })
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -1795,7 +1889,9 @@ try {
         'for became one number, read from the database, that an organization can tighten and never widen; \n' +
         'and what people say when they throw an insight away is read at last, so a watcher they call wrong \n' +
         'stops and one they had already handled keeps running; and a project can finally say who is on it, \n' +
-        'which opens its work for them without handing them a say over it.\n',
+        'which opens its work for them without handing them a say over it; and a reminder is finally \n' +
+        'opened by the product, arrives somewhere a person can see it, and closes the work when they \n' +
+        'answer it.\n',
   )
 } catch (error) {
   console.error(error)

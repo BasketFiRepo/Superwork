@@ -698,6 +698,37 @@ they were actually working on was to record them as an outsider being shown it.
 
 **Any project → "Who is on it".** See ADR 0032.
 
+## Reminders, and what an answer does
+
+The nudge ladder (§29.2) had five rungs, a per-person daily budget shared across every
+agent, an audience per rung and a manager escalation a co-determined jurisdiction switches
+off. All of it existed and none of it had ever happened outside the acceptance loops.
+
+- **Nothing opened a ladder.** `scheduleLadder` was called by the loops and by nothing in the
+  product, so the worker's delivery pass ran on an empty queue every tick.
+- **Nothing could receive one.** Rungs four and five are declared `in_app` and there was no
+  in-app anything; every delivery wrote a `notifications` row that only retention and erasure
+  ever read — both to delete it. With no chat integration connected, which is the default,
+  delivery degrades to `in_app`, so every reminder would have landed nowhere and been
+  recorded as delivered.
+- **The answer meant nothing.** Five actions under a comment saying *"One action closes it"*
+  wrote the word to a row: the task was untouched and the due query does not filter on
+  `responded_at`, so you could answer "done" three times and still be escalated to your
+  manager.
+
+Now the worker opens ladders for work that is near its date, reminders arrive on a screen of
+the person's own, and each answer does what it says — done completes the task, blocked marks
+it with the reason given, a new date moves it and re-lays the ladder against the date the
+person chose, somebody else reassigns it and sends the chasing after the work. Answering
+calls off the remaining rungs; only "not yet" leaves them running, and says so.
+
+**Nobody but you can read your reminders** — not an admin, not your manager. A list of what
+somebody has been chased about is a record of that person (§29.5). A manager's escalation
+arrives as their own reminder about one overdue thing, which is the difference between
+accountability and monitoring.
+
+**Reminders.** See ADR 0033.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1175,6 +1206,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0030](docs/adr/0030-a-limit-a-tenant-can-raise-is-not-a-limit.md) | A limit a tenant can raise is not a limit |
 | [0031](docs/adr/0031-a-watcher-that-is-right-and-unwelcome-is-not-one-that-is-wrong.md) | A watcher that is right and unwelcome is not one that is wrong |
 | [0032](docs/adr/0032-being-on-a-project-lends-a-read-not-a-say.md) | Being on a project lends a read, not a say |
+| [0033](docs/adr/0033-a-reminder-has-to-arrive-somewhere-and-the-answer-has-to-mean-something.md) | A reminder has to arrive somewhere, and the answer has to mean something |
 
 ## Configuration
 

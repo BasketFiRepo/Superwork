@@ -4,11 +4,12 @@ import { Sidebar } from '@/components/Sidebar'
 import { AgentRail } from '@/components/AgentRail'
 import { CommandBar } from '@/components/CommandBar'
 import { env } from '@superwork/config'
+import { reminderCount } from '@superwork/core'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await requireSession()
 
-  const counts = await withActor(session, async (ctx) => {
+  const counts = await withActor(session, async (ctx, actor) => {
     const [row] = await ctx.sql<
       { approvals: number; insights: number; inbox: number; pastSla: number; commitments: number }[]
     >`
@@ -27,7 +28,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             AND conv.last_message_at < now() - make_interval(days => coalesce(c.reply_sla_days, 4))) AS "pastSla",
         (SELECT count(*)::int FROM commitments
           WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND status = 'proposed') AS commitments`
-    return row ?? { approvals: 0, insights: 0, inbox: 0, pastSla: 0, commitments: 0 }
+    // Your own, and only ever your own: the badge counts what is waiting for *you* to
+    // answer, which is a different question from what the organization has outstanding.
+    const reminders = await reminderCount(ctx, actor)
+    return { ...(row ?? { approvals: 0, insights: 0, inbox: 0, pastSla: 0, commitments: 0 }), reminders }
   })
 
   // Density is a per-person flag, resolved with the session. The root layout stamps the
@@ -73,6 +77,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         inbox={counts.inbox}
         pastSla={counts.pastSla}
         commitments={counts.commitments}
+        reminders={counts.reminders}
         flags={session.flags}
       />
 
