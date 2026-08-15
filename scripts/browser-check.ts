@@ -1280,6 +1280,49 @@ try {
     /not chased on days you do not work/i.test(mine) && /England & Wales/i.test(mine))
   ok('And it names the next one rather than only the rule', /Next: .+\(\d{4}-\d{2}-\d{2}\)/.test(mine))
 
+  // ---- What the model was asked, and what it cost -------------------------
+  // `agent_messages` was written by nothing, so a run could say it cost four cents and not
+  // which step, which model, or how long any of it took.
+  await page.goto(`${BASE}/activity`)
+  await page.waitForSelector('[data-testid="activity-row"], [data-testid="run-row"]', { timeout: 15_000 }).catch(() => undefined)
+  // Not every run calls a model — a workflow run that only executes tools makes none — so
+  // the walk looks for one that did rather than assuming the newest one qualifies.
+  const runHrefs = await page.locator('a[href*="/activity?run="]').evaluateAll((links) =>
+    Array.from(new Set(links.map((link) => (link as HTMLAnchorElement).getAttribute('href') ?? ''))).filter(Boolean),
+  )
+  ok('The run list has a run to open', runHrefs.length > 0, `${runHrefs.length} runs`)
+
+  let messages = ''
+  let messageRows = 0
+  for (const href of runHrefs.slice(0, 8)) {
+    await page.goto(`${BASE}${href}`)
+    const found = await page
+      .waitForSelector('[data-testid="run-messages"]', { timeout: 5_000 })
+      .then(() => true, () => false)
+    if (!found) continue
+    await page.locator('[data-testid="run-messages"] summary').click()
+    messages = await page.locator('[data-testid="run-messages"]').innerText()
+    messageRows = await page.locator('[data-testid="run-message-row"]').count()
+    break
+  }
+
+  ok('A run says which model it called, what for, and what that cost',
+    /agent\.plan|agent\.answer|briefing\.narrative|inbox\.classify/.test(messages) && /mock/i.test(messages),
+    messages.slice(0, 60).replace(/\n/g, ' '))
+  ok('And says the totals above are the sum of those rows, kept by the database',
+    /sum of these rows/i.test(messages))
+  ok('Every model call is on the record', messageRows > 0, `${messageRows} calls`)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/run-messages.png`, fullPage: true })
+
+  await page.goto(`${BASE}/analytics`)
+  await page.waitForSelector('[data-testid="ledger-models"]', { timeout: 15_000 })
+  const models = await page.locator('[data-testid="ledger-models"]').innerText()
+  ok('The ledger says where the spend went, by model and by the kind of call',
+    /Where the spend went/i.test(models) && /one number, not two/i.test(models))
+  const modelRows = await page.locator('[data-testid="ledger-model-row"]').count()
+  ok('With a row per model and task class', modelRows > 0, `${modelRows} rows`)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/model-spend.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before

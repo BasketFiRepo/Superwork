@@ -409,6 +409,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['conversations'] = await seedThreads(ctx, userIds, companyIds)
     counts['documents'] = await seedDocuments(ctx, companyIds, projectIds, userIds)
     counts['agents'] = await seedAgents(ctx, userIds, departmentIds)
+    counts['modelCalls'] = await seedAgentRun(ctx, userIds, departmentIds)
     counts['policies'] = await seedApprovalPolicies(ctx)
     counts['meetings'] = await seedMeetings(ctx, userIds, companyIds, projectIds)
     counts['preferences'] = await seedPreferences(ctx, userIds)
@@ -642,6 +643,103 @@ async function seedDocuments(
   }
 
   return count
+}
+
+/**
+ * One finished agent run, with the model calls it made (ADR 0040).
+ *
+ * The demo had no `agent_runs` at all, so `/activity` showed a run list with nothing in it
+ * and the AI ledger reported zeros — the two screens that exist to account for what the
+ * assistant did had nothing to account for.
+ *
+ * The run's own tokens and cost are **not** written here. They are computed from the messages
+ * by the trigger, which is the property this increment exists to establish: if the seed had to
+ * state them, they would be a second place that has to agree.
+ */
+async function seedAgentRun(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  departmentIds: Map<string, string>,
+): Promise<number> {
+  const maya = userIds.get('maya')!
+  const [run] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO agent_runs (
+      organization_id, department_id, principal_user_id, mode, status, trigger, request,
+      timezone, ai_mode, trace_id, started_at, finished_at, is_demo, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${departmentIds.get('Executive')!}, ${maya}, 'ask', 'succeeded',
+      'user', 'What is slipping this week, and who is waiting on it?',
+      'Europe/London', 'mock', ${`trace-demo-${ctx.organizationId.slice(0, 8)}`},
+      ${ago(2)}, ${ago(2)}, true, ${ctx.userId}
+    ) RETURNING id`
+
+  // Simulated is the truth: the demo runs on the deterministic mock provider, and every
+  // screen badges it as such (§5.12).
+  const calls = [
+    {
+      taskClass: 'agent.plan',
+      model: 'mock-deterministic',
+      content: '{"steps":[{"tool":"list_tasks@v1"},{"tool":"list_commitments@v1"}]}',
+      tokensIn: 1840,
+      tokensOut: 96,
+      costCents: 0.612,
+      latencyMs: 240,
+    },
+    {
+      taskClass: 'agent.answer',
+      model: 'mock-deterministic',
+      content:
+        'Three things are slipping. The Halden pre-cool logs are four days late and Kestrel’s audit ' +
+        'is waiting on them. The Belmont surcharge rework is two days late with nobody waiting.',
+      tokensIn: 2450,
+      tokensOut: 210,
+      costCents: 0.884,
+      latencyMs: 610,
+    },
+  ]
+
+  for (const call of calls) {
+    await ctx.sql`
+      INSERT INTO agent_messages (
+        organization_id, run_id, role, content, task_class, model,
+        tokens_in, tokens_out, cost_cents, latency_ms, simulated, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${run!.id}, 'assistant', ${call.content}, ${call.taskClass},
+        ${call.model}, ${call.tokensIn}, ${call.tokensOut}, ${call.costCents}, ${call.latencyMs},
+        true, true, ${ctx.userId}
+      )`
+    await ctx.sql`
+      INSERT INTO usage_records (
+        organization_id, department_id, user_id, agent_run_id, unit, quantity, cost_cents,
+        model, task_class, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${departmentIds.get('Executive')!}, ${maya}, ${run!.id},
+        'tokens_out', ${call.tokensOut}, ${call.costCents}, ${call.model}, ${call.taskClass},
+        true, ${ctx.userId}
+      )`
+  }
+  await ctx.sql`
+    INSERT INTO usage_records (
+      organization_id, department_id, user_id, agent_run_id, unit, quantity, cost_cents,
+      is_demo, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${departmentIds.get('Executive')!}, ${maya}, ${run!.id},
+      'agent_run', 1, 0, true, ${ctx.userId}
+    )`
+
+  // A real run writes this, and it is what puts the run on the activity feed with a link
+  // back to it. Without it the run existed and no screen offered a way in.
+  await ctx.sql`
+    INSERT INTO activities (
+      organization_id, actor_type, actor_user_id, actor_label, verb, entity_type, entity_id,
+      entity_label, summary, agent_run_id, occurred_at, is_demo, created_by
+    ) VALUES (
+      ${ctx.organizationId}, 'agent', ${maya}, 'Superwork', 'completed a run', 'agent_run',
+      ${run!.id}, 'What is slipping this week, and who is waiting on it?',
+      ${calls[1]!.content}, ${run!.id}, ${ago(2)}, true, ${ctx.userId}
+    )`
+
+  return calls.length
 }
 
 async function seedAgents(

@@ -276,6 +276,52 @@ export default async function AnalyticsPage({
             </div>
           </section>
 
+          {report.models.length > 0 ? (
+            <section className="panel" data-testid="ledger-models">
+              <div className="panel-header">
+                <h2>Where the spend went</h2>
+                <span className="small muted">by model and by the kind of call</span>
+              </div>
+              <div className="panel-body-flush table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>What for</th>
+                      <th style={{ width: 90 }}>Calls</th>
+                      <th style={{ width: 160 }}>Tokens</th>
+                      <th style={{ width: 110 }}>Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.models.map((row) => (
+                      <tr key={`${row.model}:${row.taskClass}`} data-testid="ledger-model-row">
+                        <td className="mono small">
+                          {row.model}
+                          {row.simulated ? (
+                            <div>
+                              <span className="chip">simulated</span>
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className="small secondary">{row.taskClass}</td>
+                        <td className="num">{row.calls}</td>
+                        <td className="num small">
+                          {row.tokensIn} in · {row.tokensOut} out
+                        </td>
+                        <td className="num">{money(row.costCents)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="panel-body hairline-top small muted">
+                Read from the model calls themselves, which are also what the run totals are
+                summed from — so this table and the figure above it are one number, not two.
+              </div>
+            </section>
+          ) : null}
+
           <p className="small muted">
             There is no ranking of individuals here, and no setting that adds one. Superwork
             reports what the assistant did, by department and by agent — never how much a

@@ -900,6 +900,39 @@ nothing showed it until the product learned what a weekend is.
 
 **Settings → Teams; Reminders.** See ADR 0039.
 
+## One writer for what the model cost
+
+`agent_messages` was created in migration 0003 and nothing ever wrote a row. Cost was a
+running total on `agent_runs`, so the AI ledger could say a run cost four cents and not which
+step, which model, or how long any of it took.
+
+Fixing that turned up something worse: there were already **two** writers of model spend and
+they had drifted.
+
+- `addUsage` incremented the run's totals and `recordUsageRecord` wrote the metering row, side
+  by side at *most* call sites — three of four in the nervous system, and the act path's
+  narrative call had no metering row at all, so that spend never reached the cap it counted
+  against.
+- Both run paths **also** wrote a `unit = 'agent_run'` usage record carrying the run's whole
+  cost, on top of the per-call rows. `spendSnapshot` sums every unit, so an ask run was counted
+  roughly twice: month-to-date AI spend was inflated and the §19.2 cap tripped at about half
+  the real figure.
+
+Now:
+
+- **One writer.** `recordMessage` writes the message row and the metering row from the same
+  numbers in the same transaction. No call site can remember one and forget the other.
+- **The run's totals belong to the database** — recomputed from its messages by a trigger, so
+  a corrected or deleted message leaves the total right rather than drifted.
+- **A run-level usage record counts the run, not its cost again.**
+- **The detail does not age out separately from the total**: messages go when their run goes,
+  because purging them alone would recompute the run's cost to zero.
+
+The run page gains a table of model calls; the ledger gains "Where the spend went", by model
+and task class, read from the same rows the totals are summed from.
+
+**Activity → any run; Analytics.** See ADR 0040.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1384,6 +1417,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0037](docs/adr/0037-a-saved-view-is-a-question-and-a-watch-is-not-a-grant.md) | A saved view is a question, and a watch is not a grant |
 | [0038](docs/adr/0038-indexing-has-to-survive-the-request-that-asked-for-it.md) | Indexing has to survive the request that asked for it |
 | [0039](docs/adr/0039-a-day-somebody-does-not-work.md) | A day somebody does not work |
+| [0040](docs/adr/0040-one-writer-for-what-the-model-cost.md) | One writer for what the model cost |
 
 ## Configuration
 

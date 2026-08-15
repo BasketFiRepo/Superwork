@@ -1,4 +1,5 @@
 import { asJson, type StepStatus, type TenantContext } from '@superwork/db'
+import { record as recordUsage } from '@superwork/core'
 import type { GateOutcome, Plan, RunReport } from './types.js'
 
 /** Durable-run persistence helpers. Every phase writes before it proceeds (§5.3). */
@@ -181,17 +182,53 @@ export async function recordUndo(
     )`
 }
 
-export async function addUsage(
+/**
+ * Records one exchange with the model (§5.11, ADR 0040).
+ *
+ * This is the only writer of model spend. It writes the `agent_messages` row and the metering
+ * row for the same call, in one transaction, and the run's own totals are recomputed from the
+ * messages by a trigger. Before this there were two writers and they had drifted: some model
+ * calls never reached metering at all, and both run paths *also* recorded the run's whole cost
+ * as a second usage record on top of the per-call ones, so month-to-date AI spend was counted
+ * roughly twice and the spend cap tripped at about half the real figure.
+ *
+ * `content` is what the model returned. The request is on the run, and the system prompt is a
+ * product constant rather than per-run data, so neither is copied here for every call.
+ */
+export async function recordMessage(
   ctx: TenantContext,
   runId: string,
-  usage: { tokensIn: number; tokensOut: number; costCents: number },
+  input: {
+    taskClass: string
+    content: string
+    simulated?: boolean
+    usage: { tokensIn: number; tokensOut: number; costCents: number; model: string; latencyMs: number }
+  },
 ): Promise<void> {
+  const { usage } = input
+  // A model that returned nothing still cost something, and the CHECK requires a body: say
+  // so rather than dropping the row that carries the cost.
+  const content = input.content.trim() || '(the model returned nothing)'
   await ctx.sql`
-    UPDATE agent_runs SET
-      tokens_in = tokens_in + ${usage.tokensIn},
-      tokens_out = tokens_out + ${usage.tokensOut},
-      cost_cents = cost_cents + ${usage.costCents}
-    WHERE organization_id = ${ctx.organizationId} AND id = ${runId}`
+    INSERT INTO agent_messages (
+      organization_id, run_id, role, content, task_class, model,
+      tokens_in, tokens_out, cost_cents, latency_ms, simulated, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${runId}, 'assistant', ${content.slice(0, 20_000)},
+      ${input.taskClass}, ${usage.model}, ${usage.tokensIn}, ${usage.tokensOut},
+      ${usage.costCents}, ${usage.latencyMs}, ${input.simulated ?? false}, ${ctx.userId}
+    )`
+
+  // Metering, from the same call and the same numbers. One row per model call: the run-level
+  // row that used to carry the run's whole cost as well is what did the double counting.
+  await recordUsage(ctx, {
+    unit: 'tokens_out',
+    quantity: usage.tokensOut,
+    costCents: usage.costCents,
+    model: usage.model,
+    taskClass: input.taskClass,
+    agentRunId: runId,
+  })
 }
 
 function stripPreviewFunctions(gate: GateOutcome): unknown {

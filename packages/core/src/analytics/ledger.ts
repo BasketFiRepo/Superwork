@@ -81,6 +81,11 @@ export interface LedgerReport {
   }
   departments: DepartmentLedger[]
   agents: { agentId: string | null; agentName: string; runs: number; costCents: number; actionsExecuted: number }[]
+  /**
+   * Where the spend went, by model and by the kind of call it was — which nothing could
+   * answer while `agent_messages` was unwritten (ADR 0040).
+   */
+  models: { model: string; taskClass: string; calls: number; tokensIn: number; tokensOut: number; costCents: number; simulated: boolean }[]
   /** Empty when every department the actor may read is included. */
   restrictedTo: string[] | null
 }
@@ -377,6 +382,28 @@ export async function ledgerReport(
     { runs: 0, costCents: 0, actionsExecuted: 0, approvalsRequested: 0, runsUndone: 0, passagesRead: 0 },
   )
 
+  // Read from the messages rather than from `usage_records`: the same rows the run totals
+  // are derived from, so "the month cost X" and "these calls cost X" are one number.
+  const modelRows = await sql<
+    { model: string | null; task_class: string | null; calls: string; tin: string; tout: string; cost: string; simulated: boolean }[]
+  >`
+    SELECT m.model, m.task_class, count(*)::text AS calls,
+           coalesce(sum(m.tokens_in), 0)::text AS tin,
+           coalesce(sum(m.tokens_out), 0)::text AS tout,
+           coalesce(sum(m.cost_cents), 0)::text AS cost,
+           bool_or(m.simulated) AS simulated
+    FROM agent_messages m
+    JOIN agent_runs r ON r.id = m.run_id
+    WHERE m.organization_id = ${org} AND m.deleted_at IS NULL
+      AND m.created_at >= ${period.from} AND m.created_at < ${period.to}
+      AND (
+        ${includeNoDepartment ? sql`r.department_id IS NULL OR` : sql``}
+        r.department_id = ANY(${visibleIds}::uuid[])
+      )
+    GROUP BY m.model, m.task_class
+    ORDER BY sum(m.cost_cents) DESC
+    LIMIT 40`
+
   const everything = visible.length === departments.length + 1
 
   return {
@@ -394,6 +421,15 @@ export async function ledgerReport(
       runs: Number(row.runs),
       costCents: Number(row.cost),
       actionsExecuted: Number(row.actions),
+    })),
+    models: modelRows.map((row) => ({
+      model: row.model ?? 'unrecorded',
+      taskClass: row.task_class ?? 'unrecorded',
+      calls: Number(row.calls),
+      tokensIn: Number(row.tin),
+      tokensOut: Number(row.tout),
+      costCents: Number(row.cost),
+      simulated: row.simulated,
     })),
     restrictedTo: everything ? null : visible.map((d) => d.name),
   }
