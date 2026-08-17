@@ -28,9 +28,24 @@ export interface TraceCitation {
   sourceType: string
 }
 
-function formatTime(value?: string | null): string {
+/**
+ * A step's clock time, in the viewing person's timezone (§2.4).
+ *
+ * The timezone is a required argument rather than a defaulted one on purpose. Without it
+ * this read the runtime's own zone, which is the server's during the render and the
+ * browser's a moment later during hydration — so the same step showed two different times
+ * on one page load, and on a UTC host every time was wrong for everybody not on UTC. Both
+ * call sites had the right zone to hand and neither was asked for it.
+ */
+function formatTime(value: string | null | undefined, timeZone: string): string {
   if (!value) return '--:--:--'
-  return new Date(value).toLocaleTimeString('en-GB', { hour12: false })
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(value))
 }
 
 function formatDuration(ms?: number | null): string {
@@ -42,11 +57,14 @@ export function TraceRail({
   steps,
   narrative,
   citations = [],
+  timezone,
   children,
 }: {
   steps: TraceStep[]
   narrative?: string | null
   citations?: TraceCitation[]
+  /** The viewing person's timezone. Required: see `formatTime`. */
+  timezone: string
   children?: React.ReactNode
 }) {
   return (
@@ -54,7 +72,7 @@ export function TraceRail({
       {steps.map((step) => (
         <div className="trace-node" data-status={step.status} key={`${step.ordinal}-${step.label}`}>
           <div className="trace-label">
-            <span className="trace-time">{formatTime(step.startedAt)}</span>
+            <span className="trace-time">{formatTime(step.startedAt, timezone)}</span>
             <span className={step.status === 'skipped' ? 'muted' : undefined}>{step.label}</span>
             {step.status === 'awaiting_approval' ? <span className="chip chip-attention">Paused</span> : null}
             <span className="trace-duration">{formatDuration(step.durationMs)}</span>

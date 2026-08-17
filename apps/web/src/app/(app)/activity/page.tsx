@@ -95,6 +95,7 @@ export default async function ActivityPage({
             </div>
 
             <TraceRail
+              timezone={session.timezone}
               steps={data.steps.map((step) => ({
                 ordinal: step.ordinal,
                 phase: step.phase,
