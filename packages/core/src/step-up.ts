@@ -35,6 +35,10 @@ export const STEP_UP_ACTIONS = {
   // adding one widens; both arrive through the same screen, and a control that asks
   // sometimes teaches people to click through.
   'agent_grant.set': 'changing what agents are allowed to do across this organization',
+  // Lowering one is the dangerous direction: it widens who can retrieve a document, and it
+  // overrides a classifier that read something in the content. Raising only ever narrows, so
+  // it does not ask (ADR 0044).
+  'document.declassify': 'lowering a document’s classification below what the classifier read',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

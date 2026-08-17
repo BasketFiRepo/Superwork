@@ -162,6 +162,8 @@ async function bodyFor(
   ownerId: string | null
   departmentId: string | null
   sensitivity: string
+  effectiveFrom: string | null
+  effectiveTo: string | null
 } | null> {
   const [row] = await ctx.sql<
     {
@@ -174,11 +176,18 @@ async function bodyFor(
       ownerId: string | null
       departmentId: string | null
       sensitivity: string
+      effectiveFrom: string | null
+      effectiveTo: string | null
     }[]
   >`
     SELECT dv.body, d.title, d.doc_type AS "docType", d.company_id AS "companyId",
            d.project_id AS "projectId", d.space_id AS "spaceId", d.owner_id AS "ownerId",
-           d.department_id AS "departmentId", d.sensitivity::text AS sensitivity
+           d.department_id AS "departmentId",
+           -- The classifier's own last reading, not the level in force: when a person has
+           -- overridden the classification, flooring the classifier with *their* level would
+           -- record their decision as though the pattern had read it (ADR 0044).
+           coalesce(d.sensitivity_auto, d.sensitivity)::text AS sensitivity,
+           d.effective_from::text AS "effectiveFrom", d.effective_to::text AS "effectiveTo"
     FROM documents d
     JOIN document_versions dv ON dv.id = d.current_version_id
     WHERE d.organization_id = ${ctx.organizationId} AND d.id = ${documentId} AND d.deleted_at IS NULL`
@@ -291,6 +300,11 @@ export async function runIngestionJobs(
           spaceId: source.spaceId,
           ownerId: source.ownerId,
           departmentId: source.departmentId,
+          // And the term, for the same reason: chunks are written fresh on every re-index, so
+          // a re-index that did not restate the term would silently return an expired contract
+          // to circulation as current — the one thing ADR 0042 exists to stop.
+          effectiveFrom: source.effectiveFrom,
+          effectiveTo: source.effectiveTo,
         })
       })
 

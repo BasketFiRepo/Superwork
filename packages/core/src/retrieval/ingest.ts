@@ -116,7 +116,21 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
     }
 
     // ---- Classify -----------------------------------------------------------
+    //
+    // What the classifier reads the content as, which is recorded whether or not it wins. A
+    // person who has looked at the document may have decided otherwise, and the disagreement
+    // is the thing an auditor needs to see (ADR 0044).
     const classification = classifyContent(normalized, input.sensitivityHint ?? 'internal')
+
+    const [existing] = await sql<{ source: string; sensitivity: Sensitivity }[]>`
+      SELECT sensitivity_source AS source, sensitivity FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+    // `classifyContent` can only ever raise: it takes the highest of what it detects and the
+    // fallback. So without this, a person who corrected a false positive would find the next
+    // re-index putting it straight back, and the correction would look like a bug in their
+    // own product.
+    const humanDecided = existing?.source === 'human'
+    const effective = humanDecided ? existing!.sensitivity : classification.sensitivity
 
     // ---- Version ------------------------------------------------------------
     const [nextVersion] = await sql<{ next_ordinal: number }[]>`
@@ -159,7 +173,11 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
     )
 
     for (const [i, chunk] of enriched.entries()) {
-      const chunkClass = classifyContent(chunk.content, classification.sensitivity)
+      // A person's decision is about the document and everything in it, so the passages take
+      // their level rather than having a detector raise them past it again.
+      const chunkClass = humanDecided
+        ? { sensitivity: effective }
+        : classifyContent(chunk.content, classification.sensitivity)
       await sql`
         INSERT INTO document_chunks (
           organization_id, document_id, version_id, ordinal, heading_path, anchor, content,
@@ -183,7 +201,8 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
         index_error = ${verification.warnings.length ? verification.warnings.join(' ') : null},
         current_version_id = ${versionId},
         content_hash = ${contentHash},
-        sensitivity = ${classification.sensitivity},
+        sensitivity = ${effective},
+        sensitivity_auto = ${classification.sensitivity},
         doc_type = ${docType},
         effective_from = coalesce(${input.effectiveFrom ?? null}::date, effective_from),
         effective_to = coalesce(${input.effectiveTo ?? null}::date, effective_to),
@@ -204,7 +223,7 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
       documentId: input.documentId,
       versionId,
       chunks: enriched.length,
-      sensitivity: classification.sensitivity,
+      sensitivity: effective,
       status: 'indexed',
       verification,
     }

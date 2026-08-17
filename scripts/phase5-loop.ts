@@ -152,6 +152,8 @@ import {
   ingestionBacklog,
   requestReindex,
   runIngestionJobs,
+  reclassifyDocument,
+  reclassifyAutomatically,
   setEmbeddingProvider,
   HashingEmbeddingProvider,
   EMBEDDING_DIMENSIONS,
@@ -2638,6 +2640,90 @@ try {
     term.health.terms.expired > 0, `${term.health.terms.expired} out of term`)
 
 
+  // ---- Who decided this was confidential ------------------------------------
+  console.log('\nA classification somebody weighed…\n')
+
+  const weighed = await (async () => {
+    // A document the classifier read as more sensitive than internal, and that nobody has
+    // weighed — which, before this, was every document in Superwork.
+    const [subject] = await adminSql()<{ id: string; title: string; auto: string | null }[]>`
+      SELECT d.id, d.title, d.sensitivity_auto::text AS auto
+      FROM documents d
+      WHERE d.organization_id = ${session.organizationId} AND d.sensitivity_source = 'auto'
+        AND d.sensitivity IN ('confidential', 'restricted') AND d.deleted_at IS NULL
+        AND d.current_version_id IS NOT NULL
+      ORDER BY d.created_at LIMIT 1`
+
+    const before = await withTenant(session, async (ctx) =>
+      getDocument(ctx, await loadActor(ctx), subject!.id))
+
+    // Lowering widens who can retrieve it, so it asks for a fresh proof. Raising never does.
+    const askedForProof = await withTenant(session, async (ctx) =>
+      reclassifyDocument(ctx, await loadActor(ctx), {
+        documentId: subject!.id,
+        sensitivity: 'internal',
+        reason: 'Reviewed in the loop: nothing in here is commercially sensitive.',
+      }).then(() => 'allowed', (error: Error) => error.constructor.name))
+
+    const lowered = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+      reclassifyDocument(ctx, await loadActor(ctx), {
+        documentId: subject!.id,
+        sensitivity: 'internal',
+        reason: 'Reviewed in the loop: nothing in here is commercially sensitive.',
+      }))
+
+    const [chunk] = await adminSql()<{ sensitivity: string }[]>`
+      SELECT sensitivity::text AS sensitivity FROM document_chunks WHERE document_id = ${subject!.id} LIMIT 1`
+
+    // The classifier does not argue with the person afterwards: a re-index leaves the decision
+    // alone, and still records what it reads.
+    await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+      requestReindex(ctx, await loadActor(ctx), {
+        documentId: subject!.id,
+        reason: 'Checking the classifier stays out of a decision somebody made.',
+      }))
+    await runIngestionJobs(session)
+    const reindexed = await withTenant(session, async (ctx) =>
+      getDocument(ctx, await loadActor(ctx), subject!.id))
+
+    // Put the demo back: handed to the classifier, which restores what it reads.
+    const handedBack = await withTenant(session, async (ctx) =>
+      reclassifyAutomatically(ctx, await loadActor(ctx), {
+        documentId: subject!.id,
+        reason: 'Handed back at the end of the loop.',
+      }))
+    await adminSql()`
+      DELETE FROM activities WHERE organization_id = ${session.organizationId}
+        AND entity_id = ${subject!.id} AND summary LIKE '%decided by%'`
+    await adminSql()`
+      DELETE FROM ingestion_jobs WHERE organization_id = ${session.organizationId}
+        AND document_id = ${subject!.id} AND reason LIKE 'Checking the classifier%'`
+
+    return { subject: subject!, before, askedForProof, lowered, chunk: chunk!, reindexed, handedBack }
+  })()
+
+  ok('A classification nobody weighed says so, and says what the classifier read',
+    weighed.before.sensitivitySource === 'auto' && weighed.before.sensitivityAuto !== null,
+    `${weighed.before.sensitivity} read by the classifier`)
+  ok('Lowering one asks for a fresh proof, because it widens who can retrieve it',
+    weighed.askedForProof === 'StepUpRequiredError', weighed.askedForProof)
+  ok('With the proof it is corrected, and names who decided and why',
+    weighed.lowered.sensitivity === 'internal' &&
+      weighed.lowered.sensitivitySource === 'human' &&
+      !!weighed.lowered.sensitivitySetByName && !!weighed.lowered.sensitivityReason,
+    weighed.lowered.sensitivitySetByName ?? 'nobody')
+  ok('The decision reaches the passages, which is what retrieval actually filters on',
+    weighed.chunk.sensitivity === 'internal', weighed.chunk.sensitivity)
+  ok('And a re-index leaves it alone, instead of putting the classifier’s reading back',
+    weighed.reindexed.sensitivity === 'internal' &&
+      weighed.reindexed.sensitivityAuto === weighed.before.sensitivity,
+    `classifier still reads ${weighed.reindexed.sensitivityAuto}`)
+  ok('Handing it back to the classifier restores what it reads, and forgets the person',
+    weighed.handedBack.sensitivity === weighed.before.sensitivity &&
+      weighed.handedBack.sensitivitySource === 'auto' &&
+      weighed.handedBack.sensitivitySetByName === null)
+
+
   // ---- A password is not the only thing that opens the door -----------------
   console.log('\nA second factor…\n')
 
@@ -2744,7 +2830,8 @@ try {
         'that comes back does, one occurrence at a time, without anybody retyping it; and a \n' +
         'contract whose term has ended stops being quoted as current while staying findable; and \n' +
         'a password is no longer the only thing between somebody else and every irreversible \n' +
-        'action.\n',
+        'action; and a classification a regex guessed at can be weighed by a person, who is \n' +
+        'named for it, and is not argued with by the next re-index.\n',
   )
 } catch (error) {
   console.error(error)
