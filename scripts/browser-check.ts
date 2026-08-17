@@ -264,8 +264,59 @@ try {
     )
     .then(() => true, () => false)
   ok('When you hear from it is something you can set', prefsSaved)
-  ok('And what is stored but not yet honoured says so rather than pretending',
-    /Coming soon/i.test(await page.locator('[data-testid="notification-preferences"]').innerText()))
+
+  // The three columns that sat in the table honoured by nothing, under a "Coming soon" chip
+  // until this increment (ADR 0047).
+  const prefsText = await page.locator('[data-testid="notification-preferences"]').innerText()
+  ok('The chip is gone: quiet hours are a control now', !/Coming soon/i.test(prefsText))
+  ok('And the panel says what holding means, and whose timezone it is in',
+    /Nothing is dropped/i.test(prefsText) && /your own timezone/i.test(prefsText))
+  ok('Each kind of thing can be immediate, kept for the briefing, or nothing',
+    (await page.locator('[data-testid="per-type"] select').count()) >= 5)
+  ok('What the product promises you will see cannot be turned down',
+    await page.locator('#route-disclosure').isDisabled())
+
+  await page.fill('#quiet-start', '19:45')
+  await page.selectOption('#route-task_changed', 'digest')
+  await page.locator('[data-testid="preferences-save"]').click()
+  const windowSaved = await page
+    .waitForFunction(
+      () => (document.querySelector('#quiet-start') as HTMLInputElement | null)?.value === '19:45',
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A window and a per-kind routing save together', windowSaved)
+
+  expectingRefusal = true
+  await page.fill('#quiet-start', '00:00')
+  await page.fill('#quiet-end', '23:30')
+  await page.locator('[data-testid="preferences-save"]').click()
+  const refusedWindow = await page
+    .waitForFunction(
+      () => /at most sixteen hours/i.test(
+        document.querySelector('[data-testid="notification-preferences"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  expectingRefusal = false
+  ok('A window that covers the day is refused with the reason', refusedWindow)
+
+  // Put the demo back: the default window, and nothing routed away from the badge — later
+  // beats in this check assert that notifications arrive.
+  await page.fill('#quiet-start', '18:30')
+  await page.fill('#quiet-end', '08:30')
+  await page.selectOption('#route-task_changed', 'immediate')
+  await page.locator('[data-testid="preferences-save"]').click()
+  await page
+    .waitForFunction(
+      () => (document.querySelector('#quiet-end') as HTMLInputElement | null)?.value === '08:30',
+      undefined,
+      { timeout: 20_000 },
+    )
+    .catch(() => undefined)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/reminders.png`, fullPage: true })
 
   // ---- Personal record ----------------------------------------------------

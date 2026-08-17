@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { adminSql, closePools, withTenant } from '@superwork/db'
+import { adminSql, closePools, withTenant, type TenantContext } from '@superwork/db'
 import { loadActor } from '@superwork/auth'
 import {
   answerReminder,
@@ -41,6 +41,21 @@ let memberSession: { organizationId: string; userId: string; timezone: string }
 const yesterday = () => new Date(Date.now() - 86_400_000)
 
 /**
+ * The moment the ladder itself says the reminder will arrive.
+ *
+ * A rung is now scheduled past a weekend, a public holiday *and* the recipient's quiet hours
+ * (ADR 0039, ADR 0047), so a pack asserting that one arrives cannot use "now" — it would pass
+ * in the morning and fail after half past six. It asks the row when it means instead.
+ */
+async function whenItIsDue(ctx: TenantContext, subjectId: string): Promise<Date> {
+  const [row] = await ctx.sql<{ scheduledFor: Date }[]>`
+    SELECT min(scheduled_for) AS "scheduledFor" FROM nudges
+    WHERE organization_id = ${ctx.organizationId} AND subject_id = ${subjectId}
+      AND delivered_at IS NULL AND deleted_at IS NULL`
+  return new Date(row!.scheduledFor.getTime() + 60_000)
+}
+
+/**
  * A task of the member's, with its ladder laid out and the due rung delivered.
  *
  * Yesterday's contacts are aged out first. The budget is per person per day and the demo
@@ -63,7 +78,7 @@ async function chaseSomething(title: string): Promise<{ taskId: string; nudgeId:
       subjectLabel: title,
       dueAt: yesterday(),
     })
-    await deliverDueNudges(ctx, { subjectId: task.id })
+    await deliverDueNudges(ctx, { subjectId: task.id, now: await whenItIsDue(ctx, task.id) })
     const [nudge] = await ctx.sql<{ id: string }[]>`
       SELECT id FROM nudges
       WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task.id}

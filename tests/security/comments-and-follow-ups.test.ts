@@ -15,7 +15,7 @@ import {
   taskComments,
   ValidationError,
 } from '@superwork/core'
-import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixtures.js'
+import { createTenant, destroyTenant, makeReachable, type TenantFixture } from '../helpers/fixtures.js'
 
 /**
  * Two things the agent wrote that nobody could read (§12.1, §13).
@@ -35,6 +35,11 @@ let conversationId: string
 
 beforeAll(async () => {
   org = await createTenant('comments-follow-ups')
+  // These packs assert that something arrives, which now depends on the recipient not being
+  // in their own quiet hours (ADR 0047). Say so rather than depending on the hour.
+  for (const userId of [org.ownerId, org.memberId, org.viewerId]) {
+    await makeReachable(org.organizationId, userId)
+  }
   session = { organizationId: org.organizationId, userId: org.ownerId, timezone: 'Europe/London' }
   memberSession = { organizationId: org.organizationId, userId: org.memberId, timezone: 'Europe/London' }
 

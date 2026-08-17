@@ -1,6 +1,13 @@
 import type { TenantContext } from '@superwork/db'
 import type { Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from './errors.js'
+import {
+  DELIVERIES,
+  MAX_QUIET_MINUTES,
+  quietMinutes,
+  UNMUTEABLE_TYPES,
+  type Delivery,
+} from './notify.js'
 import { writeAudit } from './audit.js'
 import { cancelLadder, scheduleLadder, type NudgeAction } from './nudges.js'
 import { getTask, updateTask } from './repositories/tasks.js'
@@ -107,7 +114,7 @@ export async function listReminders(
 export async function listNotifications(
   ctx: TenantContext,
   actor: Actor,
-  options: { userId?: string; limit?: number; unreadOnly?: boolean } = {},
+  options: { userId?: string; limit?: number; unreadOnly?: boolean; mutedToo?: boolean } = {},
 ): Promise<NotificationView[]> {
   const userId = options.userId ?? actor.userId
   onlyYourOwn(actor, userId)
@@ -121,6 +128,10 @@ export async function listNotifications(
       -- A nudge's notification is the same sentence as the reminder above it, so it is left
       -- to that list rather than shown twice with one copy answerable and one not.
       AND type <> 'nudge'
+      -- Quiet hours hold rather than drop: the row was written when the thing happened and
+      -- becomes visible when the window opens (ADR 0047).
+      AND deliver_after <= now()
+      ${options.mutedToo ? sql`` : sql`AND delivery <> 'none'`}
       ${options.unreadOnly ? sql`AND read_at IS NULL` : sql``}
     ORDER BY created_at DESC
     LIMIT ${Math.min(options.limit ?? 50, 200)}`
@@ -137,7 +148,9 @@ export async function reminderCount(ctx: TenantContext, actor: Actor): Promise<n
       +
       (SELECT count(*) FROM notifications
         WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
-          AND deleted_at IS NULL AND read_at IS NULL AND type <> 'nudge')
+          AND deleted_at IS NULL AND read_at IS NULL AND type <> 'nudge'
+          -- Held or turned down: neither is an interruption, so neither is on the badge.
+          AND deliver_after <= now() AND delivery = 'immediate')
     )::int AS count`
   return row?.count ?? 0
 }
@@ -154,7 +167,7 @@ export async function markNotificationsRead(
   const rows = await sql<{ id: string }[]>`
     UPDATE notifications SET read_at = now(), updated_at = now()
     WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
-      AND deleted_at IS NULL AND read_at IS NULL
+      AND deleted_at IS NULL AND read_at IS NULL AND deliver_after <= now()
       ${input.all ? sql`` : sql`AND id = ANY(${input.ids!}::uuid[])`}
     RETURNING id`
   return rows.length
@@ -358,6 +371,10 @@ export interface PreferencesView {
   briefingEnabled: boolean
   /** Stored, and honoured by nothing yet. Named so the screen can say so (§25). */
   quietHours: { start: string; end: string }
+  /** Per notification type, where a person has said something about that type. */
+  perType: Record<string, Delivery>
+  /** The fallback for a type nobody has said anything about. */
+  inApp: Delivery
 }
 
 /** Everybody has preferences whether or not a row exists, so the read never returns null. */
@@ -373,40 +390,81 @@ export async function notificationPreferences(
       endOfDayHour: number
       briefingEnabled: boolean
       quietHours: { start: string; end: string }
+      perType: Record<string, Delivery>
+      channelDefaults: Record<string, Delivery>
     }[]
   >`
     SELECT briefing_hour AS "briefingHour", end_of_day_hour AS "endOfDayHour",
-           briefing_enabled AS "briefingEnabled", quiet_hours AS "quietHours"
+           briefing_enabled AS "briefingEnabled", quiet_hours AS "quietHours",
+           per_type AS "perType", channel_defaults AS "channelDefaults"
     FROM notification_preferences
     WHERE organization_id = ${ctx.organizationId} AND user_id = ${userId} AND deleted_at IS NULL`
 
-  return (
-    row ?? {
-      briefingHour: 8,
-      endOfDayHour: 17,
-      briefingEnabled: true,
-      quietHours: { start: '18:30', end: '08:30' },
-    }
-  )
+  return {
+    briefingHour: row?.briefingHour ?? 8,
+    endOfDayHour: row?.endOfDayHour ?? 17,
+    briefingEnabled: row?.briefingEnabled ?? true,
+    quietHours: row?.quietHours ?? { start: '18:30', end: '08:30' },
+    perType: row?.perType ?? {},
+    inApp: row?.channelDefaults?.['in_app'] ?? 'immediate',
+  }
 }
 
 /**
- * Changes when this person is written to.
+ * Changes when this person is written to (§15.1, ADR 0047).
  *
- * Only the three fields the briefing scheduler actually reads can be set. `quiet_hours`,
- * `channel_defaults` and `per_type` are in the table and honoured by nothing, so the screen
- * shows them as not yet in force rather than offering a control that would change a number
- * nobody consults (§25).
+ * All of it is the person's own: `onlyYourOwn` in the read, and `actor.userId` in the write.
+ * Nobody sets somebody else's quiet hours, for the same reason nobody enrols somebody else's
+ * second factor (ADR 0043) — a preference an administrator can change on your behalf is not a
+ * preference, and "who may write to me at eleven at night" is not a management decision.
  */
 export async function setNotificationPreferences(
   ctx: TenantContext,
   actor: Actor,
-  input: { briefingHour?: number; endOfDayHour?: number; briefingEnabled?: boolean },
+  input: {
+    briefingHour?: number
+    endOfDayHour?: number
+    briefingEnabled?: boolean
+    quietHours?: { start: string; end: string }
+    perType?: Record<string, Delivery>
+    inApp?: Delivery
+  },
 ): Promise<PreferencesView> {
   const before = await notificationPreferences(ctx, actor)
   const briefingHour = input.briefingHour ?? before.briefingHour
   const endOfDayHour = input.endOfDayHour ?? before.endOfDayHour
   const briefingEnabled = input.briefingEnabled ?? before.briefingEnabled
+  const quietHours = input.quietHours ?? before.quietHours
+  const inApp = input.inApp ?? before.inApp
+  const perType = { ...before.perType, ...(input.perType ?? {}) }
+
+  for (const clock of [quietHours.start, quietHours.end]) {
+    if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(clock)) {
+      throw new ValidationError(`Quiet hours are wall-clock times like 18:30. “${clock}” is not one.`)
+    }
+  }
+  if (quietMinutes(quietHours) > MAX_QUIET_MINUTES) {
+    throw new ValidationError(
+      'Quiet hours can cover at most sixteen hours a day. "Never write to me" is not on offer — ' +
+        'colleagues reach each other through this, and the honest version is turning individual ' +
+        'kinds down to “nothing”, which is visible to you and to nobody else.',
+    )
+  }
+  for (const [type, delivery] of Object.entries(perType)) {
+    if (!DELIVERIES.includes(delivery)) {
+      throw new ValidationError(`“${delivery}” is not a delivery. It is immediate, digest or nothing.`)
+    }
+    if ((UNMUTEABLE_TYPES as readonly string[]).includes(type) && delivery !== 'immediate') {
+      throw new ValidationError(
+        `“${type}” cannot be turned down. It is how you find out that something about you reached ` +
+          'somebody else, or that the assistant has stopped and is waiting for you — a guarantee ' +
+          'you can switch off is not one.',
+      )
+    }
+  }
+  if (!DELIVERIES.includes(inApp)) {
+    throw new ValidationError(`“${inApp}” is not a delivery. It is immediate, digest or nothing.`)
+  }
 
   for (const [label, hour] of [
     ['The briefing hour', briefingHour],
@@ -419,14 +477,20 @@ export async function setNotificationPreferences(
 
   await ctx.sql`
     INSERT INTO notification_preferences (
-      organization_id, user_id, briefing_hour, end_of_day_hour, briefing_enabled, created_by
+      organization_id, user_id, briefing_hour, end_of_day_hour, briefing_enabled,
+      quiet_hours, per_type, channel_defaults, created_by
     ) VALUES (
-      ${ctx.organizationId}, ${actor.userId}, ${briefingHour}, ${endOfDayHour}, ${briefingEnabled}, ${ctx.userId}
+      ${ctx.organizationId}, ${actor.userId}, ${briefingHour}, ${endOfDayHour}, ${briefingEnabled},
+      ${ctx.sql.json(quietHours)}, ${ctx.sql.json(perType)},
+      ${ctx.sql.json({ in_app: inApp, email: 'digest' })}, ${ctx.userId}
     )
     ON CONFLICT (organization_id, user_id) WHERE deleted_at IS NULL
     DO UPDATE SET briefing_hour = EXCLUDED.briefing_hour,
                   end_of_day_hour = EXCLUDED.end_of_day_hour,
                   briefing_enabled = EXCLUDED.briefing_enabled,
+                  quiet_hours = EXCLUDED.quiet_hours,
+                  per_type = EXCLUDED.per_type,
+                  channel_defaults = EXCLUDED.channel_defaults,
                   updated_at = now()`
 
   await writeAudit(ctx, {
@@ -435,8 +499,8 @@ export async function setNotificationPreferences(
     action: 'notification_preferences.updated',
     entityType: 'user',
     entityId: actor.userId,
-    before: { ...before, quietHours: undefined },
-    after: { briefingHour, endOfDayHour, briefingEnabled },
+    before: { ...before },
+    after: { briefingHour, endOfDayHour, briefingEnabled, quietHours, perType, inApp },
   })
 
   return notificationPreferences(ctx, actor)

@@ -65,6 +65,29 @@ export async function createTenant(slug: string): Promise<TenantFixture> {
   return { organizationId, ownerId, memberId, viewerId, ...seeded }
 }
 
+/**
+ * Puts a person outside their own quiet hours for the moment the caller runs.
+ *
+ * Notifications and reminders now wait for a person's quiet hours (ADR 0047), and the schema's
+ * default window is 18:30–08:30 — so a pack asserting that something *arrives* is asserting
+ * something about the hour it runs at unless it says otherwise. This says otherwise: a window
+ * two hours from now, which contains no moment this test will use.
+ */
+export async function makeReachable(organizationId: string, userId: string): Promise<void> {
+  const from = new Date(Date.now() + 2 * 3_600_000)
+  const to = new Date(Date.now() + 4 * 3_600_000)
+  const clock = (instant: Date) =>
+    new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(instant)
+  const sql = adminSql()
+  await sql`
+    INSERT INTO notification_preferences (organization_id, user_id, quiet_hours, is_demo, created_by)
+    VALUES (${organizationId}, ${userId},
+            ${sql.json({ start: clock(from), end: clock(to) })}, true, ${userId})
+    ON CONFLICT (organization_id, user_id) WHERE deleted_at IS NULL
+    DO UPDATE SET quiet_hours = EXCLUDED.quiet_hours, updated_at = now()`
+  await adminSql()`UPDATE users SET timezone = 'UTC' WHERE id = ${userId}`
+}
+
 export async function destroyTenant(slug: string): Promise<void> {
   const sql = adminSql()
   await sql`DELETE FROM organizations WHERE slug = ${slug}`

@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeAudit } from '../audit.js'
+import { notify } from '../notify.js'
 
 /**
  * Follow-ups (§13, §29.1).
@@ -223,16 +224,16 @@ export async function sweepFollowUps(
 
   let surfaced = 0
   for (const row of due) {
-    await ctx.sql`
-      INSERT INTO notifications (
-        organization_id, user_id, type, title, body, channel, delivery, entity_type, entity_id, url, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${row.ownerId}, 'follow_up', 'A follow-up is due',
-        ${`${row.subject ? `“${row.subject}” — ` : ''}${row.reason ?? 'No reason was recorded.'}`},
-        'in_app', 'immediate', 'follow_up', ${row.id},
-        ${row.conversationId ? `/inbox/${row.conversationId}` : '/inbox'}, ${ctx.userId}
-      )
-      ON CONFLICT DO NOTHING`
+    if (!row.ownerId) continue
+    await notify(ctx, {
+      userId: row.ownerId,
+      type: 'follow_up',
+      title: 'A follow-up is due',
+      body: `${row.subject ? `“${row.subject}” — ` : ''}${row.reason ?? 'No reason was recorded.'}`,
+      entityType: 'follow_up',
+      entityId: row.id,
+      url: row.conversationId ? `/inbox/${row.conversationId}` : '/inbox',
+    })
     surfaced += 1
   }
 

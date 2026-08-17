@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, loadActor, type Actor } from '@superwork/auth'
 import { NotFoundError } from '../errors.js'
 import { writeAudit } from '../audit.js'
+import { notify } from '../notify.js'
 
 /**
  * Task watchers (§12).
@@ -188,14 +189,15 @@ export async function notifyWatchers(
     }
     if (!canRead(ctx, watcher, task)) continue
 
-    await ctx.sql`
-      INSERT INTO notifications (
-        organization_id, user_id, type, title, body, entity_type, entity_id, url, delivery, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${userId}, 'task_changed',
-        ${`“${change.title}” changed`}, ${change.summary},
-        'task', ${change.taskId}, ${`/tasks/${change.taskId}`}, 'immediate', ${ctx.userId}
-      )`
+    await notify(ctx, {
+      userId,
+      type: 'task_changed',
+      title: `“${change.title}” changed`,
+      body: change.summary,
+      entityType: 'task',
+      entityId: change.taskId,
+      url: `/tasks/${change.taskId}`,
+    })
     told += 1
   }
   return told

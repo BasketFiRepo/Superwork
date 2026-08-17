@@ -151,10 +151,15 @@ try {
       })
     }
 
-    // Not delivered on a day nobody works (ADR 0039), so the beat names the day it means
-    // rather than depending on which day CI happens to run.
-    const workingDay = nextWorkingDay('uk-england-wales', calendarDate('Europe/London'))
-    const outcome = await deliverDueNudges(ctx, { now: new Date(`${workingDay}T23:59:00Z`) })
+    // Not delivered on a day nobody works, nor inside somebody's quiet hours (ADR 0039,
+    // ADR 0047) — so the beat asks the rungs when they say they will arrive rather than
+    // depending on the day and hour CI happens to run at.
+    const [firstDue] = await ctx.sql<{ at: Date | null }[]>`
+      SELECT min(scheduled_for) AS at FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND delivered_at IS NULL AND deleted_at IS NULL`
+    const outcome = await deliverDueNudges(ctx, {
+      now: new Date((firstDue?.at ?? new Date()).getTime() + 60_000),
+    })
     const budget = await nudgeBudget(ctx, person!.id)
     return { person: person!, outcome, budget }
   })
