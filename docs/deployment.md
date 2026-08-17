@@ -184,6 +184,45 @@ does not need a reachable database — no route is statically prerendered from o
 keeping them consistent avoids a prerendered 404 page carrying a stale "Not configured"
 body.
 
+## Rotating a password
+
+The owner's password is the one a provider issues, prints on a screen and mails around, so
+it is the one most likely to need replacing. By default it is also the password the request
+path presents, because the runtime URLs are derived from `DATABASE_URL` — which means
+rotating it takes the site down until every copy is updated.
+
+Moving the runtime roles onto their own credentials first fixes that permanently. Afterwards
+the owner's password is used only by migrations, and rotating it is invisible to the running
+application.
+
+**Order matters, and the middle of it is a cutover.** A PostgreSQL role has one password, so
+between changing it in the database and changing it in the deployment's configuration, the
+request path is refused. It is short — a redeploy — but it is not zero, and doing the steps
+in a different order makes it longer rather than avoiding it.
+
+1. **Generate two passwords** for `superwork_app` and `superwork_auth`. Anything random; they
+   never need to be typed by a person.
+2. **Set them in the database.** Either the provider's SQL console, or add
+   `DATABASE_APP_URL` and `DATABASE_AUTH_URL` as repository secrets and run the provisioning
+   workflow with only *Set role passwords* ticked — `db:roles` reads the overrides and sets
+   each role to the password its own URL carries.
+3. **Add the same two URLs to the deployment** and redeploy. The cutover closes here: the
+   request path presents the new passwords and the site answers again.
+4. **Rotate the owner's password** with the provider. Nothing breaks — no runtime pool uses
+   it any more.
+5. **Update `DATABASE_URL` and `DATABASE_ADMIN_URL`** everywhere they are held: the
+   deployment, and the repository secrets the provisioning and worker workflows read. Both
+   are now only the admin connection.
+
+After step 5 the owner's password can be rotated again at any time by repeating steps 4 and
+5 alone, with no cutover at all.
+
+Two things worth checking rather than assuming. Each override must connect as the role it is
+named for — one pointed at the owner is refused at boot, which is the check working, not a
+misconfiguration. And every place holding a copy has to be updated: a deployment updated but
+a repository secret forgotten leaves the workflows authenticating with a password that no
+longer exists, and they will not fail until they next run.
+
 ## The worker
 
 `apps/worker` dispatches the outbox, indexes what is queued, runs due watchers and workflow

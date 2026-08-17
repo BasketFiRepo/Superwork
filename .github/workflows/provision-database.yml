@@ -50,6 +50,14 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+          # Optional, and passed through rather than ignored for a reason: `db:roles` sets
+          # each role to the password the *runtime* will present, which these decide. A
+          # deployment that has moved its runtime roles onto their own credentials and then
+          # runs this workflow without them would have both roles quietly set back to the
+          # owner's password — a rotation undone by the tool meant to perform it, reported
+          # as success.
+          DATABASE_APP_URL: ${{ secrets.DATABASE_APP_URL }}
+          DATABASE_AUTH_URL: ${{ secrets.DATABASE_AUTH_URL }}
         run: |
           set -euo pipefail
           : "${DATABASE_URL:?The DATABASE_URL repository secret is not set}"
@@ -61,6 +69,8 @@ jobs:
             printf 'NODE_ENV=production\n'
             printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
             printf 'DATABASE_ADMIN_URL=%s\n' "$DATABASE_ADMIN_URL"
+            [ -n "${DATABASE_APP_URL:-}" ] && printf 'DATABASE_APP_URL=%s\n' "$DATABASE_APP_URL"
+            [ -n "${DATABASE_AUTH_URL:-}" ] && printf 'DATABASE_AUTH_URL=%s\n' "$DATABASE_AUTH_URL"
             printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
           } > .env
 
