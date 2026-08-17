@@ -258,7 +258,12 @@ export function AgentRail({ timezone }: { timezone: string }) {
         ) : null}
 
         {state.steps.length > 0 || state.narrative ? (
-          <TraceRail steps={state.steps} narrative={state.narrative || null} citations={state.citations}>
+          <TraceRail
+            steps={state.steps}
+            narrative={state.narrative || null}
+            citations={state.citations}
+            timezone={timezone}
+          >
             {state.plan && state.status === 'awaiting_approval' ? (
               <div className="stack stack-4" style={{ marginTop: 'var(--s-4)' }}>
                 <p className="prose">{state.plan.summary}</p>
