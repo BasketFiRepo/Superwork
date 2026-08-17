@@ -10,7 +10,8 @@ import {
 } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
-import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
+import { ingestDocument, normalize, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
+import { classifyContent } from '../retrieval/classify.js'
 import { recordIngestion } from '../retrieval/ingestion-queue.js'
 import { holdsCoveringDocument } from '../legal-hold.js'
 import { assertSteppedUp } from '../step-up.js'
@@ -376,9 +377,29 @@ export async function uploadDocument(
     type: 'document',
     organizationId: ctx.organizationId,
     departmentId: input.departmentId ?? null,
+    // The document does not exist yet, so the resource is the one that is about to: this
+    // actor's. Without it a `document:create:own` grant could never be satisfied by anybody —
+    // members were told in the role table that they could add to company memory, and the check
+    // refused every one of them with a message telling them to ask for the access they had
+    // (ADR 0045).
+    ownerId: actor.userId,
     riskTier: 'low',
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
+
+  // Read before storing. The classifier is a pure function of the content, so what it will
+  // decide during ingest can be known now — and a document filed above the filer's own ceiling
+  // is one they cannot open, check or correct a moment after adding it. The same rule as
+  // reclassification (ADR 0044), applied where the classification is first made.
+  const reads = classifyContent(normalize(input.body), input.sensitivityHint ?? 'internal')
+  const ceiling = readCeiling(actor)
+  if (SENSITIVITY_RANK[reads.sensitivity] > SENSITIVITY_RANK[ceiling]) {
+    throw new ValidationError(
+      `This reads as ${reads.sensitivity}: ${reads.reasons.join(' ')} Your access covers up to ` +
+        `${ceiling}, so filing it would put it out of your own reach the moment it was saved. ` +
+        'Nothing has been stored. Somebody who can read at that level can file it.',
+    )
+  }
 
   const [created] = await ctx.sql<{ id: string }[]>`
     INSERT INTO documents (

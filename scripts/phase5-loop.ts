@@ -154,6 +154,7 @@ import {
   runIngestionJobs,
   reclassifyDocument,
   reclassifyAutomatically,
+  uploadDocument,
   setEmbeddingProvider,
   HashingEmbeddingProvider,
   EMBEDDING_DIMENSIONS,
@@ -2639,6 +2640,80 @@ try {
   ok('And the library can say what has run out, which nothing could answer',
     term.health.terms.expired > 0, `${term.health.terms.expired} out of term`)
 
+
+  // ---- Adding to company memory, as an ordinary member ----------------------
+  console.log('\nA member adds a document…\n')
+
+  const added = await (async () => {
+    const [colleague] = await adminSql()<{ id: string; name: string }[]>`
+      SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${session.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    const [onlooker] = await adminSql()<{ id: string }[]>`
+      SELECT m.user_id AS id FROM memberships m
+      WHERE m.organization_id = ${session.organizationId} AND m.role = 'viewer' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    const theirs = { ...session, userId: colleague!.id }
+    const watching = { ...session, userId: onlooker!.id }
+
+    const body = [
+      '# How we run the Monday planning session',
+      '',
+      'Everybody brings the one thing they most want moved this week, and we sort them together.',
+    ].join('\n')
+
+    const created = await withTenant(theirs, async (ctx) =>
+      uploadDocument(ctx, await loadActor(ctx), {
+        title: 'How we run the Monday planning session',
+        body,
+        docType: 'policy',
+      }))
+
+    const inTheirLibrary = await withTenant(theirs, async (ctx) =>
+      listDocuments(ctx, await loadActor(ctx), {}).then((rows) =>
+        rows.some((row) => row.id === created.document.id)))
+
+    // A read is not a say: a viewer is refused, and told what they would need.
+    const refusedViewer = await withTenant(watching, async (ctx) =>
+      uploadDocument(ctx, await loadActor(ctx), { title: 'Not mine to add', body })
+        .then(() => 'allowed', (error: Error) => error.message))
+
+    // A member reads up to `internal`, and the classifier reads compensation as `restricted`.
+    // Filing it would index it and then refuse the read-back, leaving them an error and a
+    // document they could neither open nor remove.
+    const outOfReach = await withTenant(theirs, async (ctx) =>
+      uploadDocument(ctx, await loadActor(ctx), {
+        title: 'Reviewing this year’s bands',
+        body: '# Bands\n\nThe salary bands are reviewed each spring, alongside the bonus scheme.',
+      }).then(() => 'allowed', (error: Error) => error.message))
+    const [stored] = await adminSql()<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM documents
+      WHERE organization_id = ${session.organizationId} AND title = 'Reviewing this year’s bands'`
+
+    // Put the demo back through the product's own delete, which takes the passages with it.
+    await withTenant(session, async (ctx) =>
+      deleteDocument(ctx, await loadActor(ctx), {
+        documentId: created.document.id,
+        reason: 'Added by the loop, removed by the loop.',
+      }))
+    await adminSql()`
+      DELETE FROM documents WHERE organization_id = ${session.organizationId} AND id = ${created.document.id}`
+    await adminSql()`
+      DELETE FROM activities WHERE organization_id = ${session.organizationId}
+        AND entity_id = ${created.document.id}`
+
+    return { colleague: colleague!, created, inTheirLibrary, refusedViewer, outOfReach, stored: stored! }
+  })()
+
+  ok('A member can add a document, which the role table has always said they could',
+    added.created.ingest.status === 'indexed' && added.created.document.ownerId === added.colleague.id,
+    `${added.created.ingest.chunks} passages, owned by ${added.colleague.name}`)
+  ok('It is in their own library rather than only in the database', added.inTheirLibrary)
+  ok('A viewer is refused, and told what they would need',
+    /Member access/i.test(added.refusedViewer), added.refusedViewer.slice(0, 60))
+  ok('Content that reads above their own ceiling is refused before anything is stored',
+    /out of your own reach/i.test(added.outOfReach) && added.stored.count === '0',
+    added.outOfReach.slice(0, 80))
 
   // ---- Who decided this was confidential ------------------------------------
   console.log('\nA classification somebody weighed…\n')

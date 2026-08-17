@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { uploadDocument } from '@superwork/core'
+import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
@@ -34,9 +35,9 @@ export async function POST(request: Request) {
       warnings: ingest.verification.warnings,
     })
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'That document could not be indexed.' },
-      { status: 400 },
-    )
+    // Through the one mapper, so a refusal answers 403 and a document filed above the filer's
+    // own ceiling answers 400 with the sentence that says why — the screen branches on the
+    // class rather than on prose somebody will reword.
+    return errorResponse(error, 'That document could not be indexed.')
   }
 }

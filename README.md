@@ -1060,6 +1060,33 @@ tests that fail without them.
 
 **Knowledge; any document.** See ADR 0044.
 
+## A grant nobody could satisfy
+
+`ROLE_PERMISSIONS.member` has included `document:create:own` since Phase 0, and no member has
+ever been able to add a document. `own` is satisfied by the resource being the actor's, and
+`uploadDocument` asked about a document that did not exist yet without saying who would own it —
+so the check refused every member with *"You need Member access to create this document"*, said
+to a member, pointing at a settings screen where nothing could be changed to fix it. The button
+was offered to viewers too, so the refusal arrived after somebody had typed the whole thing.
+
+- **A create is asked about the resource that is about to exist.** The owner in the check is the
+  owner in the `INSERT` — the same value in both places, rather than a check about nothing. The
+  agent runtime already did this; the document path did not.
+- **`document:update:own` was dead by consequence**, because nobody could own a document they
+  had added. A member's document is now theirs to reclassify and put a term on.
+- **A document you could not open a moment later is refused before anything is stored.** The
+  classifier is a pure function of the content, so what ingest will decide is knowable before
+  the first `INSERT`: a member filing compensation content would have indexed it, been refused
+  on the read-back, and been left with an error and a document they could not see or remove.
+  The refusal says what it read, what the ceiling is, that nothing was stored, and who can file
+  it instead.
+- **A transcript is not refused the same way** — it is the record of a meeting somebody
+  attended, and losing it over a word said in the room is not a trade worth making.
+- **The screen asks the same question the server answers**, so the button is disabled with the
+  policy engine's own sentence and the ceiling is stated before anybody types.
+
+**Knowledge; add a document.** See ADR 0045.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1549,6 +1576,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0042](docs/adr/0042-when-a-document-stopped-being-true.md) | When a document stopped being true |
 | [0043](docs/adr/0043-a-password-is-not-the-only-thing-that-opens-the-door.md) | A password is not the only thing that opens the door |
 | [0044](docs/adr/0044-who-decided-this-was-confidential.md) | Who decided this was confidential |
+| [0045](docs/adr/0045-a-grant-nobody-could-satisfy.md) | A grant nobody could satisfy |
 
 ## Configuration
 
