@@ -19,6 +19,19 @@
  * Run with:  pnpm loop:phase5
  */
 import { adminSql, closePools, withTenant } from '@superwork/db'
+import {
+  beginMfaEnrolment,
+  completeMfaLogin,
+  confirmMfaEnrolment,
+  disableMfa,
+  login as signIn,
+  mfaStatus,
+  resolvePendingSession,
+  resolveSession,
+  stepUp as proveStepUp,
+  totpCode,
+  totpCounter,
+} from '@superwork/auth'
 import { asAgent, can, loadActor, login } from '@superwork/auth'
 import { compileWorkflow } from '@superwork/ai'
 import {
@@ -2624,6 +2637,73 @@ try {
   ok('And the library can say what has run out, which nothing could answer',
     term.health.terms.expired > 0, `${term.health.terms.expired} out of term`)
 
+
+  // ---- A password is not the only thing that opens the door -----------------
+  console.log('\nA second factor…\n')
+
+  const factor = await (async () => {
+    const email = 'maya@northwind.example'
+    const password = 'superwork'
+    const [subject] = await adminSql()<{ id: string }[]>`
+      SELECT id FROM users WHERE lower(email) = ${email}`
+
+    // Codes roll every thirty seconds and a used one cannot be reused inside its own window,
+    // so the loop names the moment it means rather than waiting for a clock (ADR 0039).
+    const period = 30_000
+    const at = (step: number) => new Date((totpCounter() + step) * period)
+    const codeAt = (secret: string, step: number) => totpCode(secret, totpCounter() + step)!
+
+    const started = await beginMfaEnrolment(subject!.id, { issuer: 'Superwork', account: email })
+    const secret = (started as { secret: string }).secret
+    const halfWay = await mfaStatus(subject!.id)
+
+    const refused = await confirmMfaEnrolment(subject!.id, '000000', { now: at(0) })
+    const turnedOn = await confirmMfaEnrolment(subject!.id, codeAt(secret, 1), { now: at(1) })
+
+    const attempt = await signIn(email, password)
+    const beforeCode = await resolveSession(attempt!.token)
+    const pending = await resolvePendingSession(attempt!.token)
+    const answered = await completeMfaLogin(attempt!.token, codeAt(secret, 2), { now: at(2) })
+    const afterCode = await resolveSession(attempt!.token)
+
+    const withPassword = await proveStepUp(attempt!.token, password)
+    const withCode = await proveStepUp(attempt!.token, codeAt(secret, 3), { now: at(3) })
+
+    const recovery = turnedOn.recoveryCodes![0]!
+    const withRecovery = await signIn(email, password)
+    const spent = await completeMfaLogin(withRecovery!.token, recovery)
+    const reused = await signIn(email, password)
+    const refusedTwice = await completeMfaLogin(reused!.token, recovery)
+
+    const withoutProof = await disableMfa(subject!.id, {})
+
+    // Put the demo back: the demo owner signs in with a password, as the README says.
+    const off = await disableMfa(subject!.id, { code: codeAt(secret, 4), now: at(4) })
+    await adminSql()`DELETE FROM sessions WHERE user_id = ${subject!.id}`
+
+    return {
+      halfWay, refused, turnedOn, beforeCode, pending, answered, afterCode,
+      withPassword, withCode, spent, refusedTwice, withoutProof, off,
+      stillOn: await mfaStatus(subject!.id),
+    }
+  })()
+
+  ok('Generating a secret turns nothing on until a code proves it can be read',
+    factor.halfWay.pending && !factor.halfWay.enabled && !factor.refused.ok)
+  ok('A good code turns it on, and hands over recovery codes once',
+    factor.turnedOn.ok && (factor.turnedOn.recoveryCodes?.length ?? 0) > 0,
+    `${factor.turnedOn.recoveryCodes?.length ?? 0} codes`)
+  ok('A password alone now opens a session that reaches nothing',
+    factor.beforeCode === null && factor.pending?.userId !== undefined)
+  ok('And the code finishes the sign-in', factor.answered.ok && factor.afterCode !== null)
+  ok('Confirming something irreversible asks for the code, not the password again',
+    !factor.withPassword.ok && factor.withCode.ok,
+    factor.withPassword.ok ? 'the password was accepted' : 'the password was refused')
+  ok('A recovery code works, and works once',
+    factor.spent.ok && !factor.refusedTwice.ok)
+  ok('Turning it off needs the factor rather than just a session',
+    !factor.withoutProof.ok && factor.off.ok && !factor.stillOn.enabled)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2662,7 +2742,9 @@ try {
         'day they do not work — not at a weekend, and not on Christmas Day; and what the model \n' +
         'was asked, what it answered and what that cost is on the record, counted once; and work \n' +
         'that comes back does, one occurrence at a time, without anybody retyping it; and a \n' +
-        'contract whose term has ended stops being quoted as current while staying findable.\n',
+        'contract whose term has ended stops being quoted as current while staying findable; and \n' +
+        'a password is no longer the only thing between somebody else and every irreversible \n' +
+        'action.\n',
   )
 } catch (error) {
   console.error(error)

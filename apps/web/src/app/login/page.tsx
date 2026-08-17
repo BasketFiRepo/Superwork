@@ -18,7 +18,9 @@ async function signIn(formData: FormData) {
     path: '/',
     maxAge: 60 * 60 * 24 * 14,
   })
-  redirect('/')
+  // The cookie is set either way: the session exists, it is revocable, and until the second
+  // factor is given it resolves to nothing (ADR 0043).
+  redirect(result.mfaRequired ? '/login/code' : '/')
 }
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {

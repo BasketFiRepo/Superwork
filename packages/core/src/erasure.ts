@@ -87,6 +87,14 @@ const PLAN: {
       WHERE organization_id = ${ctx.organizationId} AND user_id = ${id}`),
   },
   {
+    table: 'users',
+    label: 'Their two-factor enrolment',
+    disposition: 'delete',
+    basis: 'A secret only this person holds. It cannot mean anything once they are gone.',
+    count: (ctx, id) => tally(ctx, adminSql()`
+      SELECT count(*)::text AS count FROM users WHERE id = ${id} AND mfa_enabled = true`),
+  },
+  {
     table: 'sessions',
     label: 'Their sign-ins',
     disposition: 'delete',
@@ -327,6 +335,12 @@ export async function erasePerson(
   await sql`DELETE FROM task_watchers WHERE organization_id = ${org} AND user_id = ${id}`
   await sql`DELETE FROM saved_views WHERE organization_id = ${org} AND user_id = ${id}`
   await adminSql()`DELETE FROM sessions WHERE user_id = ${id}`
+  // The second factor is a secret about one person and nothing else. It goes with them, and it
+  // goes before the tombstone repointing below so it cannot survive on an anonymised row.
+  await adminSql()`
+    UPDATE users SET mfa_enabled = false, mfa_secret = NULL, mfa_confirmed_at = NULL,
+                     mfa_last_counter = NULL, mfa_recovery_hashes = '{}'
+    WHERE id = ${id}`
 
   await sql`UPDATE tasks SET assignee_id = ${tombstoneId} WHERE organization_id = ${org} AND assignee_id = ${id}`
   await sql`UPDATE tasks SET created_by = ${tombstoneId} WHERE organization_id = ${org} AND created_by = ${id}`

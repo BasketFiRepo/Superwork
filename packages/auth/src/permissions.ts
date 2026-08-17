@@ -104,7 +104,7 @@ export function sensitivityAtMost(value: Sensitivity, ceiling: Sensitivity): boo
 
 /** Fields stripped from responses, prompts and logs when the actor lacks clearance. */
 export const SENSITIVE_FIELDS: Record<string, string[]> = {
-  user: ['password_hash', 'salary', 'bank_details'],
+  user: ['password_hash', 'salary', 'bank_details', 'mfa_secret', 'mfa_recovery_hashes'],
   document: ['storage_key'],
   contact: ['phones'],
   integration_credential: ['*'],
