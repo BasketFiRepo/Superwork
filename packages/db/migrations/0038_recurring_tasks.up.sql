@@ -20,6 +20,21 @@
 ALTER TABLE tasks
   ADD COLUMN recurrence_series_id uuid;
 
+-- Backfill before constraining.
+--
+-- Nothing ever wrote to `recurrence_rule`, but a migration that *assumes* that is one that
+-- fails the moment it is applied over data — and rolling this back drops the series column
+-- while leaving the rules behind, so re-applying is exactly that case. CI does precisely
+-- this: seed, roll back, migrate again. Anything already carrying a rule gets a series of
+-- its own, which is also what a real organization's rows would need.
+UPDATE tasks SET recurrence_series_id = gen_random_uuid()
+WHERE recurrence_rule IS NOT NULL AND recurrence_series_id IS NULL;
+
+-- A rule with no date to count from could never be honoured. Clearing it is the honest
+-- outcome; leaving it would mean a constraint that can only be satisfied by deleting work.
+UPDATE tasks SET recurrence_rule = NULL
+WHERE recurrence_rule IS NOT NULL AND due_at IS NULL;
+
 ALTER TABLE tasks
   ADD CONSTRAINT tasks_recurrence_needs_series
     CHECK (recurrence_rule IS NULL OR (recurrence_series_id IS NOT NULL AND due_at IS NOT NULL)),

@@ -53,6 +53,20 @@ does not work, the date is *not* moved — moving it would change what was promi
 says so, and the chasing already respects the calendar, so nobody is nudged about it until the
 next working day.
 
+## A bug this found — in my own verification
+
+CI runs a step I had not: `db:rollback && db:migrate` against the **seeded** database. Rolling
+0038 back drops `recurrence_series_id` and leaves the seeded `recurrence_rule` values behind,
+so re-applying finds rows with a rule and no series and the CHECK refuses them. Verifying
+apply → rollback → re-apply on an *empty* schema — which is what I did — is the easier
+ordering and proves less.
+
+The migration now backfills before it constrains: anything already carrying a rule gets a
+series of its own, and a rule with no date to count from is cleared rather than left to block a
+constraint that could only be satisfied by deleting somebody's work. That is what a real
+organization's rows would need too. Nothing ever wrote to the column, but a migration that
+*assumes* that is one that fails the moment it meets data.
+
 ## Consequences
 - `set_task_recurrence@v1` joins the tool catalogue: "make this weekly" is among the most
   common things the assistant is asked, and its `preview()` reads the schedule back in English

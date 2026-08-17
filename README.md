@@ -957,6 +957,11 @@ was full of them, sitting there as one-offs.
 `set_task_recurrence@v1` joins the tool catalogue, with a `preview()` that reads the schedule
 back in English before anything is written.
 
+The migration backfills before it constrains. Nothing ever wrote to the column, but rolling
+this back drops the series and leaves the rules — so re-applying meets rows with a rule and no
+series. Verifying apply → rollback → re-apply on an empty schema misses that; CI does it over
+the seeded database, and caught it.
+
 **Tasks; any task.** See ADR 0041.
 
 ## Features, and the switch that changed nothing
