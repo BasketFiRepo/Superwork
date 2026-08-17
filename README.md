@@ -1454,7 +1454,10 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 ## Configuration
 
 Every variable is validated at boot with Zod and the process refuses to start on a bad
-config. `vercel.json` points the platform at the workspace build (`pnpm --filter
+config. A web deployment whose environment is incomplete serves one page naming every
+variable that is missing or invalid, on every route, rather than an exception digest —
+the whole list at once, so configuring it is not one redeploy per problem.
+`vercel.json` points the platform at the workspace build (`pnpm --filter
 @superwork/web build` → `apps/web/.next`), and `next` is a root devDependency so the
 framework detector finds it when the project's Root Directory is the repository root —
 set Root Directory to `apps/web` instead and neither is needed; a hosted deployment still needs `DATABASE_URL`
@@ -1465,7 +1468,18 @@ resolve to `mock | sandbox | live`, and the resolved mode is rendered in the int
 wherever it affects what you should believe. `AUTOPILOT_ENABLED` is rejected while
 `AI_MODE=mock`.
 
+The request path connects as `superwork_app` or `superwork_auth` and never as the table
+owner, which would bypass RLS. Both URLs are derived from `DATABASE_URL` by replacing the
+username, so by default all three roles share one password; `DATABASE_APP_URL` and
+`DATABASE_AUTH_URL` name them separately where that does not hold, which is the usual case
+on a hosted database. Each must still connect as the role it names — an override pointed at
+the owner is refused at boot.
+
 ## Deployment
+
+**[docs/deployment.md](docs/deployment.md) is the full sequence**: database, extensions,
+migrations, the three roles and their passwords, the variables, and what each failure
+means. The rest of this section is why the repository root looks the way it does.
 
 The repository is a pnpm workspace and the deployable application is `apps/web`. Vercel
 builds from the repository root, where there is no Next.js app, so `vercel.json` names the

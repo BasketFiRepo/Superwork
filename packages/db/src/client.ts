@@ -14,10 +14,23 @@ let appPool: Sql | null = null
 let authPool: Sql | null = null
 let adminPool: Sql | null = null
 
-function connectionFor(role: 'app' | 'auth' | 'admin'): string {
-  const base = env().DATABASE_URL
-  if (role === 'admin') return env().DATABASE_ADMIN_URL ?? base
-  const url = new URL(base)
+/**
+ * The connection string each pool uses. Exported for the test that asserts no runtime pool
+ * can be pointed at the owner; `@superwork/db` does not re-export it.
+ */
+export function connectionFor(role: 'app' | 'auth' | 'admin'): string {
+  const config = env()
+  if (role === 'admin') return config.DATABASE_ADMIN_URL ?? config.DATABASE_URL
+
+  // A deployment whose runtime roles have their own passwords — the usual shape on a
+  // hosted database, where the owner's password is issued by the provider and cannot be
+  // handed to two roles created by a migration — names them outright. The schema has
+  // already checked each one connects as the role it is for, so the guarantee below holds
+  // whichever branch is taken.
+  const override = role === 'app' ? config.DATABASE_APP_URL : config.DATABASE_AUTH_URL
+  if (override) return override
+
+  const url = new URL(config.DATABASE_URL)
   // The runtime never connects as the table owner: an owner would bypass RLS.
   url.username = role === 'app' ? 'superwork_app' : 'superwork_auth'
   return url.toString()
