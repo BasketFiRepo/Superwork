@@ -1400,6 +1400,53 @@ try {
   ok('A term can be extended, and the panel says the new one', reopened)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-term.png`, fullPage: true })
 
+  // ---- A second factor -----------------------------------------------------
+  // `users.mfa_enabled` was written by nothing, so there was no second factor anywhere and
+  // step-up re-asked for the same password the session was opened with.
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="second-factor"]', { timeout: 15_000 })
+  const factorText = await page.locator('[data-testid="second-factor"]').innerText()
+  ok('The personal record offers a second factor, and says what it is for',
+    /Two-factor sign-in/i.test(factorText) && /stolen session useless/i.test(factorText))
+  ok('And says the codes are verified here rather than with anybody else',
+    /nothing is sent anywhere/i.test(factorText))
+
+  await page.locator('[data-testid="factor-begin"]').click()
+  await page.waitForSelector('[data-testid="factor-enrolment"]', { timeout: 15_000 })
+  const secret = (await page.locator('[data-testid="factor-secret"]').innerText()).trim()
+  ok('Setting it up shows a secret to add to an authenticator app', secret.length >= 16, `${secret.length} chars`)
+  ok('And says nothing is on until a code proves it can be read',
+    /Nothing is turned on\s+until a code proves/i.test(
+      await page.locator('[data-testid="factor-enrolment"]').innerText(),
+    ))
+
+  // A wrong code must not turn it on. The right code is not available to a browser — the
+  // arithmetic is exercised against the RFC vectors in the test pack and end to end in the
+  // phase-5 loop; what this walk proves is that the screen refuses and stays off.
+  await page.fill('#factor-confirm-code', '000000')
+  expectingRefusal = true
+  await page.locator('[data-testid="factor-confirm"]').click()
+  const stayedOff = await page
+    .waitForFunction(
+      () => /not right/i.test(document.querySelector('[data-testid="second-factor"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  expectingRefusal = false
+  ok('A wrong code is refused and leaves it off', stayedOff)
+  ok('The account is still reachable, so a failed enrolment is not a lockout',
+    !(await page.locator('[data-testid="factor-on"]').count()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/second-factor.png`, fullPage: true })
+
+  // Put the demo back. Cancelling is what clears the unproved secret — reloading would leave
+  // it behind, and the next run would find a half-finished enrolment it did not start.
+  await page.locator('[data-testid="factor-enrolment"] button', { hasText: 'Cancel' }).click()
+  const cleared = await page
+    .waitForSelector('[data-testid="factor-begin"]', { timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('An abandoned enrolment can be cancelled, leaving no secret behind', cleared)
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before

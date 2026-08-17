@@ -1,7 +1,9 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { personalRecord, sharedWith } from '@superwork/core'
+import { mfaStatus } from '@superwork/auth'
 import { PersonalExportButton } from '@/components/PersonalExportButton'
+import { SecondFactor } from '@/components/SecondFactor'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,6 +16,8 @@ export const dynamic = 'force-dynamic'
  */
 export default async function MePage() {
   const session = await requireSession()
+  // Their own factor, on their own record. Nobody else's is readable from here (ADR 0043).
+  const factor = await mfaStatus(session.userId)
   const { record, shares } = await withActor(session, async (ctx, actor) => ({
     record: await personalRecord(ctx, actor, actor.userId),
     // The other half of "what is known about you": what you were *given*, and by whom.
@@ -41,6 +45,15 @@ export default async function MePage() {
           for you — not your manager, not an admin.
         </p>
       </header>
+
+      <SecondFactor
+        status={{
+          enabled: factor.enabled,
+          pending: factor.pending,
+          recoveryCodesLeft: factor.recoveryCodesLeft,
+          confirmedAt: factor.confirmedAt ? factor.confirmedAt.toISOString() : null,
+        }}
+      />
 
       <section className="panel" data-testid="shared-with-you">
         <div className="panel-header">

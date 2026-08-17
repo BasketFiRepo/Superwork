@@ -995,6 +995,38 @@ with a citation is worse than no answer, because it looks like an answer.
 
 **Knowledge; any document.** See ADR 0042.
 
+## A password is not the only thing that opens the door
+
+`users.mfa_enabled` has existed since migration 0001 and nothing ever wrote to it or read it.
+Worse than the missing feature was what it left in place: **step-up — the gate in front of every
+irreversible action — re-asked for the same password the session was opened with.** Its own
+comment says it defends against a session rather than a password, a laptop left open or a cookie
+lifted from a machine; against exactly those, the password again defends very little.
+
+- **TOTP, verified in-process** (RFC 6238, checked against the published test vectors). The
+  product still runs with no credentials and no network. WebAuthn belongs behind an
+  `IdentityProvider` when one exists — it needs a browser ceremony that cannot be honestly
+  simulated.
+- **Enrolment is two steps, and a CHECK constraint enforces it.** A secret turns nothing on; a
+  proved code does. No writer can produce an account that demands a code nobody can supply,
+  because a lockout is worse than the risk.
+- **Step-up asks for the factor, not the password**, once somebody has one. Otherwise the factor
+  guards signing in and not the dangerous actions, which is the wrong way round — and that is the
+  reason to build it at all.
+- **The half-authenticated session is a row**: `mfa_satisfied_at` null resolves to nothing — no
+  screen, no API, no actor — and one narrow read can see only whose code to ask for.
+- **The lockout is the session's, not the account's**, so nobody can lock the real person out.
+- **A used code cannot be reused inside its own window**, which is what makes each one
+  single-use without a cache.
+- **Recovery codes are shown once and stored as hashes**, removed as they are used.
+- **Turning it off asks for the factor**, and a factor is the person's own — no administrator can
+  enrol, read or remove somebody else's.
+
+Deliberately not built: an organization-wide requirement. What happens to somebody who has not
+enrolled is a decision about a business rather than a detail to guess at, and the ADR says so.
+
+**Your own record.** See ADR 0043.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1482,6 +1514,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0040](docs/adr/0040-one-writer-for-what-the-model-cost.md) | One writer for what the model cost |
 | [0041](docs/adr/0041-work-that-comes-back.md) | Work that comes back |
 | [0042](docs/adr/0042-when-a-document-stopped-being-true.md) | When a document stopped being true |
+| [0043](docs/adr/0043-a-password-is-not-the-only-thing-that-opens-the-door.md) | A password is not the only thing that opens the door |
 
 ## Configuration
 
