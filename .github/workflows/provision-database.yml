@@ -1,0 +1,103 @@
+name: Provision the database
+
+# Everything a hosted deployment needs done to its database, run from a browser.
+#
+# Applying migrations, seeding a demo organization and setting the runtime role passwords
+# are the three steps between an empty PostgreSQL and a Superwork that answers a login, and
+# all three are documented as terminal commands (docs/deployment.md). Somebody setting up a
+# deployment may not have a terminal, a checkout, or a database reachable from their
+# machine — and they should not need any of the three to get a schema onto a database they
+# already own.
+#
+# It never runs on its own. There is no push or schedule trigger: this writes to whatever
+# database the secrets name, and the only safe way to do that is when a person asks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Seed the Northwind Logistics demo organization'
+        type: boolean
+        default: true
+      set_role_passwords:
+        description: 'Set superwork_app and superwork_auth to the password DATABASE_URL carries'
+        type: boolean
+        default: true
+
+concurrency:
+  group: provision-database
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Migrate, seed and set role passwords
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write the environment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+        run: |
+          set -euo pipefail
+          : "${DATABASE_URL:?The DATABASE_URL repository secret is not set}"
+          : "${DATABASE_ADMIN_URL:?The DATABASE_ADMIN_URL repository secret is not set}"
+          # The scripts run under `node --env-file=.env`, so the file has to exist. The
+          # session secret is never used by any of them; a throwaway keeps the schema's
+          # production rule satisfied without needing a secret that does nothing here.
+          {
+            printf 'NODE_ENV=production\n'
+            printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
+            printf 'DATABASE_ADMIN_URL=%s\n' "$DATABASE_ADMIN_URL"
+            printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
+          } > .env
+
+      # Named separately from the migration so the log says which database was reached
+      # before anything is written to it — the failure this workflow most often clears up
+      # is a set of credentials pointing somewhere other than the intended branch.
+      - name: Which database is this
+        run: |
+          node --env-file=.env --import tsx -e "
+            import { adminSql, closePools } from './packages/db/src/client.ts'
+            const [row] = await adminSql()\`
+              SELECT current_database() AS db, current_user AS who, version() AS version\`
+            console.log('database:', row.db)
+            console.log('user:    ', row.who)
+            console.log('server:  ', row.version.split(' on ')[0])
+            await closePools()
+          "
+
+      - name: Apply the migrations
+        run: pnpm db:migrate
+
+      - name: Seed the demo organization
+        if: ${{ inputs.seed }}
+        run: pnpm db:seed
+
+      - name: Set the runtime role passwords
+        if: ${{ inputs.set_role_passwords }}
+        run: pnpm db:roles
+
+      - name: What to do next
+        if: success()
+        run: |
+          {
+            echo '### Database provisioned'
+            echo
+            echo 'Reload the deployment and sign in. If the demo organization was seeded,'
+            echo 'the login is `maya@northwind.example` / `superwork`.'
+            echo
+            echo 'No redeploy is needed — this changed the database, not the application.'
+          } >> "$GITHUB_STEP_SUMMARY"

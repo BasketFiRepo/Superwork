@@ -62,8 +62,16 @@ login on success — `maya@northwind.example` / `superwork`.
 password `superwork_dev`, because a migration cannot know the one you will use. Choose one
 of two ways to resolve that; the second is usually right for a hosted database.
 
-**Either** set both roles to the same password as the owner in `DATABASE_URL`, and let the
-runtime URLs be derived:
+**Either** set both roles to the same password as the owner in `DATABASE_URL`:
+
+```bash
+pnpm db:roles
+```
+
+It derives each password from the same function the connection pools use, so whatever the
+runtime will present is what gets set. It also prints which database it reached — the
+failure it exists to fix looks identical to having run the migrations against a different
+branch, and that is the more common mistake of the two. The equivalent by hand is:
 
 ```sql
 ALTER ROLE superwork_app  PASSWORD 'the password in DATABASE_URL';
@@ -86,11 +94,30 @@ DATABASE_APP_URL=postgres://superwork_app:...@host:6543/superwork
 DATABASE_AUTH_URL=postgres://superwork_auth:...@host:6543/superwork
 ```
 
+`pnpm db:roles` reads these too, so with the overrides in `.env` it sets each role to the
+password its own URL carries rather than the owner's.
+
 This is the better fit on a provider that issues the owner's password itself, since that
 password cannot be handed to two roles a migration created. Each override must connect as
 the role it is named for; one pointed at the owner is rejected at startup rather than
 quietly granted the ability to read every tenant. When both are set, `DATABASE_URL` is only
 the admin fallback and is passed to the driver verbatim.
+
+### Without a terminal
+
+Steps 2 and 3 assume a checkout, a Node toolchain, and a database reachable from the
+machine running them. None of that is a reasonable prerequisite for putting a schema on a
+database you already own, so the same three commands are also a workflow:
+
+1. **Actions → Provision the database → Run workflow**, on GitHub.
+2. It needs two repository secrets first, under **Settings → Secrets and variables →
+   Actions**: `DATABASE_URL` and `DATABASE_ADMIN_URL`, the same two strings as step 1.
+3. Leave both tick boxes on for a first run. They map to `db:seed` and `db:roles`, so a
+   later run can re-seed without touching the passwords, or the reverse.
+
+It runs `db:migrate`, `db:seed` and `db:roles` in that order against whatever those secrets
+name, and prints the database it reached before it writes anything. There is no push or
+schedule trigger — it writes to a real database, so it only ever runs when somebody asks.
 
 ## 4. Set the environment variables
 
@@ -151,7 +178,8 @@ workflows never fire.
 | Symptom | Cause |
 |---|---|
 | **Not configured**, naming variables | Step 4, or the deployment predates it |
-| `password authentication failed for user "superwork_app"` | Step 3 |
+| `password authentication failed for user "superwork_app"` | Step 3 — run `pnpm db:roles` |
+| `superwork_app does not exist in this database` from `db:roles` | The migrations ran against a different database or branch than these credentials name |
 | `role "postgres" does not exist` | `db:reset` against a hosted database; use `db:migrate` |
 | `type "vector" does not exist` | `pgvector` not available on the database |
 | Sign-in page loads, correct credentials rejected | Step 2's seed did not run |

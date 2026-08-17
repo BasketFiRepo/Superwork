@@ -12,6 +12,7 @@
     "db:rollback": "node --env-file=.env --import tsx packages/db/src/cli/migrate.ts down",
     "db:reset": "node --env-file=.env --import tsx packages/db/src/cli/migrate.ts reset",
     "db:seed": "node --env-file=.env --import tsx packages/db/src/cli/seed.ts",
+    "db:roles": "node --env-file=.env --import tsx packages/db/src/cli/roles.ts",
     "db:bootstrap": "pnpm db:reset && pnpm db:seed",
     "dev": "pnpm --filter @superwork/web dev",
     "build": "pnpm --filter @superwork/web build",
