@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { ingestionBacklog, knowledgeHealth, listDocuments, listSpaces } from '@superwork/core'
-import { can } from '@superwork/auth'
+import { can, readCeiling } from '@superwork/auth'
 import { Spaces } from '@/components/Spaces'
 import { UploadDocument } from '@/components/UploadDocument'
 import { IngestionQueue } from '@/components/IngestionQueue'
@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
 /** Knowledge (§17). Primary action: find or capture. */
 export default async function KnowledgePage() {
   const session = await requireSession()
-  const { documents, health, spaces, canFile, backlog } = await withActor(session, async (ctx, actor) => ({
+  const { documents, health, spaces, canFile, backlog, add, ceiling } = await withActor(session, async (ctx, actor) => ({
     documents: await listDocuments(ctx, actor, { limit: 100 }),
     health: await knowledgeHealth(ctx),
     // Indexing is a queue now, so "what is waiting and what gave up" is answerable (§7.1).
@@ -24,6 +24,16 @@ export default async function KnowledgePage() {
       organizationId: ctx.organizationId,
       riskTier: 'low',
     }).allow,
+    // The document being added is the one this person will own, which is what a
+    // `document:create:own` grant is about. Asked here so the button is offered to the
+    // people it works for and explained to the ones it does not (ADR 0045).
+    add: can(actor, 'document:create', {
+      type: 'document',
+      organizationId: ctx.organizationId,
+      ownerId: actor.userId,
+      riskTier: 'low',
+    }),
+    ceiling: readCeiling(actor),
   }))
 
   const quarantined = documents.filter((d) => d.indexStatus === 'quarantined')
@@ -64,7 +74,7 @@ export default async function KnowledgePage() {
         }))}
       />
 
-      <UploadDocument />
+      <UploadDocument canAdd={add.allow} reason={add.reason} ceiling={ceiling} />
 
       <IngestionQueue
         counts={{

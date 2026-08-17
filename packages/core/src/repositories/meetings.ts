@@ -274,6 +274,9 @@ export async function attachTranscript(
   const decision = can(actor, 'document:create', {
     type: 'document',
     organizationId: ctx.organizationId,
+    // The transcript's document is owned by whoever attaches it, so that is the resource the
+    // check is about — the same omission `uploadDocument` had (ADR 0045).
+    ownerId: actor.userId,
     riskTier: 'low',
   })
   if (!decision.allow) throw new PermissionError(decision.reason)

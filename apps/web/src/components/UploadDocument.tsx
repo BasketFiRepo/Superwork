@@ -7,8 +7,24 @@ import { useRouter } from 'next/navigation'
  * Upload and ingest in one step: a document that is not indexed is not memory.
  * The result reports the classification and any verification warnings rather than
  * silently succeeding.
+ *
+ * The button used to be offered to everybody and worked for almost nobody: a member's
+ * `document:create:own` grant could never be satisfied, and a viewer has no grant at all, so
+ * both were invited to type a whole document and then told to ask for access they either
+ * already had or were never going to get. Whether this account can file anything is now
+ * decided on the server and said before the typing (ADR 0045).
  */
-export function UploadDocument() {
+export function UploadDocument({
+  canAdd,
+  reason,
+  ceiling,
+}: {
+  canAdd: boolean
+  /** Why not, in the policy engine's own words. Shown rather than a shrug. */
+  reason: string
+  /** The highest classification this account can read, which is the highest it can file. */
+  ceiling: string
+}) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [title, setTitle] = useState('')
@@ -44,13 +60,24 @@ export function UploadDocument() {
     router.refresh()
   }
 
+  if (!canAdd) {
+    return (
+      <div className="row" data-testid="upload-denied">
+        <button className="btn btn-primary btn-sm" disabled title={reason}>
+          Add a document
+        </button>
+        <span className="small muted">{reason}</span>
+      </div>
+    )
+  }
+
   if (!open) {
     return (
       <div className="row">
-        <button className="btn btn-primary btn-sm" onClick={() => setOpen(true)}>
+        <button className="btn btn-primary btn-sm" data-testid="upload-open" onClick={() => setOpen(true)}>
           Add a document
         </button>
-        {result ? <span className="small muted">{result}</span> : null}
+        {result ? <span className="small muted" data-testid="upload-result">{result}</span> : null}
       </div>
     )
   }
@@ -64,14 +91,25 @@ export function UploadDocument() {
         </button>
       </div>
       <div className="panel-body stack stack-5">
-        <label className="stack stack-2">
+        <label className="stack stack-2" htmlFor="document-title">
           <span className="micro">Title</span>
-          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Vendor Payment SOP" />
+          <input
+            id="document-title"
+            className="input"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Vendor Payment SOP"
+          />
         </label>
         <div className="row">
-          <label className="stack stack-2 grow">
+          <label className="stack stack-2 grow" htmlFor="document-type">
             <span className="micro">Type</span>
-            <select className="select" value={docType} onChange={(e) => setDocType(e.target.value)}>
+            <select
+              id="document-type"
+              className="select"
+              value={docType}
+              onChange={(e) => setDocType(e.target.value)}
+            >
               {['document', 'sop', 'policy', 'contract', 'invoice', 'report', 'note'].map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -84,9 +122,10 @@ export function UploadDocument() {
             Came from outside the organization
           </label>
         </div>
-        <label className="stack stack-2">
+        <label className="stack stack-2" htmlFor="document-body">
           <span className="micro">Content (Markdown)</span>
           <textarea
+            id="document-body"
             className="textarea"
             style={{ minHeight: 200 }}
             value={body}
@@ -94,13 +133,25 @@ export function UploadDocument() {
             placeholder={'# Heading\n\nStructure-aware chunking keeps headings and tables intact.'}
           />
         </label>
-        {result ? <div className="banner banner-accent">{result}</div> : null}
+        {result ? (
+          <div className="banner banner-accent" data-testid="upload-result">
+            {result}
+          </div>
+        ) : null}
         <div className="row">
-          <button className="btn btn-primary" disabled={busy || !title.trim() || !body.trim()} onClick={submit}>
+          <button
+            className="btn btn-primary"
+            data-testid="upload-confirm"
+            disabled={busy || !title.trim() || !body.trim()}
+            onClick={submit}
+          >
             {busy ? 'Indexing…' : 'Index it'}
           </button>
           <span className="small muted">
-            Content marked as external is scanned for embedded instructions before indexing.
+            Content marked as external is scanned for embedded instructions before indexing. Your
+            access covers up to <strong>{ceiling}</strong>; anything that reads above that has to
+            be filed by somebody who can read it, because a document you cannot open is one you
+            cannot check.
           </span>
         </div>
       </div>

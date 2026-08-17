@@ -1531,6 +1531,78 @@ try {
   ok('And it is gone from the library', documentsAfter === documentsBefore - 1,
     `${documentsBefore} → ${documentsAfter}`)
 
+  // ---- Adding to company memory, as an ordinary member ---------------------
+  // "Add a document" was offered to everybody and worked for almost nobody: a member's
+  // `document:create:own` grant could never be satisfied, so the refusal arrived after they
+  // had typed the whole thing. Last, because it signs in as somebody else.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'priya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  ok('A member can sign in', !page.url().includes('/login'), page.url())
+
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="upload-open"]', { timeout: 15_000 })
+  await page.locator('[data-testid="upload-open"]').click()
+  await page.fill('#document-title', 'How we run the Monday planning session')
+  await page.fill(
+    '#document-body',
+    '# Monday planning\n\nEverybody brings the one thing they most want moved this week.',
+  )
+  await page.locator('[data-testid="upload-confirm"]').click()
+  const indexed = await page
+    .waitForFunction(
+      () => /Indexed \d+ passages/.test(document.querySelector('[data-testid="upload-result"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 30_000 },
+    )
+    .then(() => true, () => false)
+  ok('A member can add a document, and is told what was indexed', indexed)
+  const memberLibrary = await page.locator('[data-testid="document-row"]').count()
+  ok('And it is in their own library', memberLibrary > 0, `${memberLibrary} documents`)
+
+  // Content that reads above their own ceiling is refused before anything is stored.
+  expectingRefusal = true
+  await page.fill('#document-title', 'Reviewing this year’s bands')
+  await page.fill('#document-body', '# Bands\n\nThe salary bands are reviewed alongside the bonus scheme.')
+  await page.locator('[data-testid="upload-confirm"]').click()
+  const refusedUpload = await page
+    .waitForFunction(
+      () => /out of your own reach/i.test(
+        document.querySelector('[data-testid="upload-result"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 30_000 },
+    )
+    .then(() => true, () => false)
+  expectingRefusal = false
+  ok('Content above their own ceiling is refused, and the refusal says what it read', refusedUpload)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-create.png`, fullPage: true })
+
+  // Put the demo back, through the delete the owner has and the member does not.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'maya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
+  await page
+    .locator('[data-testid="document-row"] a', { hasText: 'How we run the Monday planning session' })
+    .first()
+    .click()
+  await page.waitForSelector('[data-testid="delete-document"]', { timeout: 15_000 })
+  await page.locator('[data-testid="delete-document"]').click()
+  await page.waitForSelector('[data-testid="delete-document-panel"]', { timeout: 15_000 })
+  await page.fill('#delete-reason', 'Added by the browser check, removed by the browser check.')
+  await page.locator('[data-testid="delete-document-confirm"]').click()
+  await page.waitForURL(/\/knowledge$/, { timeout: 20_000 })
+  const cleaned = await page
+    .locator('[data-testid="document-row"] a', { hasText: 'How we run the Monday planning session' })
+    .count()
+  ok('The check puts the demo back', cleaned === 0)
+
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
 } catch (error) {
   failures += 1
