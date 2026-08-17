@@ -15,6 +15,12 @@ export interface SeedDocument {
   sensitivityHint?: 'public' | 'internal' | 'confidential' | 'restricted'
   /** Marks content that arrived from outside and must be scanned before indexing. */
   untrusted?: boolean
+  /**
+   * The term the document is in force for. The amendment states when it takes effect, which
+   * is what closes the agreement it supersedes — by trigger, not by hand (ADR 0042).
+   */
+  effectiveFrom?: string
+  effectiveTo?: string
   body: string
 }
 
@@ -133,6 +139,7 @@ for more than fourteen days is reviewed at the weekly operations meeting.
     docType: 'contract',
     companyKey: 'halden',
     sensitivityHint: 'confidential',
+    effectiveFrom: '2024-04-01',
     body: `# Master Services Agreement — Halden Foods (2024)
 
 ## 1. Term
@@ -157,6 +164,7 @@ Either party may terminate for convenience on 90 days' written notice.`,
     docType: 'contract',
     companyKey: 'halden',
     sensitivityHint: 'confidential',
+    effectiveFrom: '2025-01-01',
     body: `# MSA Amendment No. 1 — Halden Foods (2025)
 
 This amendment supersedes the corresponding clauses of the Master Services Agreement
@@ -179,7 +187,39 @@ The agreement renews automatically for twelve months unless either party gives 6
 notice. The current renewal date is 1 April 2026.`,
   },
   {
+    // Last year's prices. Nothing supersedes it — there is no amendment, it simply ran out —
+    // so `is_superseded` stays false and it was retrieved and quoted as current indefinitely.
+    // This is the case `effective_to` exists for (ADR 0042).
+    key: 'rate-card-2025',
+    effectiveFrom: '2025-01-01',
+    effectiveTo: '2025-12-31',
+    title: 'Rate Card 2025',
+    docType: 'policy',
+    sensitivityHint: 'confidential',
+    body: `# Rate Card 2025
+
+Commercially sensitive. Superseded by the 2026 card; kept for invoice queries.
+
+## Road freight — United Kingdom
+| Lane | Vehicle | Rate | Notes |
+|---|---|---|---|
+| Felixstowe – Manchester | 13.6m curtainsider | £480 | Per full load |
+| Felixstowe – Glasgow | 13.6m curtainsider | £820 | Per full load |
+| Immingham – Birmingham | Reefer | £565 | Includes pre-cool |
+
+## Surcharges
+| Surcharge | Basis | Amount |
+|---|---|---|
+| Out-of-hours delivery | Per drop | £78 |
+| Waiting time | Per hour after 2 free hours | £44 |
+
+Discount schedule: volumes above 40 loads per month attract a 5% rebate.
+`,
+  },
+  {
     key: 'rate-card',
+    effectiveFrom: '2026-01-01',
+    effectiveTo: '2026-12-31',
     title: 'Rate Card 2026',
     docType: 'policy',
     sensitivityHint: 'confidential',

@@ -14,6 +14,7 @@ import {
 import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
 import { DocumentIndexing } from '@/components/DocumentIndexing'
+import { DocumentTerm } from '@/components/DocumentTerm'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -104,6 +105,13 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
+
+        <DocumentTerm
+          documentId={document.id}
+          effectiveFrom={document.effectiveFrom}
+          effectiveTo={document.effectiveTo}
+          expired={document.expired}
         />
 
         <DocumentIndexing

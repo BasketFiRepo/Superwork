@@ -28,6 +28,8 @@ export interface Grounding {
     content: string
     score: number
     isSuperseded: boolean
+    /** The day the passage stopped applying, when it has (ADR 0042). */
+    expiredOn?: string | null
   }[]
   noAnswer: boolean
   /**

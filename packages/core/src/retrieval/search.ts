@@ -1,6 +1,7 @@
 import type { Sensitivity, TenantContext } from '@superwork/db'
 import { grantedScope, ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, sharedObjectIds, type Actor } from '@superwork/auth'
 import { embeddingProvider, tokenize, toVectorLiteral } from './embed.js'
+import { calendarDate } from '../time.js'
 
 /**
  * Hybrid retrieval (§7.3).
@@ -22,6 +23,11 @@ export interface RetrievedChunk {
   contextHeader: string
   sensitivity: Sensitivity
   isSuperseded: boolean
+  /**
+   * The day this passage stopped applying, when it has. Set means it is still findable and no
+   * longer authoritative — "what did the old contract say" is a real question (ADR 0042).
+   */
+  expiredOn: string | null
   companyId: string | null
   updatedAt: Date
   keywordRank: number | null
@@ -37,6 +43,12 @@ export interface SearchOptions {
   projectId?: string | null
   docTypes?: string[]
   includeSuperseded?: boolean
+  /**
+   * Drop expired passages entirely rather than down-ranking them. Off by default: a question
+   * about what a contract used to say is answered from expired text, and removing it would
+   * make that unanswerable instead of merely un-authoritative.
+   */
+  currentOnly?: boolean
   /** Below this reranked score the engine reports "no answer" rather than padding. */
   minScore?: number
 }
@@ -130,7 +142,8 @@ export async function hybridSearch(
     ${options.companyId ? sql`AND d.company_id = ${options.companyId}` : sql``}
     ${options.projectId ? sql`AND d.project_id = ${options.projectId}` : sql``}
     ${options.docTypes?.length ? sql`AND d.doc_type = ANY(${options.docTypes})` : sql``}
-    ${options.includeSuperseded ? sql`` : sql`AND ch.is_superseded = false`}`
+    ${options.includeSuperseded ? sql`` : sql`AND ch.is_superseded = false`}
+    ${options.currentOnly ? sql`AND (ch.effective_to IS NULL OR ch.effective_to >= current_date)` : sql``}`
 
   const rows = await sql<
     {
@@ -144,6 +157,7 @@ export async function hybridSearch(
       context_header: string
       sensitivity: Sensitivity
       is_superseded: boolean
+      effective_to: string | null
       company_id: string | null
       updated_at: Date
       keyword_rank: number | null
@@ -177,7 +191,7 @@ export async function hybridSearch(
     )
     SELECT ch.id AS chunk_id, ch.document_id, d.title AS document_title, d.doc_type,
            ch.anchor, ch.heading_path, ch.content, ch.context_header, ch.sensitivity,
-           ch.is_superseded, d.company_id, ch.updated_at,
+           ch.is_superseded, ch.effective_to::text AS effective_to, d.company_id, ch.updated_at,
            f.keyword_rank, f.vector_rank
     FROM fused f
     JOIN document_chunks ch ON ch.id = f.chunk_id
@@ -187,6 +201,10 @@ export async function hybridSearch(
 
   const queryTerms = new Set(tokenize(expanded))
   const now = Date.now()
+  // A calendar date compared against a `date` column, in the organization's timezone. Casting
+  // an instant in a UTC session lands on the previous day anywhere ahead of UTC, which would
+  // make a term look expired a day early (§26.5, ADR 0036).
+  const today = calendarDate(ctx.timezone)
 
   const scored: RetrievedChunk[] = rows.map((r) => {
     const fused =
@@ -201,7 +219,11 @@ export async function hybridSearch(
 
     const ageDays = Math.max(0, (now - new Date(r.updated_at).getTime()) / 86_400_000)
     const recency = 1 / (1 + ageDays / 365)
-    const authority = r.is_superseded ? 0.35 : 1
+    // Expired weighs the same as superseded, and for the same reason: it is still the right
+    // passage for a question about the past and the wrong one for a question about now. The
+    // two multiply — a superseded version of an expired contract is twice as far from current.
+    const expired = r.effective_to !== null && r.effective_to < today
+    const authority = (r.is_superseded ? 0.35 : 1) * (expired ? 0.35 : 1)
     const headingBoost = tokenize(r.heading_path).some((t) => queryTerms.has(t)) ? 0.12 : 0
 
     const rerankScore = (0.55 * coverage + 0.3 * fused * RRF_K + 0.15 * recency + headingBoost) * authority
@@ -217,6 +239,7 @@ export async function hybridSearch(
       contextHeader: r.context_header,
       sensitivity: r.sensitivity,
       isSuperseded: r.is_superseded,
+      expiredOn: r.effective_to !== null && r.effective_to < today ? r.effective_to : null,
       companyId: r.company_id,
       updatedAt: new Date(r.updated_at),
       keywordRank: r.keyword_rank ? Number(r.keyword_rank) : null,
