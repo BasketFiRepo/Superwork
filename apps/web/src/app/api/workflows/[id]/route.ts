@@ -5,16 +5,18 @@ import {
   getWorkflow,
   listWorkflowRuns,
   previewSchedule,
+  setWorkflowLimits,
   setWorkflowSchedule,
   setWorkflowStatus,
 } from '@superwork/core'
 import { runWorkflow } from '@superwork/agent'
+import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
 
 const Body = z.object({
-  action: z.enum(['activate', 'pause', 'archive', 'run', 'schedule', 'preview_schedule']),
+  action: z.enum(['activate', 'pause', 'archive', 'run', 'schedule', 'preview_schedule', 'limits']),
   ownerUserId: z.string().uuid().optional(),
   reason: z.string().max(500).optional(),
   /** `@daily` and the other aliases, or five cron fields. */
@@ -22,6 +24,9 @@ const Body = z.object({
   timezone: z.string().max(60).optional(),
   catchUpPolicy: z.enum(['skip_missed', 'run_once', 'run_all']).optional(),
   enabled: z.boolean().optional(),
+  /** The two throttles (ADR 0046). Bounds are the repository's to state, not this schema's. */
+  maxConcurrentRuns: z.number().int().optional(),
+  dailyActionCap: z.number().int().optional(),
 })
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -68,6 +73,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       return NextResponse.json({ schedule })
     }
 
+    if (parsed.data.action === 'limits') {
+      const workflow = await withActor(session, (ctx, actor) =>
+        setWorkflowLimits(ctx, actor, {
+          workflowId: id,
+          maxConcurrentRuns: parsed.data.maxConcurrentRuns ?? 0,
+          dailyActionCap: parsed.data.dailyActionCap ?? 0,
+          reason: parsed.data.reason ?? '',
+        }),
+      )
+      return NextResponse.json({ workflow })
+    }
+
     if (parsed.data.action === 'run') {
       const outcome = await runWorkflow(
         { organizationId: session.organizationId, userId: session.userId, timezone: session.timezone },
@@ -90,9 +107,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     )
     return NextResponse.json({ workflow })
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'That could not be done.' },
-      { status: 400 },
-    )
+    // Through the one mapper: raising a throttle asks for a fresh proof, which has to reach
+    // the screen as a step-up rather than as a flat "that could not be done".
+    return errorResponse(error, 'That could not be done.')
   }
 }

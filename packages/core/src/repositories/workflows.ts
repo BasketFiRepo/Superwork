@@ -5,6 +5,8 @@ import type { CompiledWorkflow, DetectedRisk, WorkflowGraph } from '@superwork/a
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { describeCron } from '../cron.js'
+import { startOfDay } from '../time.js'
+import { assertSteppedUp } from '../step-up.js'
 import { setScheduleEnabled, upsertSchedule, type CatchUpPolicy, type ScheduleView } from './schedules.js'
 
 /**
@@ -35,6 +37,10 @@ export interface WorkflowView {
   lastSimulationId: string | null
   maxConcurrentRuns: number
   dailyActionCap: number
+  /** Who chose the two throttles, when and why. Null on a workflow still on the defaults. */
+  limitsSetByName: string | null
+  limitsSetAt: Date | null
+  limitsReason: string | null
   createdAt: Date
   /** Null when the workflow only runs when somebody runs it. */
   scheduleCron: string | null
@@ -53,6 +59,8 @@ const SELECT_WORKFLOW = (ctx: TenantContext) => ctx.sql`
          v.graph, coalesce(v.readback, '') AS readback, coalesce(v.detected_risks, '[]'::jsonb) AS risks,
          w.simulated_ok AS "simulatedOk", w.last_simulation_id AS "lastSimulationId",
          w.max_concurrent_runs AS "maxConcurrentRuns", w.daily_action_cap AS "dailyActionCap",
+         (SELECT name FROM users WHERE id = w.limits_set_by) AS "limitsSetByName",
+         w.limits_set_at AS "limitsSetAt", w.limits_reason AS "limitsReason",
          w.created_at AS "createdAt",
          s.cron AS "scheduleCron", s.timezone AS "scheduleTimezone", s.enabled AS "scheduleEnabled",
          s.catch_up_policy AS "scheduleCatchUp",
@@ -285,6 +293,158 @@ export async function setWorkflowStatus(
     entityId: input.workflowId,
     after: { reason: input.reason ?? null },
   })
+  return getWorkflow(ctx, actor, input.workflowId)
+}
+
+/** The two limits a workflow runs under, and the bounds a person may choose between. */
+export const WORKFLOW_LIMITS = {
+  maxConcurrentRuns: { min: 1, max: 50 },
+  dailyActionCap: { min: 1, max: 10_000 },
+} as const
+
+export interface Capacity {
+  allow: boolean
+  reason: string
+  /** How many actions this workflow may still take today. */
+  remaining: number
+  /** Runs that have not finished — usually ones waiting for somebody to approve them. */
+  unfinished: number
+  /** Tool calls it has actually made today, in the organization's timezone. */
+  usedToday: number
+}
+
+/**
+ * What this workflow may do right now, counted from what it has actually done (§27.6).
+ *
+ * Two limits, both columns a person set (ADR 0046). A workflow whose last batch is still
+ * waiting for approval does not queue a second one — that is how somebody arrives on Monday
+ * to two hundred approvals. And the day's action cap is counted from the tool calls that
+ * really happened, not from a counter that resets when a process restarts.
+ *
+ * This lives in the repository rather than in the executor because the screen that offers to
+ * change the numbers has to show what they are doing right now, and two places counting
+ * "what has it done today" would eventually disagree about the only thing that matters.
+ */
+export async function checkCapacity(ctx: TenantContext, workflow: WorkflowView): Promise<Capacity> {
+  const [busy] = await ctx.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM workflow_runs
+    WHERE organization_id = ${ctx.organizationId} AND workflow_id = ${workflow.id}
+      AND deleted_at IS NULL AND simulated = false
+      AND status IN ('queued', 'running', 'awaiting_approval')`
+  const unfinished = busy?.count ?? 0
+
+  const [today] = await ctx.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count
+    FROM tool_calls tc
+    JOIN agent_runs r ON r.id = tc.run_id
+    WHERE tc.organization_id = ${ctx.organizationId} AND tc.ok = true
+      AND r.trigger = 'workflow'
+      AND r.ui_context->>'workflowId' = ${workflow.id}
+      AND tc.created_at >= ${startOfDay(new Date(), ctx.timezone)}`
+  const usedToday = today?.count ?? 0
+  const remaining = Math.max(0, workflow.dailyActionCap - usedToday)
+
+  if (unfinished >= workflow.maxConcurrentRuns) {
+    return {
+      allow: false,
+      remaining: 0,
+      unfinished,
+      usedToday,
+      reason:
+        `Skipped: ${unfinished} earlier ${unfinished === 1 ? 'run is' : 'runs are'} still unfinished — most likely ` +
+        'waiting for somebody to approve them. It will run again once they are decided.',
+    }
+  }
+  if (remaining <= 0) {
+    return {
+      allow: false,
+      remaining: 0,
+      unfinished,
+      usedToday,
+      reason:
+        `Skipped: it has already done ${usedToday} things today and its cap is ${workflow.dailyActionCap}. ` +
+        'Raise the cap if that is too low — it is a number somebody set, not a failure.',
+    }
+  }
+  return { allow: true, reason: '', remaining, unfinished, usedToday }
+}
+
+/**
+ * Sets the two throttles (§10.2, ADR 0046).
+ *
+ * Raising either one widens what runs unattended — more work queued at once, or more actions
+ * in a day — so it asks for a fresh proof of identity. Lowering never does: a control that
+ * asks for a password to make something safer teaches people to click through the prompt.
+ *
+ * The bounds are checked here with the numbers in the message, and again by a CHECK
+ * constraint, because "no limit" must stay unexpressible whatever writes the row.
+ */
+export async function setWorkflowLimits(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { workflowId: string; maxConcurrentRuns: number; dailyActionCap: number; reason: string },
+): Promise<WorkflowView> {
+  guard(ctx, actor, 'workflow:update')
+  const before = await getWorkflow(ctx, actor, input.workflowId)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why. A throttle nobody explained is one nobody can review.')
+  }
+
+  for (const [field, value, label] of [
+    ['maxConcurrentRuns', input.maxConcurrentRuns, 'runs at once'],
+    ['dailyActionCap', input.dailyActionCap, 'actions a day'],
+  ] as const) {
+    const bound = WORKFLOW_LIMITS[field]
+    if (!Number.isInteger(value) || value < bound.min || value > bound.max) {
+      throw new ValidationError(
+        `${label} has to be a whole number between ${bound.min} and ${bound.max}. ` +
+          'There is no "unlimited" — an automation that acts without a person watching has a ceiling by design.',
+      )
+    }
+  }
+
+  if (
+    input.maxConcurrentRuns > before.maxConcurrentRuns ||
+    input.dailyActionCap > before.dailyActionCap
+  ) {
+    assertSteppedUp(actor, 'workflow.throttle')
+  }
+
+  await ctx.sql`
+    UPDATE workflows
+    SET max_concurrent_runs = ${input.maxConcurrentRuns}, daily_action_cap = ${input.dailyActionCap},
+        limits_set_by = ${actor.userId}, limits_set_at = now(), limits_reason = ${reason}
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.workflowId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'workflow.limits_set',
+    entityType: 'workflow',
+    entityId: input.workflowId,
+    before: { maxConcurrentRuns: before.maxConcurrentRuns, dailyActionCap: before.dailyActionCap },
+    after: {
+      maxConcurrentRuns: input.maxConcurrentRuns,
+      dailyActionCap: input.dailyActionCap,
+      reason,
+      wasDefault: before.limitsSetByName === null,
+    },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'throttled',
+    entityType: 'workflow',
+    entityId: input.workflowId,
+    entityLabel: before.name,
+    summary:
+      `“${before.name}” may run ${input.maxConcurrentRuns} at a time and do ${input.dailyActionCap} ` +
+      `things a day, set by ${actor.displayName}. ${reason}`,
+  })
+
   return getWorkflow(ctx, actor, input.workflowId)
 }
 
