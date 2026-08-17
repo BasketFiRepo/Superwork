@@ -7,6 +7,8 @@ import {
   ingestionBacklog,
   knowledgeHealth,
   PermissionError,
+  requestReindex,
+  runIngestionJobs,
   setEffectiveDates,
   uploadDocument,
   ValidationError,
@@ -234,6 +236,33 @@ describe('setting a term', () => {
       const actor = await loadActor(ctx)
       const backlog = await ingestionBacklog(ctx, actor)
       expect(backlog.jobs.some((job) => job.documentId === currentId)).toBe(false)
+    })
+  })
+
+  it('survives a re-index, which rewrites every passage from scratch', async () => {
+    // Chunks are written fresh on each re-index, and the re-index path did not restate the
+    // term — so re-indexing an expired contract quietly returned it to circulation as current,
+    // which is the one thing this exists to stop. Found by the loop, not by a reading.
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      await requestReindex(ctx, actor, { documentId: expiredId, reason: 'Checking the term survives it.' })
+    })
+    const outcome = await runIngestionJobs(session)
+    expect(outcome.indexed).toBe(1)
+
+    const chunks = await adminSql()<{ effectiveTo: string | null }[]>`
+      SELECT effective_to::text AS "effectiveTo" FROM document_chunks
+      WHERE document_id = ${expiredId} AND is_superseded = false`
+    expect(chunks.length).toBeGreaterThan(0)
+    for (const chunk of chunks) expect(chunk.effectiveTo).toBe('2023-12-31')
+
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const current = await hybridSearch(ctx, actor, 'trailers pre-cooled before any pallet is loaded', {
+        topK: 20,
+        currentOnly: true,
+      })
+      expect(current.chunks.some((chunk) => chunk.documentId === expiredId)).toBe(false)
     })
   })
 

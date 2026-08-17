@@ -1400,6 +1400,65 @@ try {
   ok('A term can be extended, and the panel says the new one', reopened)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-term.png`, fullPage: true })
 
+  // ---- Who decided this was confidential -----------------------------------
+  // `sensitivity_source` defaulted to 'auto' and nothing could write anything else: there was
+  // no way for a person to change a classification, so every level was a regex's opinion
+  // recorded as though nobody had one. Still on the rate card, which the classifier reads as
+  // commercially sensitive — the false positive this exists for.
+  await page.waitForSelector('[data-testid="document-classification"]', { timeout: 15_000 })
+  const classification = await page.locator('[data-testid="classification-summary"]').innerText()
+  ok('A classification nobody weighed says so, and says the classifier read it',
+    /read as/i.test(classification) && /Nobody has weighed it/i.test(classification),
+    classification.replace(/\n/g, ' ').slice(0, 90))
+
+  await page.locator('[data-testid="classification-edit"]').click()
+  await page.waitForSelector('[data-testid="classification-editor"]', { timeout: 15_000 })
+  ok('A decision with no reason cannot be saved',
+    await page.locator('[data-testid="classification-confirm"]').isDisabled())
+  await page.selectOption('#classification-level', 'internal')
+  await page.fill('#classification-reason', 'The figures in here are a worked example, not a real price.')
+  ok('Going below what the classifier read says that it widens who can retrieve it',
+    /widens who can retrieve/i.test(await page.locator('[data-testid="classification-lowering"]').innerText()))
+
+  await page.locator('[data-testid="classification-confirm"]').click()
+  // Lowering is the direction that widens reach, so it asks for a fresh proof — unless one was
+  // given in the last five minutes. Which it *needs* one is asserted in
+  // tests/security/classification-source.test.ts, where the clock is ours.
+  const classifyStepUp = page.locator('[data-testid="step-up"]')
+  if (await classifyStepUp.waitFor({ timeout: 5_000 }).then(() => true, () => false)) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  const decided = await page
+    .waitForFunction(
+      () => {
+        const text = document.querySelector('[data-testid="classification-summary"]')?.textContent ?? ''
+        return /set this to/i.test(text) && /worked example/i.test(text)
+      },
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A person can correct it, and the panel names them and says why', decided)
+  const decidedText = await page.locator('[data-testid="classification-summary"]').innerText()
+  ok('And the classifier’s own reading is still shown, so the disagreement is visible',
+    /The classifier reads the content as/i.test(decidedText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-classification.png`, fullPage: true })
+
+  // Put the demo back through the control that exists for it: handing it back to the
+  // classifier is the only undo, and it restores what the classifier reads.
+  await page.locator('[data-testid="classification-hand-back"]').click()
+  const handedBack = await page
+    .waitForFunction(
+      () => /Nobody has weighed it/i.test(
+        document.querySelector('[data-testid="classification-summary"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Handing it back to the classifier restores what it reads', handedBack)
+
   // ---- A second factor -----------------------------------------------------
   // `users.mfa_enabled` was written by nothing, so there was no second factor anywhere and
   // step-up re-asked for the same password the session was opened with.

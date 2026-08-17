@@ -1,10 +1,19 @@
 import type { IndexStatus, Sensitivity, TenantContext } from '@superwork/db'
-import { can, grantedScope, readCeiling, sensitivityAtMost, sharedObjectIds, type Actor } from '@superwork/auth'
+import {
+  can,
+  grantedScope,
+  readCeiling,
+  sensitivityAtMost,
+  SENSITIVITY_RANK,
+  sharedObjectIds,
+  type Actor,
+} from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { ingestDocument, purgeDocument, type IngestResult } from '../retrieval/ingest.js'
 import { recordIngestion } from '../retrieval/ingestion-queue.js'
 import { holdsCoveringDocument } from '../legal-hold.js'
+import { assertSteppedUp } from '../step-up.js'
 
 export interface DocumentView {
   id: string
@@ -25,6 +34,13 @@ export interface DocumentView {
   spaceId: string | null
   spaceName: string | null
   chunkCount: number
+  /** Who decided the classification: the classifier, or a named person (ADR 0044). */
+  sensitivitySource: 'auto' | 'human'
+  /** What the classifier last read the content as, kept even when a person overrode it. */
+  sensitivityAuto: Sensitivity | null
+  sensitivitySetByName: string | null
+  sensitivitySetAt: Date | null
+  sensitivityReason: string | null
   /** The term this document is in force for. Written by nothing until now (ADR 0042). */
   effectiveFrom: string | null
   effectiveTo: string | null
@@ -36,6 +52,9 @@ export interface DocumentView {
 
 const SELECT_DOC = (ctx: TenantContext) => ctx.sql`
   SELECT d.id, d.title, d.doc_type AS "docType", d.sensitivity,
+         d.sensitivity_source AS "sensitivitySource", d.sensitivity_auto AS "sensitivityAuto",
+         (SELECT name FROM users WHERE id = d.sensitivity_set_by) AS "sensitivitySetByName",
+         d.sensitivity_set_at AS "sensitivitySetAt", d.sensitivity_reason AS "sensitivityReason",
          d.effective_from::text AS "effectiveFrom", d.effective_to::text AS "effectiveTo",
          (d.effective_to IS NOT NULL AND d.effective_to < current_date) AS expired,
          d.index_status AS "indexStatus", d.index_error AS "indexError",
@@ -203,6 +222,132 @@ export async function setEffectiveDates(
   // No re-index. The passages carry the dates by trigger, and the contextual header they are
   // embedded with deliberately says nothing about the term — so there is nothing for a
   // re-index to rebuild. Queueing one would be work the product pretends is necessary.
+  return getDocument(ctx, actor, input.documentId)
+}
+
+/**
+ * Reclassifies a document, and says who decided (§4.3, ADR 0044).
+ *
+ * Until now a classification was a regex's opinion recorded as though nobody had one, and there
+ * was no way to correct it: `classifyContent` can only ever raise, so even a hand-edited row
+ * would be put back by the next re-index.
+ *
+ * Three rules hold it to something safe. **Lowering asks for a fresh proof**, because it widens
+ * who can retrieve the document and overrides a classifier that read something in the content;
+ * raising only ever narrows, so it does not ask. **Nobody may classify above their own
+ * ceiling**, or they would file something they cannot then open. And **every human decision is
+ * signed and reasoned**, which the database requires rather than trusting this function to
+ * remember.
+ */
+export async function reclassifyDocument(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { documentId: string; sensitivity: Sensitivity; reason: string },
+): Promise<DocumentView> {
+  const before = await getDocument(ctx, actor, input.documentId)
+
+  const decision = can(actor, 'document:update', {
+    type: 'document',
+    id: before.id,
+    organizationId: ctx.organizationId,
+    ownerId: before.ownerId,
+    departmentId: before.departmentId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why. A classification nobody explained is one nobody can check.')
+  }
+
+  const ceiling = readCeiling(actor)
+  if (SENSITIVITY_RANK[input.sensitivity] > SENSITIVITY_RANK[ceiling]) {
+    throw new ValidationError(
+      `You can read up to ${ceiling}, so filing this as ${input.sensitivity} would put it out of your own reach.`,
+    )
+  }
+
+  // What the classifier reads it as: the level a lowering is being measured against. Falls back
+  // to the level on the row for documents indexed before this was recorded.
+  const auto = before.sensitivityAuto ?? before.sensitivity
+  if (SENSITIVITY_RANK[input.sensitivity] < SENSITIVITY_RANK[auto]) {
+    assertSteppedUp(actor, 'document.declassify')
+  }
+
+  await ctx.sql`
+    UPDATE documents
+    SET sensitivity = ${input.sensitivity}, sensitivity_source = 'human',
+        sensitivity_set_by = ${actor.userId}, sensitivity_set_at = now(),
+        sensitivity_reason = ${reason}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.reclassified',
+    entityType: 'document',
+    entityId: input.documentId,
+    before: { sensitivity: before.sensitivity, source: before.sensitivitySource },
+    after: { sensitivity: input.sensitivity, source: 'human', reason, classifierRead: auto },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'reclassified',
+    entityType: 'document',
+    entityId: input.documentId,
+    entityLabel: before.title,
+    summary:
+      `“${before.title}” is ${input.sensitivity}, decided by ${actor.displayName}. ${reason}` +
+      (input.sensitivity === auto ? '' : ` The classifier reads it as ${auto}.`),
+  })
+
+  return getDocument(ctx, actor, input.documentId)
+}
+
+/** Hands it back to the classifier, which is the only way to undo a human decision. */
+export async function reclassifyAutomatically(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { documentId: string; reason: string },
+): Promise<DocumentView> {
+  const before = await getDocument(ctx, actor, input.documentId)
+  const decision = can(actor, 'document:update', {
+    type: 'document',
+    id: before.id,
+    organizationId: ctx.organizationId,
+    ownerId: before.ownerId,
+    departmentId: before.departmentId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+  if (before.sensitivitySource !== 'human') return before
+
+  const auto = before.sensitivityAuto ?? before.sensitivity
+  await ctx.sql`
+    UPDATE documents
+    SET sensitivity = ${auto}, sensitivity_source = 'auto', sensitivity_set_by = NULL,
+        sensitivity_set_at = NULL, sensitivity_reason = NULL, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+  // The passages follow the document back, which the cascade only does for a human decision.
+  // The document's reading is also each passage's: a chunk is classified with the document's
+  // level as its floor and can only detect what the whole text already detected, so the two are
+  // equal by construction rather than by luck (ADR 0044).
+  await ctx.sql`
+    UPDATE document_chunks SET sensitivity = ${auto}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND document_id = ${input.documentId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.reclassified',
+    entityType: 'document',
+    entityId: input.documentId,
+    before: { sensitivity: before.sensitivity, source: 'human' },
+    after: { sensitivity: auto, source: 'auto', reason: input.reason.trim() },
+  })
   return getDocument(ctx, actor, input.documentId)
 }
 

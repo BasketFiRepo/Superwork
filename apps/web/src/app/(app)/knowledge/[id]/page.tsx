@@ -15,6 +15,7 @@ import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
 import { DocumentIndexing } from '@/components/DocumentIndexing'
 import { DocumentTerm } from '@/components/DocumentTerm'
+import { DocumentClassification } from '@/components/DocumentClassification'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -105,6 +106,16 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
+
+        <DocumentClassification
+          documentId={document.id}
+          sensitivity={document.sensitivity}
+          source={document.sensitivitySource}
+          auto={document.sensitivityAuto}
+          setByName={document.sensitivitySetByName}
+          setAt={document.sensitivitySetAt ? document.sensitivitySetAt.toISOString() : null}
+          reason={document.sensitivityReason}
         />
 
         <DocumentTerm

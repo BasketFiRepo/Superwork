@@ -1027,6 +1027,39 @@ enrolled is a decision about a business rather than a detail to guess at, and th
 
 **Your own record.** See ADR 0043.
 
+## Who decided this was confidential
+
+`documents.sensitivity_source` has existed since migration 0004 with a default of `auto` and
+nothing ever wrote another value. It could not: there was no way in the product for a person to
+change a document's classification at all. So every classification was a regex's opinion,
+recorded as though nobody had one — a false positive on `restricted` put a document out of reach
+of the people who needed it, and there was no fix short of editing the database.
+
+- **A classification is either read or decided, and the row says which.** A human one names the
+  person, the moment and the reason, and a CHECK constraint refuses one that does not.
+- **What the classifier read is kept either way.** Recording only the outcome would resolve the
+  disagreement and hide it; the disagreement is the thing an auditor needs to see.
+- **The classifier does not argue with the person afterwards.** It can only ever raise, so
+  without this the next re-index would put a correction straight back — which is the reason the
+  feature is worth building rather than an addendum to it.
+- **Lowering asks for a fresh proof; raising never does.** Lowering widens who can retrieve it,
+  and the measure is against what the classifier read rather than the current level, so nobody
+  can descend a rung at a time without ever being asked.
+- **Nobody can file a document above their own ceiling** — a classification whose author cannot
+  open the document afterwards is one nobody can check.
+- **The decision reaches every passage, by trigger.** The chunk is what retrieval filters on.
+- **Handing it back to the classifier is the only undo**, and it restores what the classifier
+  read. There is no way to leave a level in place with its author erased.
+
+Two things in the re-index path came out of building it, and the acceptance loop found them
+rather than a reading did. A re-index floored the classifier with **the level in force**, so a
+person's decision would come back recorded as the pattern's own reading; and it did not restate
+the document's **term**, so re-indexing an expired contract silently returned every passage of
+it to circulation as current — the one thing ADR 0042 exists to stop. Both are fixed with the
+tests that fail without them.
+
+**Knowledge; any document.** See ADR 0044.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1515,6 +1548,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0041](docs/adr/0041-work-that-comes-back.md) | Work that comes back |
 | [0042](docs/adr/0042-when-a-document-stopped-being-true.md) | When a document stopped being true |
 | [0043](docs/adr/0043-a-password-is-not-the-only-thing-that-opens-the-door.md) | A password is not the only thing that opens the door |
+| [0044](docs/adr/0044-who-decided-this-was-confidential.md) | Who decided this was confidential |
 
 ## Configuration
 
