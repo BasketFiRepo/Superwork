@@ -18,7 +18,7 @@
  *
  * Run with:  pnpm loop:phase5
  */
-import { adminSql, closePools, withTenant } from '@superwork/db'
+import { adminSql, closePools, withTenant, type TenantContext } from '@superwork/db'
 import {
   beginMfaEnrolment,
   completeMfaLogin,
@@ -41,6 +41,9 @@ import {
   decideApproval,
   describeCron,
   getWorkflow,
+  reminderCount,
+  notify,
+  setNotificationPreferences,
   checkCapacity,
   setWorkflowLimits,
   listCustomTools,
@@ -194,10 +197,23 @@ import { demoSession } from '@superwork/agent/evals/harness'
  */
 const onAWorkingDay = (): Date => {
   const day = nextWorkingDay('uk-england-wales', calendarDate('Europe/London'))
-  // End of that day, not the start: a rung scheduled for the same day carries the clock
-  // time it was shifted from, so a midday "now" would leave an afternoon reminder not
-  // yet due.
-  return new Date(`${day}T23:59:00Z`)
+  return new Date(`${day}T12:00:00Z`)
+}
+
+/**
+ * The moment a ladder says its next rung arrives.
+ *
+ * A rung is scheduled past a weekend, past a public holiday and now past the recipient's own
+ * quiet hours (ADR 0039, ADR 0047), so a beat asserting that one *is delivered* cannot pick an
+ * hour of its own: at half past nine in the evening the whole ladder is legitimately held, and
+ * the beat would be asserting the opposite of what it means. It asks the rows instead.
+ */
+const whenTheRungArrives = async (ctx: TenantContext, subjectId: string): Promise<Date> => {
+  const [row] = await ctx.sql<{ at: Date | null }[]>`
+    SELECT min(scheduled_for) AS at FROM nudges
+    WHERE organization_id = ${ctx.organizationId} AND subject_id = ${subjectId}
+      AND delivered_at IS NULL AND deleted_at IS NULL`
+  return new Date((row?.at ?? new Date()).getTime() + 60_000)
 }
 
 const ok = (label: string, condition: boolean, detail = '') => {
@@ -1643,7 +1659,7 @@ try {
   // delivering the whole queue under it would push somebody else's held-back reminders
   // through at a limit their organization does not actually run on.
   await withTenant(session, async (ctx) =>
-    deliverDueNudges(ctx, { subjectId: lateTaskId, now: onAWorkingDay() }),
+    deliverDueNudges(ctx, { subjectId: lateTaskId, now: await whenTheRungArrives(ctx, lateTaskId) }),
   )
   const told = await withTenant({ ...session, userId: subject.personId }, async (ctx) =>
     listDisclosures(ctx, await loadActor(ctx), subject.personId),
@@ -1966,7 +1982,7 @@ try {
     opened.opened > 0, `${opened.opened} of ${opened.considered} considered`)
 
   const sent = await withTenant(session, async (ctx) =>
-    deliverDueNudges(ctx, { subjectId: chased.taskId, now: onAWorkingDay() }),
+    deliverDueNudges(ctx, { subjectId: chased.taskId, now: await whenTheRungArrives(ctx, chased.taskId) }),
   )
   ok('And the rung that was due is delivered', sent.delivered > 0, `${sent.delivered} delivered`)
 
@@ -2049,12 +2065,23 @@ try {
   ok('And it is marked as the assistant’s, not as a colleague’s',
     said.comments.find((row) => row.byAgent)?.authorName !== null)
 
-  const mentioned = await withTenant({ ...session, userId: chased.person.id }, async (ctx) =>
-    listNotifications(ctx, await loadActor(ctx)),
-  )
+  // Read from the row rather than from the list: a mention is written the moment it happens,
+  // and whether it is *visible* yet is the recipient's own quiet hours talking (ADR 0047).
+  const mentioned = await withTenant(session, async (ctx) =>
+    ctx.sql<{ url: string; delivery: string; held: boolean; deliverAfter: Date }[]>`
+      SELECT url, delivery, deliver_after > now() AS held, deliver_after AS "deliverAfter"
+      FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${chased.person.id}
+        AND type = 'mention' AND deleted_at IS NULL
+      ORDER BY created_at DESC LIMIT 1`)
+  const mention = mentioned[0]
   ok('Mentioning somebody reaches them, which the array never did before',
-    mentioned.some((row) => row.type === 'mention' && row.url === `/tasks/${said.taskId}`),
-    `${mentioned.length} notifications`)
+    mention?.url === `/tasks/${said.taskId}`,
+    mention
+      ? mention.held
+        ? `held until ${mention.deliverAfter.toISOString().slice(11, 16)} — their quiet hours`
+        : 'delivered now'
+      : 'nothing written')
 
   const followed = await withTenant(session, async (ctx) => {
     const actor = await loadActor(ctx)
@@ -2073,12 +2100,15 @@ try {
       reason: 'Chase the signed addendum if they have not sent it.',
     })
     const swept = await sweepFollowUps(ctx)
-    const mine = await listNotifications(ctx, actor)
+    const mine = await ctx.sql<{ delivery: string; held: boolean }[]>`
+      SELECT delivery, deliver_after > now() AS held FROM notifications
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
+        AND type = 'follow_up' AND deleted_at IS NULL`
     return { threadId: thread.id, threadLastMessageAt: thread.lastMessageAt, made, swept, mine }
   })
   ok('A follow-up that is due resurfaces, which is what the tool always promised',
-    followed.swept.surfaced > 0 && followed.mine.some((row) => row.type === 'follow_up'),
-    `${followed.swept.surfaced} surfaced`)
+    followed.swept.surfaced > 0 && followed.mine.length > 0,
+    `${followed.swept.surfaced} surfaced${followed.mine.some((row) => row.held) ? ', held for their quiet hours' : ''}`)
 
   const replied = await withTenant(session, async (ctx) => {
     await ctx.sql`
@@ -2712,6 +2742,139 @@ try {
     term.health.terms.expired > 0, `${term.health.terms.expired} out of term`)
 
 
+  // ---- When you are written to ---------------------------------------------
+  console.log('\nQuiet hours, and what each kind of thing is worth interrupting for…\n')
+
+  const written = await (async () => {
+    const [person] = await adminSql()<{ id: string; name: string; timezone: string }[]>`
+      SELECT u.id, u.name, u.timezone FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${session.organizationId} AND m.role = 'member' AND m.deleted_at IS NULL
+      ORDER BY m.created_at LIMIT 1`
+    const theirs = { ...session, userId: person!.id }
+
+    // A window around the moment this loop runs, set through the product by the person whose
+    // window it is. Named rather than assumed: at four in the afternoon the default evening
+    // window would hold nothing and the beat would prove nothing.
+    const clock = (offsetHours: number) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: person!.timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date(Date.now() + offsetHours * 3_600_000))
+
+    const saved = await withTenant(theirs, async (ctx) =>
+      setNotificationPreferences(ctx, await loadActor(ctx), {
+        quietHours: { start: clock(-1), end: clock(2) },
+        perType: { task_changed: 'digest', workflow: 'none' },
+      }))
+
+    const nobodyElse = await withTenant(session, async (ctx) =>
+      setNotificationPreferences(ctx, await loadActor(ctx), { quietHours: { start: '00:00', end: '23:59' } })
+        .then(() => 'allowed', (error: Error) => error.message))
+
+    const muting = await withTenant(theirs, async (ctx) =>
+      setNotificationPreferences(ctx, await loadActor(ctx), { perType: { disclosure: 'none' } })
+        .then(() => 'allowed', (error: Error) => error.message))
+
+    const held = await withTenant(session, (ctx) =>
+      notify(ctx, {
+        userId: person!.id,
+        type: 'mention',
+        title: 'Somebody mentioned you',
+        body: 'While they had asked not to be interrupted.',
+      }))
+    const digested = await withTenant(session, (ctx) =>
+      notify(ctx, { userId: person!.id, type: 'task_changed', title: '“Pre-cool the trailer” changed' }))
+    const muted = await withTenant(session, (ctx) =>
+      notify(ctx, { userId: person!.id, type: 'workflow', title: 'An automation of yours ran' }))
+
+    const whileQuiet = await withTenant(theirs, async (ctx) => {
+      const actor = await loadActor(ctx)
+      return {
+        visible: (await listNotifications(ctx, actor, {})).map((row) => row.id),
+        muted: (await listNotifications(ctx, actor, { mutedToo: true })).map((row) => row.id),
+        badge: await reminderCount(ctx, actor),
+      }
+    })
+
+    // The window opening is the only thing that changes, and it needs no sweep to run.
+    await adminSql()`
+      UPDATE notifications SET deliver_after = now() - interval '1 minute' WHERE id = ${held.id}`
+    const afterwards = await withTenant(theirs, async (ctx) => {
+      const actor = await loadActor(ctx)
+      return {
+        visible: (await listNotifications(ctx, actor, {})).some((row) => row.id === held.id),
+        badge: await reminderCount(ctx, actor),
+      }
+    })
+
+    // And what was routed to the briefing is what the briefing then carries.
+    const briefing = await withTenant(theirs, async (ctx) =>
+      composeBriefingFacts(ctx, await loadActor(ctx), 'daily'))
+
+    // A rung is scheduled into the open hours rather than written for a moment nobody can be
+    // shown — the ladder says when it will arrive, so the row says the truth.
+    const rung = await withTenant(session, async (ctx) => {
+      const [task] = await ctx.sql<{ id: string }[]>`
+        INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+        VALUES (${ctx.organizationId}, 'loop quiet-hours subject', 'todo', 'medium', ${person!.id},
+                ${new Date(Date.now() - 86_400_000)}, true, ${session.userId})
+        RETURNING id`
+      await scheduleLadder(ctx, {
+        recipientUserId: person!.id,
+        subjectType: 'task',
+        subjectId: task!.id,
+        subjectLabel: 'loop quiet-hours subject',
+        dueAt: new Date(Date.now() - 86_400_000),
+      })
+      const [first] = await ctx.sql<{ at: Date }[]>`
+        SELECT min(scheduled_for) AS at FROM nudges
+        WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id}`
+      await ctx.sql`DELETE FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id}`
+      await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task!.id}`
+      return first!.at
+    })
+
+    // Put the demo back: no preferences row, and none of the notifications this beat wrote.
+    await adminSql()`
+      DELETE FROM notification_preferences WHERE organization_id = ${session.organizationId}
+        AND user_id IN (${person!.id}, ${session.userId})`
+    await adminSql()`
+      DELETE FROM notifications WHERE organization_id = ${session.organizationId}
+        AND id IN (${held.id}, ${digested.id}, ${muted.id})`
+
+    return { person: person!, saved, nobodyElse, muting, held, digested, muted, whileQuiet, afterwards, briefing, rung }
+  })()
+
+  ok('A person can say when they are not to be interrupted, and for which kinds',
+    written.saved.quietHours.start !== '18:30' && written.saved.perType['task_changed'] === 'digest',
+    `${written.saved.quietHours.start}–${written.saved.quietHours.end}`)
+  ok('“Never write to me” is not on offer', /at most sixteen hours/.test(written.nobodyElse),
+    written.nobodyElse.slice(0, 60))
+  ok('And what the product promises you will see cannot be turned off',
+    /cannot be turned down/.test(written.muting), written.muting.slice(0, 60))
+  ok('An interruption inside the window is held, not dropped',
+    written.held.held && written.held.deliverAfter > new Date() &&
+      !written.whileQuiet.visible.includes(written.held.id),
+    `waits until ${written.held.deliverAfter.toISOString().slice(11, 16)}`)
+  ok('A kind they turned down does not interrupt them, and is still there to read',
+    written.digested.delivery === 'digest' && written.whileQuiet.visible.includes(written.digested.id))
+  ok('A kind they turned off is recorded rather than lost',
+    written.muted.delivery === 'none' &&
+      !written.whileQuiet.visible.includes(written.muted.id) &&
+      written.whileQuiet.muted.includes(written.muted.id))
+  ok('And the briefing is where what was held back actually arrives',
+    written.briefing.waiting.some((row) => row.id === written.digested.id),
+    `${written.briefing.counts.waiting} waiting`)
+  ok('When the window opens it appears, with no sweep to run',
+    written.afterwards.visible && written.afterwards.badge > written.whileQuiet.badge,
+    `badge ${written.whileQuiet.badge} → ${written.afterwards.badge}`)
+  ok('And a reminder is scheduled for when they can actually be reached',
+    written.rung > new Date(),
+    written.rung.toISOString().slice(0, 16).replace('T', ' '))
+
+
   // ---- Adding to company memory, as an ordinary member ----------------------
   console.log('\nA member adds a document…\n')
 
@@ -2980,7 +3143,10 @@ try {
         'named for it, and is not argued with by the next re-index; and a member can add a \n' +
         'document at last, which is theirs afterwards, unless it reads above what they can \n' +
         'read themselves; and the two numbers an automation runs under are numbers somebody \n' +
-        'chose, with a ceiling that cannot be taken off.\n',
+        'chose, with a ceiling that cannot be taken off; and a person can finally say when \n' +
+        'they are not to be interrupted and what each kind of thing is worth interrupting \n' +
+        'for, with nothing dropped and the guarantees not among the things that can be \n' +
+        'switched off.\n',
   )
 } catch (error) {
   console.error(error)

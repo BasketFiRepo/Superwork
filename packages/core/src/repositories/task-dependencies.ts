@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { notify } from '../notify.js'
 
 /**
  * Task dependencies (§12.1).
@@ -263,14 +264,15 @@ export async function notifyUnblocked(
   let told = 0
   for (const task of freed) {
     if (!task.assignee_id || task.assignee_id === actor.userId) continue
-    await sql`
-      INSERT INTO notifications (
-        organization_id, user_id, type, title, body, entity_type, entity_id, url, delivery, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${task.assignee_id}, 'task_unblocked', 'You can start this now',
-        ${`“${completedTitle}” is done, so “${task.title}” is no longer waiting on anything.`},
-        'task', ${task.id}, ${`/tasks/${task.id}`}, 'immediate', ${ctx.userId}
-      )`
+    await notify(ctx, {
+      userId: task.assignee_id,
+      type: 'task_unblocked',
+      title: 'You can start this now',
+      body: `“${completedTitle}” is done, so “${task.title}” is no longer waiting on anything.`,
+      entityType: 'task',
+      entityId: task.id,
+      url: `/tasks/${task.id}`,
+    })
     told += 1
   }
   return told

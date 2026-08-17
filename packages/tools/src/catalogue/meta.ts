@@ -1,6 +1,7 @@
 import { asJson } from '@superwork/db'
 import { z } from 'zod'
-import { link } from '@superwork/core'
+import {
+  notify, link } from '@superwork/core'
 import { register, type ToolContext } from '../registry.js'
 
 /** Governance and meta tools (§6.3). */
@@ -232,11 +233,16 @@ export const escalateToHuman = register({
   idempotent: true,
   redactions: [],
   async execute(input, ctx: ToolContext) {
-    await ctx.tenantDb.sql`
-      INSERT INTO notifications (organization_id, user_id, type, title, body, entity_type, entity_id, delivery, created_by)
-      VALUES (${ctx.organizationId}, ${input.userId ?? ctx.principalUserId}, 'agent_needs_input',
-              'Superwork needs a decision', ${input.reason}, ${input.entityType ?? null},
-              ${input.entityId ?? null}, 'immediate', ${ctx.principalUserId})`
+    // Through the one writer, so the recipient's own routing decides how it reaches them —
+    // except that `agent_needs_input` is one of the types nobody may silence (ADR 0047).
+    await notify(ctx.tenantDb, {
+      userId: input.userId ?? ctx.principalUserId,
+      type: 'agent_needs_input',
+      title: 'Superwork needs a decision',
+      body: input.reason,
+      entityType: input.entityType ?? null,
+      entityId: input.entityId ?? null,
+    })
     return { ok: true as const, value: { notified: true } }
   },
 })

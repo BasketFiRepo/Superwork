@@ -93,6 +93,12 @@ export default async function BriefingPage({ searchParams }: { searchParams: Pro
             items={briefing.facts.staleThreads.map((s) => `${s.companyName} — ${s.daysWaiting} days`)}
             route="/inbox"
           />
+          <FactList
+            title="Waiting for you here"
+            empty="Nothing was held back for the briefing."
+            items={briefing.facts.waiting.map((n) => `${n.title}${n.body ? ` — ${n.body.slice(0, 90)}` : ''}`)}
+            route="/reminders"
+          />
           {kind === 'end_of_day' ? (
             <>
               <FactList

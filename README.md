@@ -1115,6 +1115,42 @@ activation means, so it sits with the people who set the other ceilings (ADR 003
 
 **Workflows; any automation.** See ADR 0046.
 
+## When you are written to
+
+`notification_preferences` has held three columns since migration 0010 that nothing honoured.
+`quiet_hours` defaulted to 18:30–08:30 for everybody and was consulted by no code path at all, so
+a mention at half past eleven at night arrived immediately and the reminder ladder — which knows
+about weekends and public holidays — knew nothing about the evening. `channel_defaults` and
+`per_type` are the shape of "which of these can wait for the morning", and every notification was
+written by a hand-rolled `INSERT` with its delivery hard-coded at one of **seven** call sites.
+
+- **One writer.** `notify()` is the only way a notification is created. Routing is a fact about
+  the recipient, not a decision for whichever subsystem happens to be writing.
+- **Quiet hours hold; they never drop.** The row is written when the thing happens and becomes
+  visible when the window opens, through `deliver_after` — on the table since 0005 and written by
+  nothing. No sweep releases anything, so a stopped worker cannot hide a notification.
+- **The window is the recipient's, in the recipient's timezone**, and its end is computed from
+  wall-clock parts so it survives the morning the clocks change.
+- **A window may not cover the day** — sixteen hours is the ceiling, refused with the number that
+  stopped it and again by a CHECK constraint. "Never write to me" is not on offer; turning
+  individual kinds down is.
+- **Three deliveries, none of them "lost".** Immediate interrupts; digest arrives in the daily
+  briefing, which gained the section that makes that mean something; nothing is still recorded
+  and findable.
+- **Two kinds cannot be turned down**: the notice that something about you reached somebody else,
+  and the assistant stopping to ask you a question. A guarantee you can switch off is not one.
+- **And that disclosure is now actually sent** — it used to be recorded on the subject's own
+  record and never delivered, so the guarantee relied on them thinking to look.
+- **Reminders are scheduled into the open hours and checked again at delivery**, because a window
+  can change after a rung is written.
+- **It is the person's own** — no administrator sets somebody else's quiet hours.
+
+The cost is stated in the ADR: three test packs and two loops had to name the hour they meant,
+because they assert that something arrives and that now depends on a window. `makeReachable` in
+the fixtures says so out loud.
+
+**Your own record; anybody's.** See ADR 0047.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1481,10 +1517,12 @@ away. They are evidence about query shape, not a 100,000-user result.
 - Four of the ten feature flags — `reports`, `autopilot`, `chat_presence`, `public_api` —
   are read by nothing. They are listed on the Features screen as inert rather than given a
   switch, because a control that changes nothing is worse than an absent one.
-- Six tables are dead schema that nothing reads *or* writes: `agent_messages`,
-  `email_accounts`, `events`, `ingestion_jobs`, `saved_views` and `task_watchers`. They are left in place rather than dropped, and listed here so nobody has
-  to rediscover them. Unlike the tables this work was about, none of these has a live reader,
-  so none is silently affecting behaviour.
+- Two tables are dead schema that nothing reads *or* writes: `email_accounts` and `events`.
+  They are left in place rather than dropped, and listed here so nobody has to rediscover
+  them; neither has a live reader, so neither is silently affecting behaviour. `email_accounts`
+  is where connecting a real mailbox would start. (`agent_messages`, `ingestion_jobs`,
+  `saved_views` and `task_watchers` were on this list and have since been built — ADRs 0037,
+  0038 and 0040.)
 - The demo organization ships with no feature-flag overrides, because seeding one would mean
   turning a feature off in the demo.
 - Only the spend caps and seats stop anything. `plan_limits.agent_runs_per_month`,
@@ -1606,6 +1644,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0044](docs/adr/0044-who-decided-this-was-confidential.md) | Who decided this was confidential |
 | [0045](docs/adr/0045-a-grant-nobody-could-satisfy.md) | A grant nobody could satisfy |
 | [0046](docs/adr/0046-a-throttle-somebody-set.md) | A throttle somebody set |
+| [0047](docs/adr/0047-when-you-are-written-to.md) | When you are written to |
 
 ## Configuration
 

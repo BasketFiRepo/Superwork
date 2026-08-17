@@ -31,6 +31,13 @@ export interface BriefingFacts {
   blockingOthers: { id: string; title: string; waitingCount: number; blockedReason: string | null }[]
   insights: { id: string; title: string; severity: string; watcher: string }[]
   staleThreads: { id: string; companyName: string; daysWaiting: number; subject: string }[]
+  /**
+   * What was written to this person while they were not being interrupted: the kinds they
+   * asked to see in the briefing rather than the moment they happen, and anything quiet hours
+   * held (ADR 0047). This is where `digest` actually lands — a delivery setting that had
+   * nowhere to arrive would be a preference that changes nothing.
+   */
+  waiting: { id: string; type: string; title: string; body: string | null; delivery: string }[]
 
   // End-of-day only.
   completedToday: { id: string; title: string }[]
@@ -46,6 +53,7 @@ export interface BriefingFacts {
     blockingOthers: number
     insights: number
     staleThreads: number
+    waiting: number
     completedToday: number
     slippedToday: number
     agentActions: number
@@ -157,6 +165,16 @@ export async function composeBriefingFacts(
       AND (c.owner_id = ${actor.userId} OR conv.owner_id = ${actor.userId} OR ${actor.role} IN ('owner', 'admin'))
     ORDER BY conv.last_message_at LIMIT 10`
 
+  // Unread, already visible, and not an interruption: either routed to the digest or held
+  // through the night by quiet hours and released by the time this is composed.
+  const waiting = await sql<{ id: string; type: string; title: string; body: string | null; delivery: string }[]>`
+    SELECT id, type, title, body, delivery
+    FROM notifications
+    WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
+      AND deleted_at IS NULL AND read_at IS NULL AND type <> 'nudge'
+      AND deliver_after <= ${now} AND delivery = 'digest'
+    ORDER BY created_at DESC LIMIT 25`
+
   const completedToday =
     kind === 'end_of_day'
       ? await sql<{ id: string; title: string }[]>`
@@ -217,6 +235,7 @@ export async function composeBriefingFacts(
     blockingOthers,
     insights,
     staleThreads,
+    waiting,
     completedToday,
     slippedToday,
     agentActions,
@@ -229,6 +248,7 @@ export async function composeBriefingFacts(
       blockingOthers: blockingOthers.length,
       insights: insights.length,
       staleThreads: staleThreads.length,
+      waiting: waiting.length,
       completedToday: completedToday.length,
       slippedToday: slippedToday.length,
       agentActions: agentActions.length,

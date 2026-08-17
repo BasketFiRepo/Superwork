@@ -10,6 +10,7 @@ import {
   occurrencesBetween,
   getApproval,
   getWorkflow,
+  notify,
   recordSimulation,
   runAggregate,
   startOfDay,
@@ -734,14 +735,14 @@ async function notifyOwners(
       items.map((item) => item['owner_id'] ?? item['assignee_id']).filter((id): id is string => typeof id === 'string'),
     )
     for (const ownerId of owners) {
-      await ctx.sql`
-        INSERT INTO notifications (
-          organization_id, user_id, type, title, body, channel, delivery, entity_type, entity_id, created_by
-        ) VALUES (
-          ${ctx.organizationId}, ${ownerId}, 'workflow', ${workflow.name},
-          ${`${workflow.name} ran and prepared work on your accounts. Nothing was sent.`},
-          'in_app', 'immediate', 'workflow', ${workflow.id}, ${ctx.userId}
-        )`
+      await notify(ctx, {
+        userId: ownerId,
+        type: 'workflow',
+        title: workflow.name,
+        body: `${workflow.name} ran and prepared work on your accounts. Nothing was sent.`,
+        entityType: 'workflow',
+        entityId: workflow.id,
+      })
     }
     return owners.size
   })

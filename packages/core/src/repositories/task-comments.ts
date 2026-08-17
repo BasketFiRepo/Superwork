@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeAudit } from '../audit.js'
+import { notify } from '../notify.js'
 import { getTask } from './tasks.js'
 
 /**
@@ -128,14 +129,15 @@ export async function addTaskComment(
 
   for (const userId of mentions) {
     if (userId === actor.userId) continue
-    await ctx.sql`
-      INSERT INTO notifications (
-        organization_id, user_id, type, title, body, channel, delivery, entity_type, entity_id, url, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${userId}, 'mention', ${`${actor.displayName} mentioned you`},
-        ${`On “${task.title}”: ${body.slice(0, 200)}`}, 'in_app', 'immediate',
-        'task', ${input.taskId}, ${`/tasks/${input.taskId}`}, ${ctx.userId}
-      )`
+    await notify(ctx, {
+      userId,
+      type: 'mention',
+      title: `${actor.displayName} mentioned you`,
+      body: `On “${task.title}”: ${body.slice(0, 200)}`,
+      entityType: 'task',
+      entityId: input.taskId,
+      url: `/tasks/${input.taskId}`,
+    })
   }
 
   await writeAudit(ctx, {

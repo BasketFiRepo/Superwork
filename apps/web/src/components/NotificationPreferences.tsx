@@ -6,13 +6,18 @@ import { useRouter } from 'next/navigation'
 /**
  * When this person is written to.
  *
- * `notification_preferences` has been read by the briefing scheduler since Phase 2 and
- * written by nothing but the seed, so everybody got the default hour and had no way to say
- * otherwise. Only the three fields the scheduler actually reads are settable here; quiet
- * hours and per-type channels sit in the same table and are honoured by nothing, so they
- * are shown as not yet in force rather than offered as a control that would change a number
- * nobody consults (§25).
+ * `quiet_hours`, `channel_defaults` and `per_type` sat in this table since migration 0010 and
+ * were honoured by nothing — this screen showed the window read-only under a "Coming soon"
+ * chip, which was at least honest. They are now what the one notification writer routes by
+ * (ADR 0047): quiet hours hold an interruption until the window opens, never dropping it, and
+ * each kind can be immediate, saved for the briefing, or nothing at all.
  */
+
+const DELIVERIES = [
+  { value: 'immediate', label: 'Straight away' },
+  { value: 'digest', label: 'In my briefing' },
+  { value: 'none', label: 'Nothing' },
+] as const
 
 export function NotificationPreferences({
   briefingHour,
@@ -20,12 +25,19 @@ export function NotificationPreferences({
   briefingEnabled,
   quietHours,
   timezone,
+  perType,
+  types,
+  unmuteable,
 }: {
   briefingHour: number
   endOfDayHour: number
   briefingEnabled: boolean
   quietHours: { start: string; end: string }
   timezone: string
+  perType: Record<string, string>
+  /** The kinds this product actually writes, with a sentence each. */
+  types: { type: string; label: string }[]
+  unmuteable: string[]
 }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
@@ -34,6 +46,9 @@ export function NotificationPreferences({
   const [morning, setMorning] = useState(briefingHour)
   const [evening, setEvening] = useState(endOfDayHour)
   const [enabled, setEnabled] = useState(briefingEnabled)
+  const [start, setStart] = useState(quietHours.start)
+  const [end, setEnd] = useState(quietHours.end)
+  const [routes, setRoutes] = useState<Record<string, string>>(perType)
 
   async function save() {
     setBusy(true)
@@ -46,6 +61,8 @@ export function NotificationPreferences({
         briefingHour: morning,
         endOfDayHour: evening,
         briefingEnabled: enabled,
+        quietHours: { start, end },
+        perType: routes,
       }),
     })
     const payload = await response.json().catch(() => ({ error: 'That could not be read.' }))
@@ -123,25 +140,75 @@ export function NotificationPreferences({
           </button>
         </div>
 
-        <div className="hairline-top stack stack-2" style={{ paddingTop: 'var(--s-4)' }}>
-          <label className="stack stack-2" htmlFor="quiet-hours">
-            <span className="micro">Quiet hours</span>
-            <div className="row-tight">
+        <div className="hairline-top stack stack-3" style={{ paddingTop: 'var(--s-4)' }} data-testid="quiet-hours">
+          <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+            <label className="stack stack-2" style={{ flex: '0 0 150px' }} htmlFor="quiet-start">
+              <span className="micro">Quiet from</span>
               <input
-                id="quiet-hours"
+                id="quiet-start"
                 className="input"
-                style={{ maxWidth: 200 }}
-                value={`${quietHours.start} – ${quietHours.end}`}
-                disabled
-                readOnly
+                type="time"
+                value={start}
+                onChange={(event) => setStart(event.target.value)}
               />
-              <span className="chip">Coming soon · phase 6</span>
-            </div>
-          </label>
+            </label>
+            <label className="stack stack-2" style={{ flex: '0 0 150px' }} htmlFor="quiet-end">
+              <span className="micro">Until</span>
+              <input
+                id="quiet-end"
+                className="input"
+                type="time"
+                value={end}
+                onChange={(event) => setEnd(event.target.value)}
+              />
+            </label>
+          </div>
           <p className="small muted" style={{ margin: 0 }}>
-            Recorded against your account and honoured by nothing yet: reminders are rationed by a
-            daily budget rather than held to a window. It is shown because it is stored, not
-            because it works.
+            Inside that window nothing interrupts you — in {timezone}, your own timezone, not the
+            company's. Nothing is dropped: what happens while you are quiet is written down when it
+            happens and appears the moment the window opens, and reminders wait too, the same way
+            they already wait for a weekend or a public holiday.
+          </p>
+        </div>
+
+        <div className="hairline-top stack stack-3" style={{ paddingTop: 'var(--s-4)' }} data-testid="per-type">
+          <span className="micro">And for each kind of thing</span>
+          <table className="table">
+            <tbody>
+              {types.map(({ type, label }) => {
+                const locked = unmuteable.includes(type)
+                return (
+                  <tr key={type}>
+                    <td>
+                      <span className="small">{label}</span>
+                    </td>
+                    <td style={{ width: 200 }}>
+                      <select
+                        className="select"
+                        id={`route-${type}`}
+                        aria-label={label}
+                        value={locked ? 'immediate' : (routes[type] ?? 'immediate')}
+                        disabled={locked}
+                        title={locked ? 'This one cannot be turned down.' : undefined}
+                        onChange={(event) => setRoutes({ ...routes, [type]: event.target.value })}
+                      >
+                        {DELIVERIES.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          <p className="small muted" style={{ margin: 0 }}>
+            “Nothing” still records it — you can find it later, and turning a kind back on does not
+            rewrite what happened while it was off. Two kinds cannot be turned down at all: being
+            told that something about you reached somebody else, and the assistant stopping to ask
+            you a question. A guarantee you can switch off is not one.
           </p>
         </div>
       </div>

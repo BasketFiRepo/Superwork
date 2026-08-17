@@ -27,6 +27,11 @@ const Body = z.discriminatedUnion('action', [
     briefingHour: z.number().int().min(0).max(23).optional(),
     endOfDayHour: z.number().int().min(0).max(23).optional(),
     briefingEnabled: z.boolean().optional(),
+    // The window and the per-kind routing (ADR 0047). The shape is checked here; whether the
+    // window is a legal one, and which kinds may be turned down, is the repository's to say.
+    quietHours: z.object({ start: z.string().max(5), end: z.string().max(5) }).optional(),
+    perType: z.record(z.string().max(60), z.enum(['immediate', 'digest', 'none'])).optional(),
+    inApp: z.enum(['immediate', 'digest', 'none']).optional(),
   }),
 ])
 
@@ -75,6 +80,9 @@ export async function POST(request: Request) {
           briefingHour: body.briefingHour,
           endOfDayHour: body.endOfDayHour,
           briefingEnabled: body.briefingEnabled,
+          ...(body.quietHours ? { quietHours: body.quietHours } : {}),
+          ...(body.perType ? { perType: body.perType } : {}),
+          ...(body.inApp ? { inApp: body.inApp } : {}),
         }),
       }
     })

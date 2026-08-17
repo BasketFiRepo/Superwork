@@ -9,6 +9,7 @@ import {
 } from '@superwork/core'
 import { Reminders } from '@/components/Reminders'
 import { NotificationPreferences } from '@/components/NotificationPreferences'
+import { NOTIFICATION_TYPES, UNMUTEABLE_TYPES } from '@superwork/core'
 
 export const dynamic = 'force-dynamic'
 
@@ -109,6 +110,9 @@ export default async function RemindersPage() {
         briefingEnabled={preferences.briefingEnabled}
         quietHours={preferences.quietHours}
         timezone={session.timezone}
+        perType={preferences.perType}
+        types={NOTIFICATION_TYPES}
+        unmuteable={[...UNMUTEABLE_TYPES]}
       />
     </div>
   )

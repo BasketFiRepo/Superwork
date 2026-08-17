@@ -1,6 +1,7 @@
 import type { TenantContext } from '@superwork/db'
 import type { Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
+import { notify } from './notify.js'
 import { writeAudit } from './audit.js'
 import { reportingFor } from './org-chart.js'
 import { projectsFor } from './repositories/project-members.js'
@@ -335,6 +336,24 @@ export async function recordDisclosure(ctx: TenantContext, input: DisclosureInpu
       ${input.authorizedBy ?? null}, ${input.authorizationNote ?? null}, ${input.agentRunId ?? null},
       ${input.sourceType ?? null}, ${input.sourceId ?? null}, ${ctx.userId}
     ) RETURNING id`
+
+  // And the person it is about is told, in the same transaction as the record. The claim this
+  // product makes is that nothing about somebody reaches their manager without them knowing;
+  // a row on a screen they would have to think to visit is a weaker version of that than a
+  // notification they cannot turn off (ADR 0047). Not when they are their own recipient —
+  // reading your own record is not a disclosure to you.
+  if (input.recipientUserId !== input.subjectUserId) {
+    await notify(ctx, {
+      userId: input.subjectUserId,
+      type: 'disclosure',
+      title: `Something about you went to ${input.recipientLabel}`,
+      body: input.summary,
+      entityType: 'disclosure',
+      entityId: row!.id,
+      url: '/me',
+    })
+  }
+
   return row!.id
 }
 

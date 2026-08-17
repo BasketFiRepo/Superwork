@@ -3,6 +3,7 @@ import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from './errors.js'
 import { writeActivity } from './audit.js'
+import { inQuietHours, notify, quietHoursEnd, routingFor } from './notify.js'
 import { recordDisclosure } from './transparency.js'
 import { PROFILES, strictestProfile, type JurisdictionProfile } from './compliance.js'
 import { managerOf } from './org-chart.js'
@@ -243,7 +244,15 @@ export async function scheduleLadder(
   // notices. It is moved forward to the next working day where the *recipient* is — not
   // where the owner is, because the two are different people on the escalation rungs.
   const calendar = await workingCalendarFor(ctx, audience.userId)
-  const scheduledFor = shiftToWorkingDay(calendar, at)
+  const onAWorkingDay = shiftToWorkingDay(calendar, at)
+  // And out of their evening, for the same reason (ADR 0047). A rung dated for eleven at
+  // night would be written now and held at delivery, which works but schedules something
+  // nobody can be shown — the ladder says when it will arrive, so the row should say the
+  // truth. Delivery still checks, because a window can change after a rung is written.
+  const quiet = await routingFor(ctx, audience.userId, 'nudge')
+  const scheduledFor = inQuietHours(quiet.quietHours, onAWorkingDay, quiet.timezone)
+    ? shiftToWorkingDay(calendar, quietHoursEnd(quiet.quietHours, onAWorkingDay, quiet.timezone))
+    : onAWorkingDay
 
   const message = stage.template
     .replace('{due}', input.dueAt.toISOString().slice(0, 10))
@@ -375,7 +384,13 @@ export async function deliverDueNudges(
      */
     subjectId?: string
   } = {},
-): Promise<{ delivered: number; heldByBudget: number; heldByCalendar: number; cancelled: number }> {
+): Promise<{
+  delivered: number
+  heldByBudget: number
+  heldByCalendar: number
+  heldByQuietHours: number
+  cancelled: number
+}> {
   const now = options.now ?? new Date()
 
   // Anything whose work is already done cancels itself before anybody is contacted.
@@ -411,10 +426,12 @@ export async function deliverDueNudges(
   let delivered = 0
   let heldByBudget = 0
   let heldByCalendar = 0
+  let heldByQuietHours = 0
 
   // One lookup per person rather than per reminder: a backlog after a long weekend is
   // mostly the same handful of people.
   const calendars = new Map<string, Awaited<ReturnType<typeof workingCalendarFor>>>()
+  const quietFor = new Map<string, Awaited<ReturnType<typeof routingFor>>>()
 
   for (const nudge of due) {
     // The gate that makes the guarantee true regardless of when the row was written: a
@@ -432,6 +449,21 @@ export async function deliverDueNudges(
         UPDATE nudges SET held_reason = ${`Not delivered: ${resting} where they work.`}, updated_at = now()
         WHERE organization_id = ${ctx.organizationId} AND id = ${nudge.id}`
       heldByCalendar += 1
+      continue
+    }
+
+    // The evening, for the same reason as the weekend: a person's own quiet hours are when
+    // this product may not write to them (ADR 0047). It waits and says so — the ladder has
+    // never dropped a reminder and does not start here.
+    const routing = quietFor.get(nudge.recipient_user_id) ?? (await routingFor(ctx, nudge.recipient_user_id, 'nudge'))
+    quietFor.set(nudge.recipient_user_id, routing)
+    if (inQuietHours(routing.quietHours, now, routing.timezone)) {
+      await ctx.sql`
+        UPDATE nudges
+        SET held_reason = ${`Not delivered: it is their quiet hours, ${routing.quietHours.start}–${routing.quietHours.end} where they are.`},
+            updated_at = now()
+        WHERE organization_id = ${ctx.organizationId} AND id = ${nudge.id}`
+      heldByQuietHours += 1
       continue
     }
 
@@ -454,13 +486,16 @@ export async function deliverDueNudges(
     await ctx.sql`
       UPDATE nudges SET delivered_at = now(), channel = ${channel}, held_reason = NULL
       WHERE organization_id = ${ctx.organizationId} AND id = ${nudge.id}`
-    await ctx.sql`
-      INSERT INTO notifications (
-        organization_id, user_id, type, title, body, channel, delivery, entity_type, entity_id, is_demo, created_by
-      ) VALUES (
-        ${ctx.organizationId}, ${nudge.recipient_user_id}, 'nudge', 'A reminder',
-        ${nudge.message}, ${channel}, 'immediate', 'nudge', ${nudge.id}, false, ${ctx.userId}
-      )`
+    await notify(ctx, {
+      userId: nudge.recipient_user_id,
+      type: 'nudge',
+      title: 'A reminder',
+      body: nudge.message,
+      channel,
+      entityType: 'nudge',
+      entityId: nudge.id,
+      now,
+    })
 
     // Something about a person reached somebody else, so that person's own record says so —
     // in the same transaction as the delivery, because a disclosure written afterwards is
@@ -483,7 +518,7 @@ export async function deliverDueNudges(
     delivered += 1
   }
 
-  return { delivered, heldByBudget, heldByCalendar, cancelled: cancelled.length }
+  return { delivered, heldByBudget, heldByCalendar, heldByQuietHours, cancelled: cancelled.length }
 }
 
 /**
