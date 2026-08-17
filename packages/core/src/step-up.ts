@@ -39,6 +39,9 @@ export const STEP_UP_ACTIONS = {
   // overrides a classifier that read something in the content. Raising only ever narrows, so
   // it does not ask (ADR 0044).
   'document.declassify': 'lowering a document’s classification below what the classifier read',
+  // Raising a workflow's throttle widens what runs with nobody watching — more work queued at
+  // once, or more actions in a day. Lowering never asks (ADR 0046).
+  'workflow.throttle': 'letting an automation do more without a person watching',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

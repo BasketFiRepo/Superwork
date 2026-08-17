@@ -4,6 +4,7 @@ import { env } from '@superwork/config'
 import { asAgent, can, loadActor, type Actor } from '@superwork/auth'
 import {
   assertEditsAreOffered,
+  checkCapacity,
   claimDueSchedules,
   createApproval,
   occurrencesBetween,
@@ -747,62 +748,6 @@ async function notifyOwners(
 }
 
 // ---------------------------------------------------------------------------
-// Capacity
-// ---------------------------------------------------------------------------
-
-export interface Capacity {
-  allow: boolean
-  reason: string
-  /** How many actions this run may still take today. */
-  remaining: number
-}
-
-/**
- * What this workflow may do right now, counted from what it has actually done (§27.6).
- *
- * Two limits, both columns a person set. A workflow whose last batch is still waiting for
- * approval does not queue a second one — that is how somebody arrives on Monday to two
- * hundred approvals. And the day's action cap is counted from the tool calls that really
- * happened, not from a counter that resets when a process restarts.
- */
-export async function checkCapacity(ctx: TenantContext, workflow: WorkflowView): Promise<Capacity> {
-  const [busy] = await ctx.sql<{ count: number }[]>`
-    SELECT count(*)::int AS count FROM workflow_runs
-    WHERE organization_id = ${ctx.organizationId} AND workflow_id = ${workflow.id}
-      AND deleted_at IS NULL AND simulated = false
-      AND status IN ('queued', 'running', 'awaiting_approval')`
-  if ((busy?.count ?? 0) >= workflow.maxConcurrentRuns) {
-    return {
-      allow: false,
-      remaining: 0,
-      reason:
-        `Skipped: ${busy!.count} earlier ${busy!.count === 1 ? 'run is' : 'runs are'} still unfinished — most likely ` +
-        'waiting for somebody to approve them. It will run again once they are decided.',
-    }
-  }
-
-  const [today] = await ctx.sql<{ count: number }[]>`
-    SELECT count(*)::int AS count
-    FROM tool_calls tc
-    JOIN agent_runs r ON r.id = tc.run_id
-    WHERE tc.organization_id = ${ctx.organizationId} AND tc.ok = true
-      AND r.trigger = 'workflow'
-      AND r.ui_context->>'workflowId' = ${workflow.id}
-      AND tc.created_at >= ${startOfDay(new Date(), ctx.timezone)}`
-  const used = today?.count ?? 0
-  const remaining = workflow.dailyActionCap - used
-  if (remaining <= 0) {
-    return {
-      allow: false,
-      remaining: 0,
-      reason:
-        `Skipped: it has already done ${used} things today and its cap is ${workflow.dailyActionCap}. ` +
-        'Raise the cap if that is too low — it is a number somebody set, not a failure.',
-    }
-  }
-  return { allow: true, reason: '', remaining }
-}
-
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------

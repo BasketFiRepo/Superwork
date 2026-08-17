@@ -345,7 +345,7 @@ describe('the sweep', () => {
         )`
     })
 
-    const { checkCapacity } = await import('@superwork/agent')
+    const { checkCapacity } = await import('@superwork/core')
     const capacity = await withTenant(session, async (ctx) =>
       checkCapacity(ctx, await getWorkflow(ctx, await loadActor(ctx), workflowId)),
     )

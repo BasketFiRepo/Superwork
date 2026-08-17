@@ -1087,6 +1087,34 @@ was offered to viewers too, so the refusal arrived after somebody had typed the 
 
 **Knowledge; add a document.** See ADR 0045.
 
+## A throttle somebody set
+
+`workflows.max_concurrent_runs` and `daily_action_cap` have existed since migration 0007 and
+nothing ever wrote either. Unlike most of what this work has found, they were never
+decorative: both are read on every firing and **both are enforced**. Every workflow in every
+organization ran on the column defaults — 1 and 100 — chosen by a migration for nobody in
+particular. The skip message says *"Raise the cap if that is too low — it is a number somebody
+set, not a failure."* Nobody set it, and nobody could raise it.
+
+- **Both numbers are settable together, with a reason**, because they are one decision: how
+  hard this automation may run.
+- **Raising asks for a fresh proof; lowering never does.** Raising widens what runs with
+  nobody watching, and the actions have happened by the time anybody reviews them.
+- **There is no "unlimited"** — 1–50 runs at once, 1–10,000 actions a day, refused in the
+  repository with the numbers in the message and again by a CHECK constraint.
+- **A number somebody chose names them and says why**; a workflow still on the defaults names
+  nobody, and the panel says exactly that. An unattributed default and a deliberate choice of
+  the same number are different facts.
+- **The counting moved into the repository.** The screen that offers to change a limit shows
+  what the limit is doing right now, from the same function the scheduler calls — two places
+  counting "what has it done today" would eventually disagree about the only thing that
+  matters.
+
+Admins and owners set it, not the workflow's own owner: the throttle is the ceiling on what
+activation means, so it sits with the people who set the other ceilings (ADR 0035).
+
+**Workflows; any automation.** See ADR 0046.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1577,6 +1605,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0043](docs/adr/0043-a-password-is-not-the-only-thing-that-opens-the-door.md) | A password is not the only thing that opens the door |
 | [0044](docs/adr/0044-who-decided-this-was-confidential.md) | Who decided this was confidential |
 | [0045](docs/adr/0045-a-grant-nobody-could-satisfy.md) | A grant nobody could satisfy |
+| [0046](docs/adr/0046-a-throttle-somebody-set.md) | A throttle somebody set |
 
 ## Configuration
 

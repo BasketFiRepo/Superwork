@@ -1,10 +1,12 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
+import { checkCapacity, describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
+import { can } from '@superwork/auth'
 import { requireSession, withActor } from '@/lib/session'
 import { ScheduleEditor } from '@/components/ScheduleEditor'
 import { WorkflowControls } from '@/components/WorkflowControls'
 import { WorkflowGraphView, type CompiledView } from '@/components/WorkflowGraphView'
+import { WorkflowThrottle } from '@/components/WorkflowThrottle'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,11 +24,19 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
       WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
         AND m.role IN ('admin', 'manager', 'member')
       ORDER BY u.name`
-    return { workflow, runs, members }
+    // The same count the scheduler makes, from the same function: a screen that offers to
+    // change a limit has to show what that limit is doing right now (ADR 0046).
+    const capacity = await checkCapacity(ctx, workflow)
+    const change = can(actor, 'workflow:update', {
+      type: 'workflow',
+      organizationId: ctx.organizationId,
+      riskTier: 'high',
+    })
+    return { workflow, runs, members, capacity, change }
   })
 
   if (!data) notFound()
-  const { workflow, runs, members } = data
+  const { workflow, runs, members, capacity, change } = data
   const compiled: CompiledView | null = workflow.graph
     ? { name: workflow.name, graph: workflow.graph, readback: workflow.readback, risks: workflow.risks, unsupported: null }
     : null
@@ -55,6 +65,24 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
           </div>
         </section>
       ) : null}
+
+      <WorkflowThrottle
+        workflowId={workflow.id}
+        maxConcurrentRuns={workflow.maxConcurrentRuns}
+        dailyActionCap={workflow.dailyActionCap}
+        setByName={workflow.limitsSetByName}
+        setAt={workflow.limitsSetAt ? workflow.limitsSetAt.toISOString() : null}
+        reason={workflow.limitsReason}
+        capacity={{
+          unfinished: capacity.unfinished,
+          usedToday: capacity.usedToday,
+          remaining: capacity.remaining,
+          allow: capacity.allow,
+          reason: capacity.reason,
+        }}
+        canEdit={change.allow}
+        denialReason={change.reason}
+      />
 
       {workflow.status === 'active' || workflow.scheduleCron ? (
         <section className="panel" data-testid="workflow-schedule">

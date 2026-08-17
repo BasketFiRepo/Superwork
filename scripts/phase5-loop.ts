@@ -41,6 +41,8 @@ import {
   decideApproval,
   describeCron,
   getWorkflow,
+  checkCapacity,
+  setWorkflowLimits,
   listCustomTools,
   listWorkflowRuns,
   reviewHost,
@@ -170,7 +172,6 @@ import {
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
 import { customToolsFor } from '@superwork/tools'
 import {
-  checkCapacity,
   continueWorkflowAfterApproval,
   runDueWatchers,
   runDueWorkflows,
@@ -423,6 +424,76 @@ try {
   ok('A firing is held back while the last batch waits for a person',
     sweep.awaitingApproval === 0 || !held.allow,
     held.reason || 'nothing outstanding')
+
+  // ---- 4b. The throttle somebody can finally set ---------------------------
+  console.log('\nThe two numbers the scheduler enforces…\n')
+
+  const throttle = await (async () => {
+    const before = await withTenant(session, async (ctx) =>
+      getWorkflow(ctx, await loadActor(ctx), workflowId))
+
+    // Raising widens what runs with nobody watching, so it asks for a fresh proof.
+    const raising = await withTenant(session, async (ctx) =>
+      setWorkflowLimits(ctx, await loadActor(ctx), {
+        workflowId,
+        maxConcurrentRuns: before.maxConcurrentRuns + 1,
+        dailyActionCap: before.dailyActionCap,
+        reason: 'Trying to widen it without proving who I am.',
+      }).then(() => 'allowed', (error: Error) => error.constructor.name))
+
+    const tightened = await withTenant(session, async (ctx) =>
+      setWorkflowLimits(ctx, await loadActor(ctx), {
+        workflowId,
+        maxConcurrentRuns: 1,
+        dailyActionCap: 12,
+        reason: 'A dozen drafts a day is as many as anybody will read.',
+      }))
+
+    const unlimited = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+      setWorkflowLimits(ctx, await loadActor(ctx), {
+        workflowId,
+        maxConcurrentRuns: 1,
+        dailyActionCap: 1_000_000,
+        reason: 'Taking the ceiling off altogether.',
+      }).then(() => 'allowed', (error: Error) => error.message))
+
+    const raised = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+      setWorkflowLimits(ctx, await loadActor(ctx), {
+        workflowId,
+        maxConcurrentRuns: 2,
+        dailyActionCap: 40,
+        reason: 'The Monday backlog needs more than a dozen.',
+      }))
+
+    const capacity = await withTenant(session, async (ctx) =>
+      checkCapacity(ctx, await getWorkflow(ctx, await loadActor(ctx), workflowId)))
+
+    // Put the demo back on the defaults nobody chose, which is where it started.
+    await adminSql()`
+      UPDATE workflows SET max_concurrent_runs = ${before.maxConcurrentRuns},
+        daily_action_cap = ${before.dailyActionCap}, limits_set_by = NULL, limits_set_at = NULL,
+        limits_reason = NULL
+      WHERE organization_id = ${session.organizationId} AND id = ${workflowId}`
+    await adminSql()`
+      DELETE FROM activities WHERE organization_id = ${session.organizationId}
+        AND entity_id = ${workflowId} AND verb = 'throttled'`
+
+    return { before, raising, tightened, unlimited, raised, capacity }
+  })()
+
+  ok('The numbers a workflow runs under started as defaults nobody chose',
+    throttle.before.limitsSetByName === null,
+    `${throttle.before.maxConcurrentRuns} at once, ${throttle.before.dailyActionCap} a day`)
+  ok('Raising one asks for a fresh proof, because it widens what runs unattended',
+    throttle.raising === 'StepUpRequiredError', throttle.raising)
+  ok('Lowering one does not, and records who decided and why',
+    throttle.tightened.dailyActionCap === 12 && !!throttle.tightened.limitsSetByName,
+    throttle.tightened.limitsSetByName ?? 'nobody')
+  ok('“Unlimited” cannot be spelled at all', /between 1 and 10000/.test(throttle.unlimited),
+    throttle.unlimited.slice(0, 60))
+  ok('And the raised number is what the scheduler then counts against',
+    throttle.raised.dailyActionCap === 40 && throttle.capacity.remaining === 40 - throttle.capacity.usedToday,
+    `${throttle.capacity.remaining} left of 40`)
 
   // ---- 4c. Watchers keep their own time ------------------------------------
   console.log('\nThe watchers, on the cadence each one declares…\n')
@@ -2906,7 +2977,10 @@ try {
         'contract whose term has ended stops being quoted as current while staying findable; and \n' +
         'a password is no longer the only thing between somebody else and every irreversible \n' +
         'action; and a classification a regex guessed at can be weighed by a person, who is \n' +
-        'named for it, and is not argued with by the next re-index.\n',
+        'named for it, and is not argued with by the next re-index; and a member can add a \n' +
+        'document at last, which is theirs afterwards, unless it reads above what they can \n' +
+        'read themselves; and the two numbers an automation runs under are numbers somebody \n' +
+        'chose, with a ceiling that cannot be taken off.\n',
   )
 } catch (error) {
   console.error(error)

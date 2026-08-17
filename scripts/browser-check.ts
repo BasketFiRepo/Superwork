@@ -357,6 +357,7 @@ try {
 
   await page.locator('[data-testid="workflow-save"]').click()
   await page.waitForURL(/\/workflows\/[0-9a-f-]{36}/, { timeout: 20_000 })
+  const workflowUrl = page.url()
   await page.waitForSelector('[data-testid="workflow-activate"]', { timeout: 15_000 })
   ok('Activation is disabled until a dry run has passed',
     await page.locator('[data-testid="workflow-activate"]').isDisabled())
@@ -1505,6 +1506,59 @@ try {
     .waitForSelector('[data-testid="factor-begin"]', { timeout: 20_000 })
     .then(() => true, () => false)
   ok('An abandoned enrolment can be cancelled, leaving no secret behind', cleared)
+
+  // ---- The two numbers a workflow runs under -------------------------------
+  // Both columns are enforced on every firing and nothing had ever written either, so every
+  // workflow ran on a migration's defaults and the skip message told people to raise a cap
+  // they could not reach. After the governance beats, for the reason stated above them:
+  // raising a throttle spends a step-up, and a beat that spends one early leaves the next
+  // with nothing to prove.
+  await page.goto(workflowUrl)
+  await page.waitForSelector('[data-testid="workflow-throttle"]', { timeout: 15_000 })
+  const throttleText = await page.locator('[data-testid="workflow-throttle"]').innerText()
+  ok('The workflow says what it may do, and what it has done today',
+    /runs? at once/i.test(throttleText) && /actions a day/i.test(throttleText),
+    throttleText.split('\n').slice(0, 3).join(' · '))
+  ok('And says nobody has chosen the numbers it is running under',
+    /Nobody has chosen these/i.test(throttleText))
+
+  await page.locator('[data-testid="throttle-edit"]').click()
+  await page.waitForSelector('[data-testid="throttle-editor"]', { timeout: 15_000 })
+  ok('A change with no reason cannot be saved',
+    await page.locator('[data-testid="throttle-confirm"]').isDisabled())
+  await page.fill('#throttle-cap', '12')
+  await page.fill('#throttle-reason', 'A dozen drafts a day is as many as anybody will read.')
+  await page.locator('[data-testid="throttle-confirm"]').click()
+  const throttled = await page
+    .waitForFunction(
+      () => /set these on/i.test(document.querySelector('[data-testid="throttle-summary"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Lowering it saves without asking for a password, and names who decided', throttled)
+
+  await page.locator('[data-testid="throttle-edit"]').click()
+  await page.waitForSelector('[data-testid="throttle-editor"]', { timeout: 15_000 })
+  await page.fill('#throttle-cap', '40')
+  await page.fill('#throttle-reason', 'The Monday backlog needs more than a dozen.')
+  ok('Raising it says it will ask for a password first',
+    /confirm your password/i.test(await page.locator('[data-testid="throttle-raising"]').innerText()))
+  await page.locator('[data-testid="throttle-confirm"]').click()
+  const throttleStepUp = page.locator('[data-testid="step-up"]')
+  if (await throttleStepUp.waitFor({ timeout: 5_000 }).then(() => true, () => false)) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  const capRaised = await page
+    .waitForFunction(
+      () => /40 actions a day/i.test(document.querySelector('[data-testid="throttle-numbers"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And the raised number is what the panel then counts against', capRaised)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-throttle.png`, fullPage: true })
 
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
