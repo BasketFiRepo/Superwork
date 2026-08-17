@@ -45,16 +45,15 @@ Point the repository's `.env` at the new database and run:
 ```bash
 pnpm install
 pnpm db:migrate
-pnpm db:seed     # the Northwind Logistics demo organization
 ```
 
 Use `db:migrate`, **not** `db:reset`. Reset drops and rebuilds the schema and then grants
 on it to a role literally named `postgres`; it is the development and CI path, and on a
 hosted database whose owner is called something else it fails.
 
-The seed is what makes the product visible. Without it the app boots correctly and every
-screen is a sign-in wall, because there is no organization to sign in to. It prints the
-login on success — `maya@northwind.example` / `superwork`.
+Seeding comes after the next step, not here. The seed writes the demo organization's rows
+through the tenant pool, as the `superwork_app` role, so that role's password has to be
+right before it will run at all.
 
 ## 3. Give the runtime roles a password the deployment knows
 
@@ -103,23 +102,42 @@ the role it is named for; one pointed at the owner is rejected at startup rather
 quietly granted the ability to read every tenant. When both are set, `DATABASE_URL` is only
 the admin fallback and is passed to the driver verbatim.
 
+## 4. Seed the demo organization
+
+```bash
+pnpm db:seed
+```
+
+The seed is what makes the product visible. Without it the app boots correctly and every
+screen is a sign-in wall, because there is no organization to sign in to. It prints the
+login on success — `maya@northwind.example` / `superwork`.
+
+It has to come after step 3. Most of it is written through the admin pool, but the tenant's
+own rows go through `withTenant`, which is the `superwork_app` role — so a seed run before
+the passwords are set fails on `password authentication failed for user "superwork_app"`
+partway through, having already written the rows that did not need a tenant.
+
+Re-running it is safe: it deletes the `northwind` organization before rebuilding it, so a
+half-written seed is cleaned up by the next attempt rather than doubled.
+
 ### Without a terminal
 
-Steps 2 and 3 assume a checkout, a Node toolchain, and a database reachable from the
-machine running them. None of that is a reasonable prerequisite for putting a schema on a
-database you already own, so the same three commands are also a workflow:
+Steps 2 to 4 assume a checkout, a Node toolchain, and a database reachable from the machine
+running them. None of that is a reasonable prerequisite for putting a schema on a database
+you already own, so the same three commands are also a workflow:
 
 1. **Actions → Provision the database → Run workflow**, on GitHub.
 2. It needs two repository secrets first, under **Settings → Secrets and variables →
    Actions**: `DATABASE_URL` and `DATABASE_ADMIN_URL`, the same two strings as step 1.
-3. Leave both tick boxes on for a first run. They map to `db:seed` and `db:roles`, so a
+3. Leave both tick boxes on for a first run. They map to `db:roles` and `db:seed`, so a
    later run can re-seed without touching the passwords, or the reverse.
 
-It runs `db:migrate`, `db:seed` and `db:roles` in that order against whatever those secrets
-name, and prints the database it reached before it writes anything. There is no push or
-schedule trigger — it writes to a real database, so it only ever runs when somebody asks.
+It runs `db:migrate`, `db:roles` and `db:seed` in that order — the order matters for the
+reason above — against whatever those secrets name, and prints the database it reached
+before it writes anything. There is no push or schedule trigger: it writes to a real
+database, so it only ever runs when somebody asks.
 
-## 4. Set the environment variables
+## 5. Set the environment variables
 
 On the hosting platform, for the production environment:
 
@@ -143,7 +161,7 @@ unattended.
 Deploy again after setting them. Environment variables are read at deploy time, so an
 existing deployment will not pick up new values on its own.
 
-## 5. Verify
+## 6. Verify
 
 Load the site. You should get the sign-in page.
 
