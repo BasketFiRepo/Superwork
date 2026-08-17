@@ -82,13 +82,19 @@ jobs:
       - name: Apply the migrations
         run: pnpm db:migrate
 
-      - name: Seed the demo organization
-        if: ${{ inputs.seed }}
-        run: pnpm db:seed
-
+      # Before the seed, not after it. Most of the seed is written through the admin pool,
+      # but the tenant's own rows go through `withTenant` — the superwork_app role — so a
+      # seed that runs while that role still holds migration 0008's default password fails
+      # partway through, having already written everything that did not need a tenant. CI
+      # never sees this because its DATABASE_URL carries `superwork_dev`, which is the
+      # password 0008 writes, so its app role works without this step at all.
       - name: Set the runtime role passwords
         if: ${{ inputs.set_role_passwords }}
         run: pnpm db:roles
+
+      - name: Seed the demo organization
+        if: ${{ inputs.seed }}
+        run: pnpm db:seed
 
       - name: What to do next
         if: success()
