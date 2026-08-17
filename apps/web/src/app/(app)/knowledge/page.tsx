@@ -108,6 +108,18 @@ export default async function KnowledgePage() {
                     <td className="num">{row.count}</td>
                   </tr>
                 ))}
+                {health.terms.expired > 0 || health.terms.expiringSoon > 0 ? (
+                  <tr data-testid="knowledge-terms">
+                    <td className="small secondary">
+                      out of term
+                      <div className="small muted">
+                        {health.terms.expired} expired, {health.terms.expiringSoon} within 30 days —
+                        still searchable, no longer quoted as current
+                      </div>
+                    </td>
+                    <td className="num">{health.terms.expired}</td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>

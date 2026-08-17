@@ -25,12 +25,19 @@ export interface DocumentView {
   spaceId: string | null
   spaceName: string | null
   chunkCount: number
+  /** The term this document is in force for. Written by nothing until now (ADR 0042). */
+  effectiveFrom: string | null
+  effectiveTo: string | null
+  /** True when `effectiveTo` has passed in the organization's timezone. */
+  expired: boolean
   createdAt: Date
   updatedAt: Date
 }
 
 const SELECT_DOC = (ctx: TenantContext) => ctx.sql`
   SELECT d.id, d.title, d.doc_type AS "docType", d.sensitivity,
+         d.effective_from::text AS "effectiveFrom", d.effective_to::text AS "effectiveTo",
+         (d.effective_to IS NOT NULL AND d.effective_to < current_date) AS expired,
          d.index_status AS "indexStatus", d.index_error AS "indexError",
          d.quarantine_reason AS "quarantineReason", d.citation_count AS "citationCount",
          d.company_id AS "companyId", c.name AS "companyName",
@@ -137,6 +144,68 @@ export async function getDocumentBody(
   return { document, body: row?.body ?? '' }
 }
 
+/**
+ * Sets the term a document is in force for (§7.3, ADR 0042).
+ *
+ * Needs a say over the document rather than a read of it: closing a contract's term takes it
+ * out of every current answer the assistant gives, which is not something a reader should be
+ * able to do. The chunk dates follow by trigger, so the passages the model reads cannot go on
+ * claiming the old term.
+ */
+export async function setEffectiveDates(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { documentId: string; effectiveFrom?: string | null; effectiveTo?: string | null },
+): Promise<DocumentView> {
+  const before = await getDocument(ctx, actor, input.documentId)
+  const decision = can(actor, 'document:update', {
+    type: 'document',
+    id: before.id,
+    organizationId: ctx.organizationId,
+    ownerId: before.ownerId,
+    departmentId: before.departmentId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const from = input.effectiveFrom === undefined ? before.effectiveFrom : input.effectiveFrom
+  const to = input.effectiveTo === undefined ? before.effectiveTo : input.effectiveTo
+  if (from && to && to < from) {
+    throw new ValidationError('A term cannot end before it starts.')
+  }
+
+  await ctx.sql`
+    UPDATE documents SET effective_from = ${from}, effective_to = ${to}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.term_set',
+    entityType: 'document',
+    entityId: input.documentId,
+    before: { effectiveFrom: before.effectiveFrom, effectiveTo: before.effectiveTo },
+    after: { effectiveFrom: from, effectiveTo: to },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'updated',
+    entityType: 'document',
+    entityId: input.documentId,
+    entityLabel: before.title,
+    summary: to
+      ? `“${before.title}” is in force until ${to}. After that it stays findable and stops being quoted as current.`
+      : `“${before.title}” has no end date — it is treated as current.`,
+  })
+
+  // No re-index. The passages carry the dates by trigger, and the contextual header they are
+  // embedded with deliberately says nothing about the term — so there is nothing for a
+  // re-index to rebuild. Queueing one would be work the product pretends is necessary.
+  return getDocument(ctx, actor, input.documentId)
+}
+
 export interface UploadInput {
   title: string
   body: string
@@ -148,6 +217,8 @@ export interface UploadInput {
   sensitivityHint?: Sensitivity
   untrusted?: boolean
   source?: string
+  effectiveFrom?: string | null
+  effectiveTo?: string | null
 }
 
 /** Upload + ingest as one operation: a document that is not indexed is not memory. */
@@ -189,6 +260,8 @@ export async function uploadDocument(
     departmentId: input.departmentId ?? null,
     sensitivityHint: input.sensitivityHint ?? 'internal',
     untrusted: input.untrusted ?? false,
+    effectiveFrom: input.effectiveFrom ?? null,
+    effectiveTo: input.effectiveTo ?? null,
   })
 
   // The queue is the history of every ingestion, not only of the ones that needed retrying:
@@ -227,6 +300,8 @@ export async function knowledgeHealth(ctx: TenantContext): Promise<{
   totalChunks: number
   topUnanswered: { query: string; occurrences: number }[]
   mostCited: { id: string; title: string; citationCount: number }[]
+  /** Documents whose term has ended, and the ones about to (ADR 0042). */
+  terms: { expired: number; expiringSoon: number; expiredDocuments: { id: string; title: string; effectiveTo: string }[] }
 }> {
   const sql = ctx.sql
   const byStatus = await sql<{ status: IndexStatus; count: number }[]>`
@@ -239,11 +314,28 @@ export async function knowledgeHealth(ctx: TenantContext): Promise<{
     SELECT query, occurrences FROM unanswered_queries
     WHERE organization_id = ${ctx.organizationId}
     ORDER BY occurrences DESC, last_seen_at DESC LIMIT 10`
+  const [termCounts] = await sql<{ expired: number; expiringSoon: number }[]>`
+    SELECT count(*) FILTER (WHERE effective_to < current_date)::int AS expired,
+           count(*) FILTER (WHERE effective_to >= current_date
+                              AND effective_to < current_date + 30)::int AS "expiringSoon"
+    FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND effective_to IS NOT NULL`
+  const expiredDocuments = await sql<{ id: string; title: string; effectiveTo: string }[]>`
+    SELECT id, title, effective_to::text AS "effectiveTo" FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND effective_to IS NOT NULL AND effective_to < current_date
+    ORDER BY effective_to DESC LIMIT 10`
   const mostCited = await sql<{ id: string; title: string; citationCount: number }[]>`
     SELECT id, title, citation_count AS "citationCount" FROM documents
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND citation_count > 0
     ORDER BY citation_count DESC LIMIT 10`
-  return { byStatus, totalChunks: chunks?.count ?? 0, topUnanswered, mostCited }
+  return {
+    byStatus,
+    totalChunks: chunks?.count ?? 0,
+    topUnanswered,
+    mostCited,
+    terms: { ...termCounts!, expiredDocuments },
+  }
 }
 
 /**

@@ -26,6 +26,11 @@ export interface IngestInput {
   departmentId?: string | null
   sensitivityHint?: Sensitivity
   effectiveFrom?: string | null
+  /**
+   * The day it stops applying. Expired passages stay findable and stop being authoritative:
+   * "what did the old contract say" is a real question (ADR 0042).
+   */
+  effectiveTo?: string | null
   /** Content arriving from outside the organization is scanned before indexing. */
   untrusted?: boolean
 }
@@ -55,12 +60,18 @@ export function normalize(body: string): string {
  * Contextual header per chunk (§7.1 Enrich). Built deterministically from the document's
  * own structure rather than a model call, so ingestion never depends on AI availability
  * and the header is identical on every re-index.
+ *
+ * **This text is embedded**, which is why administrative metadata stays out of it. The header
+ * had a branch for `effective_from` from Phase 1 and no caller ever passed one, so it had never
+ * run; the moment terms were seeded onto the Halden agreement and its amendment, the dates
+ * entered the vector, diluted it, and pushed the amendment out of retrieval — the supersession
+ * eval failed, which is exactly what that fixture is for. A term is a fact retrieval reads from
+ * a column, not a phrase that belongs in an embedding (ADR 0042).
  */
-function contextHeader(input: { title: string; docType: string; headingPath: string; effectiveFrom?: string | null }): string {
+function contextHeader(input: { title: string; docType: string; headingPath: string }): string {
   const parts = [`This excerpt is from "${input.title}"`]
   if (input.docType && input.docType !== 'document') parts.push(`a ${input.docType.replace(/_/g, ' ')}`)
   if (input.headingPath) parts.push(`section: ${input.headingPath}`)
-  if (input.effectiveFrom) parts.push(`effective from ${input.effectiveFrom}`)
   return `${parts.join(', ')}.`
 }
 
@@ -140,12 +151,7 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
     const docType = input.docType ?? 'document'
     const enriched = chunks.map((chunk) => ({
       ...chunk,
-      contextHeader: contextHeader({
-        title: input.title,
-        docType,
-        headingPath: chunk.headingPath,
-        effectiveFrom: input.effectiveFrom ?? null,
-      }),
+      contextHeader: contextHeader({ title: input.title, docType, headingPath: chunk.headingPath }),
     }))
 
     const vectors = await embeddingProvider().embed(
@@ -157,12 +163,13 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
       await sql`
         INSERT INTO document_chunks (
           organization_id, document_id, version_id, ordinal, heading_path, anchor, content,
-          context_header, token_count, sensitivity, effective_from, embedding, created_by
+          context_header, token_count, sensitivity, effective_from, effective_to, embedding, created_by
         ) VALUES (
           ${ctx.organizationId}, ${input.documentId}, ${versionId}, ${chunk.ordinal},
           ${chunk.headingPath}, ${chunk.anchor}, ${chunk.content}, ${chunk.contextHeader},
           ${chunk.tokenCount}, ${chunkClass.sensitivity},
-          ${input.effectiveFrom ?? null}, ${toVectorLiteral(vectors[i] ?? [])}::vector, ${ctx.userId}
+          ${input.effectiveFrom ?? null}, ${input.effectiveTo ?? null},
+          ${toVectorLiteral(vectors[i] ?? [])}::vector, ${ctx.userId}
         )`
     }
 
@@ -178,6 +185,8 @@ export async function ingestDocument(ctx: TenantContext, input: IngestInput): Pr
         content_hash = ${contentHash},
         sensitivity = ${classification.sensitivity},
         doc_type = ${docType},
+        effective_from = coalesce(${input.effectiveFrom ?? null}::date, effective_from),
+        effective_to = coalesce(${input.effectiveTo ?? null}::date, effective_to),
         -- Filing is kept unless this call restates it. These were assignments, so a
         -- caller that only asked for indexing silently unfiled the document: the seed
         -- inserted every document into a knowledge space and the very next statement set

@@ -619,11 +619,14 @@ async function seedDocuments(
   for (const document of SEED_DOCUMENTS) {
     const [row] = await ctx.sql<{ id: string }[]>`
       INSERT INTO documents (organization_id, space_id, company_id, title, doc_type, source,
-                             sensitivity, owner_id, index_status, is_demo, created_by)
+                             sensitivity, owner_id, index_status, effective_from, effective_to,
+                             is_demo, created_by)
       VALUES (${ctx.organizationId}, ${space!.id},
               ${document.companyKey ? companyIds.get(document.companyKey)! : null},
               ${document.title}, ${document.docType}, ${document.untrusted ? 'integration' : 'upload'},
-              ${document.sensitivityHint ?? 'internal'}, ${userIds.get('david')!}, 'pending', true, ${ctx.userId})
+              ${document.sensitivityHint ?? 'internal'}, ${userIds.get('david')!}, 'pending',
+              ${document.effectiveFrom ?? null}, ${document.effectiveTo ?? null},
+              true, ${ctx.userId})
       RETURNING id`
 
     const result = await ingestDocument(ctx, {
@@ -636,6 +639,8 @@ async function seedDocuments(
       ownerId: userIds.get('david')!,
       sensitivityHint: document.sensitivityHint ?? 'internal',
       untrusted: document.untrusted ?? false,
+      effectiveFrom: document.effectiveFrom ?? null,
+      effectiveTo: document.effectiveTo ?? null,
     })
     // Every ingestion leaves a record, the seed's included: the demo's indexing panel shows
     // what was indexed and what the post-index check found, rather than an empty table.

@@ -964,6 +964,37 @@ the seeded database, and caught it.
 
 **Tasks; any task.** See ADR 0041.
 
+## When a document stopped being true
+
+`documents.effective_to` and `document_chunks.effective_to` have existed since migration 0004
+and nothing ever wrote to them or read them, while `effective_from` was carried into every
+passage and stated in the header the model reads.
+
+Retrieval already filters out a **superseded version** (§7.3) — something replaced it. It had no
+notion of a document that **nothing replaced and whose term simply ran out**: a rate card for a
+calendar year, a fixed-term agreement, a policy valid until review. `is_superseded` stays false,
+so the passage was retrieved, ranked and cited as current indefinitely. An expired clause quoted
+with a citation is worse than no answer, because it looks like an answer.
+
+- **Expired is not deleted.** The passage stays findable and stops being authoritative — an
+  invoice query needs last year's prices.
+- **Expiry is decided at read time, never baked into a passage.** The header carries the dates,
+  because a date stays true; "this has expired" is a claim about today and a header is written
+  once at ingest.
+- **The judgement is stated where the model can see it**, in the product-authored grounding
+  label rather than by editing retrieved text. Down-ranking makes an expired passage unlikely
+  to arrive; it cannot make it impossible.
+- **Expired and superseded weigh the same and multiply.**
+- **A chunk's dates are its document's**, by trigger — the passage cannot go on claiming a term
+  the document has changed.
+- **Superseding something closes it**: the trigger derives the end date from when the
+  replacement takes effect, and only ever fills a blank.
+- **The header carries no dates, because it is embedded.** Putting the term in the vector
+  diluted it and cost recall — the `golden.supersession` eval caught it. So changing a term
+  needs no re-index at all.
+
+**Knowledge; any document.** See ADR 0042.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1450,6 +1481,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0039](docs/adr/0039-a-day-somebody-does-not-work.md) | A day somebody does not work |
 | [0040](docs/adr/0040-one-writer-for-what-the-model-cost.md) | One writer for what the model cost |
 | [0041](docs/adr/0041-work-that-comes-back.md) | Work that comes back |
+| [0042](docs/adr/0042-when-a-document-stopped-being-true.md) | When a document stopped being true |
 
 ## Configuration
 

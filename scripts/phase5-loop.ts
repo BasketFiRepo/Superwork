@@ -123,6 +123,8 @@ import {
   saveView,
   listSavedViews,
   documentIngestions,
+  setEffectiveDates,
+  knowledgeHealth,
   setRecurrence,
   taskRecurrence,
   listRunMessages,
@@ -2554,6 +2556,74 @@ try {
   ok('And the database refuses a second open occurrence, whatever writes it',
     /one_open_occurrence/i.test(doubled ?? ''), (doubled ?? 'it was allowed').slice(0, 50))
 
+
+  // ---- A contract that has run out -----------------------------------------
+  console.log('\nAn agreement whose term has ended…\n')
+
+  const term = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+
+    // The case supersession does *not* catch, and the one this exists for: a fixed-term
+    // agreement that simply ran out. Nothing replaced it, so `is_superseded` is false and it
+    // was retrieved, ranked and cited as current indefinitely.
+    const [lapsed] = await ctx.sql<{ id: string; title: string; to: string | null; expired: boolean }[]>`
+      SELECT id, title, effective_to::text AS "to",
+             (effective_to IS NOT NULL AND effective_to < current_date) AS expired
+      FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND title = 'Rate Card 2025'`
+
+    const query = 'waiting time surcharge per hour after free hours rate card'
+    const asked = await hybridSearch(ctx, actor, query, { topK: 20 })
+    const found = asked.chunks.find((chunk) => chunk.documentId === lapsed!.id)
+    const currentOnly = await hybridSearch(ctx, actor, query, { topK: 20, currentOnly: true })
+
+    // Superseding something derives the end date of what it replaced, without anybody typing
+    // it. The 2024 agreement was already out of default retrieval because its version is
+    // superseded; what is new is that its *term* is now stated rather than implied.
+    const [closed] = await ctx.sql<{ to: string | null }[]>`
+      SELECT effective_to::text AS "to" FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND title LIKE '%Master Services Agreement (2024)%'`
+
+    const health = await knowledgeHealth(ctx)
+
+    // A term set by hand takes the passages with it.
+    const [policy] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND doc_type = 'policy'
+        AND current_version_id IS NOT NULL AND effective_to IS NULL
+      ORDER BY created_at LIMIT 1`
+    await setEffectiveDates(ctx, actor, { documentId: policy!.id, effectiveTo: '2030-12-31' })
+    const [chunk] = await ctx.sql<{ to: string | null }[]>`
+      SELECT effective_to::text AS "to" FROM document_chunks WHERE document_id = ${policy!.id} LIMIT 1`
+
+    // Put the demo back.
+    await ctx.sql`
+      UPDATE documents SET effective_to = NULL WHERE organization_id = ${ctx.organizationId} AND id = ${policy!.id}`
+    await ctx.sql`
+      DELETE FROM ingestion_jobs WHERE organization_id = ${ctx.organizationId} AND document_id = ${policy!.id}
+        AND reason LIKE 'Term changed%'`
+    await ctx.sql`
+      DELETE FROM activities WHERE organization_id = ${ctx.organizationId} AND entity_id = ${policy!.id}
+        AND summary LIKE '%in force until%'`
+
+    return { lapsed: lapsed!, found, currentOnly, closed: closed!, health, chunkTerm: chunk!.to }
+  })
+
+  ok('A fixed-term agreement that ran out is marked expired rather than treated as current',
+    term.lapsed.expired && term.lapsed.to === '2025-12-31', term.lapsed.to ?? 'still open')
+  ok('It is still findable — “what did the old one say” is a real question',
+    term.found !== undefined)
+  ok('And it says when it stopped, so it cannot be quoted as current',
+    term.found?.expiredOn === '2025-12-31', term.found?.expiredOn ?? 'no expiry reported')
+  ok('A caller that wants only what is in force gets only that',
+    !term.currentOnly.chunks.some((chunk) => chunk.documentId === term.lapsed.id))
+  ok('Superseding an agreement states the end date of the one it replaced, without typing it',
+    term.closed.to === '2024-12-31', term.closed.to ?? 'still open')
+  ok('Setting a term takes every passage with it, by trigger rather than by a caller',
+    term.chunkTerm === '2030-12-31', term.chunkTerm ?? 'unchanged')
+  ok('And the library can say what has run out, which nothing could answer',
+    term.health.terms.expired > 0, `${term.health.terms.expired} out of term`)
+
   const workflow = await withTenant(session, async (ctx) => getWorkflow(ctx, await loadActor(ctx), workflowId))
   console.log(
     process.exitCode === 1
@@ -2591,7 +2661,8 @@ try {
         'than for ever, and can be put back into memory by a person; and nobody is chased on a \n' +
         'day they do not work — not at a weekend, and not on Christmas Day; and what the model \n' +
         'was asked, what it answered and what that cost is on the record, counted once; and work \n' +
-        'that comes back does, one occurrence at a time, without anybody retyping it.\n',
+        'that comes back does, one occurrence at a time, without anybody retyping it; and a \n' +
+        'contract whose term has ended stops being quoted as current while staying findable.\n',
   )
 } catch (error) {
   console.error(error)

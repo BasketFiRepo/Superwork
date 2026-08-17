@@ -1121,7 +1121,13 @@ function buildBlocks(
     blocks.push({
       zone: 'knowledge',
       trust: 'org_data',
-      label: `${chunk.documentTitle}${chunk.headingPath ? ` › ${chunk.headingPath}` : ''}`,
+      // The expiry goes in the label, which is product-authored, rather than into the text —
+      // retrieved content is never edited on its way to the model. Down-ranking makes an
+      // expired passage unlikely to arrive; saying so is what stops it being quoted as
+      // current when it does (ADR 0042).
+      label:
+        `${chunk.documentTitle}${chunk.headingPath ? ` › ${chunk.headingPath}` : ''}` +
+        (chunk.expiredOn ? ` (EXPIRED ${chunk.expiredOn} — not current; say so if you cite it)` : ''),
       text: chunk.content,
       sourceId: chunk.documentId,
     })

@@ -1367,6 +1367,39 @@ try {
   ok('A schedule it cannot honour is refused by name, not stored', refused)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/recurring-tasks.png`, fullPage: true })
 
+  // ---- A document whose term has ended -------------------------------------
+  // `effective_to` was written by nothing, so a fixed-term document that simply ran out —
+  // nothing supersedes it — went on being retrieved and cited as current.
+  await page.goto(`${BASE}/knowledge`)
+  await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
+  const terms = await page.locator('[data-testid="knowledge-terms"]').innerText()
+  ok('The library says what has run out of term',
+    /out of term/i.test(terms) && /no longer quoted as current/i.test(terms), terms.replace(/\n/g, ' ').slice(0, 80))
+
+  await page.locator('[data-testid="document-row"] a', { hasText: 'Rate Card 2025' }).first().click()
+  await page.waitForSelector('[data-testid="document-term"]', { timeout: 15_000 })
+  const termPanel = await page.locator('[data-testid="document-term"]').innerText()
+  ok('An expired document says when it stopped applying',
+    /stopped applying on 2025-12-31/i.test(termPanel), termPanel.replace(/\n/g, ' ').slice(0, 90))
+  ok('And that it is still searchable rather than deleted',
+    /still searchable and still citable/i.test(termPanel))
+  ok('It says the term reaches the passages without a re-index',
+    /Nothing needs\s+re-indexing/i.test(termPanel))
+
+  await page.locator('[data-testid="term-edit"]').click()
+  await page.waitForSelector('[data-testid="term-editor"]', { timeout: 15_000 })
+  await page.fill('#term-to', '2027-12-31')
+  await page.locator('[data-testid="term-confirm"]').click()
+  const reopened = await page
+    .waitForFunction(
+      () => /Until 2027-12-31/i.test(document.querySelector('[data-testid="document-term"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A term can be extended, and the panel says the new one', reopened)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-term.png`, fullPage: true })
+
   // ---- Deleting a document, and everything derived from it ----------------
   // This is destructive on purpose: it deletes a *seeded* document to exercise the real
   // cascade. The check therefore expects a fresh demo — CI bootstraps the database before

@@ -168,6 +168,9 @@ export async function ground(
       content: c.content,
       score: c.rerankScore,
       isSuperseded: c.isSuperseded,
+      // Carried through to the prompt: a passage whose term has ended must not be quoted as
+      // current, and the only way the model can know is if it is told (ADR 0042).
+      expiredOn: c.expiredOn,
     })),
     noAnswer: search.noAnswer,
     memories: recalled.map((memory) => ({
