@@ -40,6 +40,17 @@ const SCHEDULE_MS = Number(process.env['WORKER_SCHEDULE_MS'] ?? 60_000)
 // less often lets data outlive its window by up to that interval, which is a promise broken
 // by a scheduling choice.
 const RETENTION_MS = Number(process.env['WORKER_RETENTION_MS'] ?? 24 * 60 * 60_000)
+/**
+ * How long this process should live, for hosts that give it a slice rather than a machine.
+ *
+ * Zero — the default, and what a resident deployment wants — means until it is signalled.
+ * A positive value makes the worker finish the pass it is on and stop, which is what a
+ * scheduled invocation needs: the loop below already does one of every job on its first
+ * pass, because each interval is measured from zero. Every job is therefore reached whether
+ * this runs for a minute every five or forever, and the only thing that changes is how long
+ * queued work waits.
+ */
+const MAX_RUNTIME_MS = Number(process.env['WORKER_MAX_RUNTIME_MS'] ?? 0)
 
 let stopping = false
 process.on('SIGINT', () => { stopping = true })
@@ -121,9 +132,11 @@ async function dispatchEmail(
 }
 
 async function main(): Promise<void> {
+  const startedAt = Date.now()
   console.log(
     `Superwork worker started · outbox every ${POLL_MS}ms · schedules every ${SCHEDULE_MS}ms · ` +
-      `retention every ${Math.round(RETENTION_MS / 3_600_000)}h`,
+      `retention every ${Math.round(RETENTION_MS / 3_600_000)}h · ` +
+      (MAX_RUNTIME_MS > 0 ? `stopping after ${Math.round(MAX_RUNTIME_MS / 1000)}s` : 'until signalled'),
   )
   let lastBriefingRun = 0
   let lastDigestRun = 0
@@ -306,6 +319,13 @@ async function main(): Promise<void> {
     // Free the in-memory event buffers of runs nobody is watching.
     for (const runId of finishedRunIds) evict(runId)
     finishedRunIds.clear()
+
+    // Checked after the pass, never before it, so the shortest possible lifetime is still
+    // a whole pass rather than none.
+    if (MAX_RUNTIME_MS > 0 && Date.now() - startedAt >= MAX_RUNTIME_MS) {
+      console.log(`Reached WORKER_MAX_RUNTIME_MS (${MAX_RUNTIME_MS}ms); stopping after this pass.`)
+      break
+    }
 
     await new Promise((resolve) => setTimeout(resolve, POLL_MS))
   }

@@ -186,10 +186,37 @@ body.
 
 ## The worker
 
-`apps/worker` drives the outbox, workflow schedules and watchers. It is a long-lived
-process and a serverless host will not run it. Until it runs somewhere, with the same
-environment, the interface works fully but queued email never dispatches and scheduled
-workflows never fire.
+`apps/worker` dispatches the outbox, indexes what is queued, runs due watchers and workflow
+schedules, generates briefings and digests, delivers the nudge ladder and applies retention.
+It is a long-lived process and a serverless host will not run it. Until it runs somewhere,
+with the same environment, the interface works fully but queued email never dispatches and
+scheduled workflows never fire — and nothing on any screen says so, which is the part that
+makes it worth deciding rather than deferring.
+
+**Resident** is what it was written for: `pnpm worker` on any host that keeps a process
+alive — Railway, Fly, a small VM — with the same environment the web deployment has. It
+polls every five seconds and schedules fire on the minute.
+
+**Scheduled** is the fallback where no such host exists. `.github/workflows/worker.yml`
+wakes every five minutes, works for a minute and stops. It needs the same repository
+secrets as the provisioning workflow and runs on the same free minutes a public repository
+already has.
+
+`WORKER_MAX_RUNTIME_MS` is what separates the two. Unset — the default, and what a resident
+deployment wants — the worker runs until it is signalled. Set, it finishes the pass it is on
+and exits. Every interval in the loop is measured from zero, so a fresh process does one of
+every job on its first pass; the jobs reached are the same either way, and the only thing
+that changes is how long queued work waits.
+
+That wait is the cost, and it is worth stating plainly: on the schedule, an email sits in
+the outbox for up to five minutes past its recall window, and GitHub delays scheduled runs
+when it is busy, so the real figure is sometimes worse. GitHub also disables scheduled
+workflows in a repository with no activity for sixty days. Neither is a reason to avoid it
+for a demonstration; both are reasons not to run an operation on it.
+
+The scheduled worker keeps every capability in `mock` unless a repository *variable* says
+otherwise, which is deliberate: this is the one part of the system that acts outward on its
+own, and the default has to be the one that cannot email a real customer by accident.
 
 ## When it does not work
 

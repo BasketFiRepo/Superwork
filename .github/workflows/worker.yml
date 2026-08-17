@@ -1,0 +1,84 @@
+name: Worker
+
+# The background worker, on a schedule, for a deployment whose host will not keep a
+# process alive.
+#
+# `apps/worker` dispatches the outbox, indexes what is queued, runs due watchers and
+# workflow schedules, generates briefings and digests, delivers the nudge ladder and
+# applies retention. A serverless web host runs none of it, so a deployment on one has a
+# working interface above a set of jobs that never happen — email that stays queued,
+# schedules that never fire, and no indication that either is the case.
+#
+# This is a compromise and worth naming as one. The worker is written to poll every five
+# seconds; here it wakes every five minutes, works for a minute, and stops. Queued work
+# therefore waits up to five minutes, and GitHub delays scheduled runs when it is busy, so
+# the real figure is sometimes worse. For a demonstration that is fine. An operation that
+# depends on a nudge arriving at the hour wants a host that keeps the process resident —
+# `docs/deployment.md` covers moving it.
+
+on:
+  schedule:
+    # Every five minutes: the finest granularity GitHub offers, and the same order as the
+    # schedule sweep's own cadence, so a due schedule is at most one tick late.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+# One at a time. A minute of work every five cannot overlap on its own, but a delayed run
+# can land on top of a current one, and two workers claiming the same outbox batch is not
+# a thing to leave to chance.
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: One sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write the environment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+          DATABASE_APP_URL: ${{ secrets.DATABASE_APP_URL }}
+          DATABASE_AUTH_URL: ${{ secrets.DATABASE_AUTH_URL }}
+        run: |
+          set -euo pipefail
+          : "${DATABASE_URL:?The DATABASE_URL repository secret is not set}"
+          {
+            printf 'NODE_ENV=production\n'
+            printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
+            [ -n "${DATABASE_ADMIN_URL:-}" ] && printf 'DATABASE_ADMIN_URL=%s\n' "$DATABASE_ADMIN_URL"
+            [ -n "${DATABASE_APP_URL:-}" ] && printf 'DATABASE_APP_URL=%s\n' "$DATABASE_APP_URL"
+            [ -n "${DATABASE_AUTH_URL:-}" ] && printf 'DATABASE_AUTH_URL=%s\n' "$DATABASE_AUTH_URL"
+            # The worker signs nothing and reads no cookie; the schema requires this to be
+            # set explicitly in production, so a throwaway satisfies it honestly.
+            printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
+            # Every capability stays simulated unless a deployment says otherwise. This job
+            # is the one thing in the system that acts outward on its own, so the default
+            # here has to be the one that cannot email a real customer by accident.
+            printf 'AI_MODE=%s\n' "${{ vars.AI_MODE || 'mock' }}"
+            printf 'EMAIL_MODE=%s\n' "${{ vars.EMAIL_MODE || 'mock' }}"
+            printf 'CALENDAR_MODE=%s\n' "${{ vars.CALENDAR_MODE || 'mock' }}"
+            printf 'STORAGE_MODE=%s\n' "${{ vars.STORAGE_MODE || 'mock' }}"
+            printf 'BILLING_MODE=%s\n' "${{ vars.BILLING_MODE || 'mock' }}"
+          } > .env
+
+      - name: Sweep
+        env:
+          # A minute of work, then stop — comfortably inside the five between wake-ups, so
+          # a sweep cannot still be running when the next one is due.
+          WORKER_MAX_RUNTIME_MS: '60000'
+        run: pnpm worker
