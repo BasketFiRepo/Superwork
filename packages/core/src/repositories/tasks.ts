@@ -6,6 +6,7 @@ import { link } from '../links.js'
 import { startOfDay } from '../time.js'
 import { notifyUnblocked, unfinishedPrerequisites } from './task-dependencies.js'
 import { isMaterialChange, notifyWatchers, watchedTaskIds } from './task-watchers.js'
+import { rollForwardRecurrence } from './task-recurrence.js'
 
 export interface TaskView {
   id: string
@@ -29,6 +30,8 @@ export interface TaskView {
   createdByActorType: string
   createdByAgentRunId: string | null
   aiConfidence: number | null
+  /** Set while this occurrence is the open one in a repeating series (ADR 0041). */
+  recurrenceRule: string | null
   /** Unfinished prerequisites. Non-zero means this cannot be completed yet. */
   blockedByCount: number
   /** Tasks waiting on this one. Non-zero means finishing it frees somebody. */
@@ -47,7 +50,7 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
          t.due_at AS "dueAt", t.waiting_on AS "waitingOn", t.blocked_reason AS "blockedReason",
          t.created_by_actor_type AS "createdByActorType",
          t.created_by_agent_run_id AS "createdByAgentRunId",
-         t.ai_confidence AS "aiConfidence",
+         t.ai_confidence AS "aiConfidence", t.recurrence_rule AS "recurrenceRule",
          -- Both served by the two indexes on task_dependencies; the blocking side needed
          -- the one added in 0021, without which this was a sequential scan per row.
          (SELECT count(*)::int FROM task_dependencies d
@@ -358,6 +361,12 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
   // stop. Only those whose last prerequisite this was — see `notifyUnblocked`.
   if (status === 'completed' && before.status !== 'completed') {
     await notifyUnblocked(ctx, actor, after.id, after.title)
+  }
+
+  // Work that comes back: finishing an occurrence is what creates the next one. Cancelling
+  // counts as finishing it — "nothing to file this week" is not "stop filing" (ADR 0041).
+  if (['completed', 'cancelled'].includes(status) && !['completed', 'cancelled'].includes(before.status)) {
+    await rollForwardRecurrence(ctx, actor, after.id)
   }
 
   // Followers hear about the four changes worth interrupting somebody for, and only after

@@ -11,12 +11,14 @@ import {
   shareableRelations,
   taskComments,
   taskDependencies,
+  taskRecurrence,
   taskWatchers,
 } from '@superwork/core'
 import { TaskComments } from '@/components/TaskComments'
 import { TaskDependencies } from '@/components/TaskDependencies'
 import { TaskTeam } from '@/components/TaskTeam'
 import { TaskWatchers } from '@/components/TaskWatchers'
+import { TaskRecurrence } from '@/components/TaskRecurrence'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -30,7 +32,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers, recurrence } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -46,6 +48,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         shares: await listShares(ctx, actor, 'task', id),
         comments: await taskComments(ctx, actor, id),
         watchers: await taskWatchers(ctx, actor, id),
+        recurrence: await taskRecurrence(ctx, actor, id),
         relations: shareableRelations(actor, 'task', id, ctx.organizationId),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
@@ -81,6 +84,11 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                 waiting on {dependencies.blockedBy.filter((e) => !['completed', 'cancelled'].includes(e.taskStatus)).length}
               </span>
             ) : null}
+            {task.recurrenceRule ? (
+              <span className="chip" data-testid="task-repeats-chip">
+                repeats
+              </span>
+            ) : null}
             {dependencies.blocking.length > 0 ? (
               <span className="chip chip-critical" data-testid="task-blocking-chip">
                 blocking {dependencies.blocking.length}
@@ -112,6 +120,28 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
 
         <TaskDependencies taskId={task.id} dependencies={dependencies} candidates={candidates} />
+
+        <TaskRecurrence
+          taskId={task.id}
+          hasDueDate={task.dueAt !== null}
+          recurrence={
+            recurrence
+              ? {
+                  rule: recurrence.rule,
+                  description: recurrence.description,
+                  nextDueAt: recurrence.nextDueAt ? recurrence.nextDueAt.toISOString() : null,
+                  nextIsNonWorking: recurrence.nextIsNonWorking,
+                  timezone: recurrence.timezone,
+                  history: recurrence.history.map((row) => ({
+                    id: row.id,
+                    title: row.title,
+                    status: row.status,
+                    dueAt: row.dueAt ? row.dueAt.toISOString() : null,
+                  })),
+                }
+              : null
+          }
+        />
 
         <TaskWatchers
           taskId={task.id}
