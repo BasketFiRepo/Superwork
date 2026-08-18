@@ -1,7 +1,14 @@
 import type { Sensitivity, TenantContext } from '@superwork/db'
-import { can, grantedScope, sharedObjectIds, type Actor } from '@superwork/auth'
+import {
+  can,
+  grantedScope,
+  readCeiling,
+  SENSITIVITY_RANK,
+  sharedObjectIds,
+  type Actor,
+} from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
-import { writeAudit } from '../audit.js'
+import { writeActivity, writeAudit } from '../audit.js'
 import { calendarDate, startOfDay } from '../time.js'
 
 /**
@@ -134,6 +141,224 @@ export interface MilestoneView {
   overdueCount: number
   /** Open work due after the milestone itself, which is the milestone saying it will slip. */
   dueAfterCount: number
+}
+
+/**
+ * Starting a project (§17, ADR 0049).
+ *
+ * `projects` has been read on every screen since Phase 1 and written by the seed alone, so a
+ * company using Superwork could work on exactly the projects a demo fixture happened to
+ * invent — and the milestones, health scores and rosters built on top of them all described
+ * somebody else's work.
+ *
+ * The create is asked about the project that is *about to exist*: its owner and its department
+ * are on the resource, so a `project:create:department` grant means what the role table says
+ * it means (ADR 0045).
+ */
+export async function createProject(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    name: string
+    description?: string | null
+    ownerUserId?: string | null
+    departmentId?: string | null
+    companyId?: string | null
+    sensitivity?: Sensitivity
+    startsOn?: string | null
+    targetDate?: string | null
+    status?: 'planning' | 'active'
+  },
+): Promise<ProjectView> {
+  const ownerId = input.ownerUserId ?? actor.userId
+  const decision = can(actor, 'project:create', {
+    type: 'project',
+    organizationId: ctx.organizationId,
+    departmentId: input.departmentId ?? null,
+    ownerId,
+    createdBy: actor.userId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const name = input.name.trim()
+  if (name.length < 2) throw new ValidationError('A project needs a name somebody would recognise.')
+
+  const sensitivity = input.sensitivity ?? 'internal'
+  const ceiling = readCeiling(actor)
+  if (SENSITIVITY_RANK[sensitivity] > SENSITIVITY_RANK[ceiling]) {
+    throw new ValidationError(
+      `You can read up to ${ceiling}, so a ${sensitivity} project would be one you could not open ` +
+        'the moment you made it. Somebody who can read at that level can start it.',
+    )
+  }
+
+  // A name is how people refer to a project in a sentence — "put it on the Halden one" — so
+  // two open ones cannot share it. The index says the same thing to any writer; this says it
+  // to the person, and names what already holds the name.
+  const [clash] = await ctx.sql<{ name: string; status: string }[]>`
+    SELECT name, status FROM projects
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND status NOT IN ('completed', 'cancelled')
+      AND lower(btrim(name)) = lower(${name})`
+  if (clash) {
+    throw new ValidationError(
+      `“${clash.name}” is already open. Two live projects with the same name make "put it on the ` +
+        '“ ” one" mean nothing — finish or rename the other first.',
+    )
+  }
+
+  if (input.startsOn && input.targetDate && input.targetDate < input.startsOn) {
+    throw new ValidationError(
+      `A target of ${input.targetDate} is before the start of ${input.startsOn}. The health score ` +
+        'reads both dates, so it has to be a date somebody could actually work towards.',
+    )
+  }
+
+  if (input.ownerUserId) {
+    const [member] = await ctx.sql<{ id: string }[]>`
+      SELECT user_id AS id FROM memberships
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${input.ownerUserId}
+        AND deleted_at IS NULL AND status = 'active'`
+    if (!member) throw new ValidationError('That person is not an active member of this organization.')
+  }
+  if (input.departmentId) {
+    const [department] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM departments
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.departmentId} AND deleted_at IS NULL`
+    if (!department) throw new NotFoundError()
+  }
+  if (input.companyId) {
+    const [company] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.companyId} AND deleted_at IS NULL`
+    if (!company) throw new NotFoundError()
+  }
+
+  const [row] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO projects (
+      organization_id, name, description, status, sensitivity, owner_id, department_id,
+      company_id, starts_on, target_date, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${name}, ${input.description?.trim() || null},
+      ${input.status ?? 'planning'}, ${sensitivity}, ${ownerId}, ${input.departmentId ?? null},
+      ${input.companyId ?? null}, ${input.startsOn ?? null}, ${input.targetDate ?? null}, ${ctx.userId}
+    ) RETURNING id`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'project.created',
+    entityType: 'project',
+    entityId: row!.id,
+    after: {
+      name,
+      status: input.status ?? 'planning',
+      sensitivity,
+      ownerId,
+      departmentId: input.departmentId ?? null,
+      companyId: input.companyId ?? null,
+      startsOn: input.startsOn ?? null,
+      targetDate: input.targetDate ?? null,
+    },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'started',
+    entityType: 'project',
+    entityId: row!.id,
+    entityLabel: name,
+    summary:
+      `${actor.displayName} started “${name}”` +
+      (input.targetDate ? `, targeting ${input.targetDate}` : '') +
+      '. The owner is on its roster from the first moment, by trigger.',
+  })
+
+  // The roster gains its owner by trigger (ADR 0032), so the read below already shows them.
+  return getProject(ctx, actor, row!.id)
+}
+
+/**
+ * Putting a project on hold, finishing it, or abandoning it.
+ *
+ * Creating something with no way to close it is half a feature: a list that can only grow is
+ * how a project screen stops being read at all. The rule mirrors a milestone's (ADR 0048) —
+ * `completed` is a claim about the work and is refused while the work is open, `cancelled` is
+ * a decision about the project and is always available.
+ */
+export async function setProjectStatus(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    projectId: string
+    status: 'planning' | 'active' | 'on_hold' | 'completed' | 'cancelled'
+    reason: string
+  },
+): Promise<ProjectView> {
+  const project = await getProject(ctx, actor, input.projectId)
+  guardProjectWrite(ctx, actor, project)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why. A project that changed state for no stated reason is one nobody can review.')
+  }
+
+  if (input.status === 'completed') {
+    const [open] = await ctx.sql<{ tasks: number; milestones: number; title: string | null }[]>`
+      SELECT
+        (SELECT count(*)::int FROM tasks t
+          WHERE t.organization_id = ${ctx.organizationId} AND t.project_id = ${input.projectId}
+            AND t.deleted_at IS NULL AND t.status NOT IN ('completed', 'cancelled')) AS tasks,
+        (SELECT count(*)::int FROM milestones m
+          WHERE m.organization_id = ${ctx.organizationId} AND m.project_id = ${input.projectId}
+            AND m.deleted_at IS NULL AND m.status = 'open') AS milestones,
+        (SELECT title FROM tasks t
+          WHERE t.organization_id = ${ctx.organizationId} AND t.project_id = ${input.projectId}
+            AND t.deleted_at IS NULL AND t.status NOT IN ('completed', 'cancelled')
+          ORDER BY t.created_at LIMIT 1) AS title`
+    if ((open?.tasks ?? 0) > 0 || (open?.milestones ?? 0) > 0) {
+      const parts: string[] = []
+      if (open!.tasks > 0) {
+        parts.push(`${open!.tasks} ${open!.tasks === 1 ? 'task' : 'tasks'} open, starting with “${open!.title}”`)
+      }
+      if (open!.milestones > 0) {
+        parts.push(`${open!.milestones} ${open!.milestones === 1 ? 'milestone' : 'milestones'} not reached`)
+      }
+      throw new ValidationError(
+        `“${project.name}” still has ${parts.join(' and ')}. Finish them, or mark the project ` +
+          'cancelled instead — a project called complete with work still open is a status nobody ' +
+          'can trust afterwards.',
+      )
+    }
+  }
+
+  await ctx.sql`
+    UPDATE projects SET status = ${input.status}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.projectId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'project.status_changed',
+    entityType: 'project',
+    entityId: input.projectId,
+    before: { status: project.status },
+    after: { status: input.status, reason },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'restated',
+    entityType: 'project',
+    entityId: input.projectId,
+    entityLabel: project.name,
+    summary: `“${project.name}” is ${input.status.replace(/_/g, ' ')}, set by ${actor.displayName}. ${reason}`,
+  })
+
+  return getProject(ctx, actor, input.projectId)
 }
 
 /** The milestones of one project. Gated by the caller having read the project itself. */

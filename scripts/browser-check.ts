@@ -1029,6 +1029,61 @@ try {
     .then(() => true, () => false)
   ok('Putting somebody on it lands, with the reason on the row', rosterLanded)
 
+  // Starting one: `projects` was read on every screen and written by the seed alone, so this
+  // list was somebody else's work (ADR 0049).
+  const projectPageUrl = page.url()
+  await page.goto(`${BASE}/projects`)
+  await page.waitForSelector('[data-testid="start-project"]', { timeout: 15_000 })
+  await page.locator('[data-testid="start-project"]').click()
+  await page.waitForSelector('[data-testid="start-project-panel"]', { timeout: 15_000 })
+  ok('Nothing is started without something to call it',
+    await page.locator('[data-testid="start-project-confirm"]').isDisabled())
+  await page.fill('#project-name', 'Browser check — Immingham refit')
+  await page.fill('#project-starts', '2026-09-01')
+  await page.fill('#project-target', '2026-08-01')
+  expectingRefusal = true
+  await page.locator('[data-testid="start-project-confirm"]').click()
+  const badDates = await page
+    .waitForFunction(
+      () => /before the start/i.test(
+        document.querySelector('[data-testid="start-project-panel"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  expectingRefusal = false
+  ok('A target before the start is refused with both dates on the screen', badDates)
+
+  await page.fill('#project-target', '2026-12-01')
+  await page.locator('[data-testid="start-project-confirm"]').click()
+  await page.waitForURL(/\/projects\/[0-9a-f-]{36}/, { timeout: 20_000 })
+  await page.waitForSelector('[data-testid="project-status"]', { timeout: 15_000 })
+  const startedText = await page.locator('main').innerText()
+  ok('A project can be started, and opens on its own page',
+    /Browser check — Immingham refit/i.test(startedText))
+  ok('It says where it has got to, and that completing needs the work finished',
+    /Where it has got to/i.test(startedText) && /cannot be called completed/i.test(startedText))
+
+  await page.locator('[data-testid="project-status-edit"]').click()
+  await page.waitForSelector('[data-testid="project-status-editor"]', { timeout: 15_000 })
+  ok('A status change with no reason cannot be saved',
+    await page.locator('[data-testid="project-status-confirm"]').isDisabled())
+  await page.selectOption('#project-status-select', 'cancelled')
+  await page.fill('#project-status-reason', 'Started by the browser check, and finished with.')
+  await page.locator('[data-testid="project-status-confirm"]').click()
+  const cancelled = await page
+    .waitForFunction(
+      () => /cancelled/i.test(document.querySelector('[data-testid="project-status"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And it can be closed again, which is what puts the demo back', cancelled)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/project-status.png`, fullPage: true })
+  await page.goto(projectPageUrl)
+  await page.waitForSelector('[data-testid="milestones"]', { timeout: 15_000 })
+
   // Milestones: on every project page since Phase 1, and until now written by the seed alone.
   const milestoneText = await page.locator('[data-testid="milestones"]').innerText()
   ok('A project can gain a milestone at last',

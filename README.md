@@ -1180,6 +1180,34 @@ that cannot be missed is not a promise.
 
 **Work; any task on a project.** See ADR 0048.
 
+## A project somebody started
+
+`projects` has been read on every screen since Phase 1 — the list, the health score, the
+classification a task inherits, the roster that lends a read of it, the milestones filed against
+it — and written by the seed alone. There was no `createProject` anywhere in the product, so a
+company using Superwork could work on exactly the projects a demo fixture happened to invent.
+
+- **The create is asked about the project that is about to exist** — its owner and department on
+  the resource, so a `project:create:department` grant means what the role table says.
+- **Nobody starts a project they could not then open.** A `restricted` project started by
+  somebody who reads up to `confidential` would vanish from their own list the moment they made
+  it. The form disables the levels above their reach rather than letting them find out after.
+- **Two open projects do not share a name**, by partial unique index — people refer to a project
+  by name in a sentence. The name is free again once the project holding it closes.
+- **A target date is not before the start**, by CHECK constraint: the health score reads both.
+- **Creating something with no way to close it is half a feature**, so the status change ships in
+  the same increment. `completed` is refused while tasks or milestones are open, naming what is
+  left; `cancelled` is always available, because abandoning a project with open work is what
+  abandoning one looks like.
+- **The owner joins the roster by trigger**, not by this repository remembering to write a second
+  row.
+
+Deliberately not built: `projects.key` (the column exists, nothing reads it, and populating it
+would invent a convention with no consumer), renaming and re-owning, and starting a project
+through the agent.
+
+**Work; the projects screen.** See ADR 0049.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1675,6 +1703,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0046](docs/adr/0046-a-throttle-somebody-set.md) | A throttle somebody set |
 | [0047](docs/adr/0047-when-you-are-written-to.md) | When you are written to |
 | [0048](docs/adr/0048-the-work-a-milestone-is-made-of.md) | The work a milestone is made of |
+| [0049](docs/adr/0049-a-project-somebody-started.md) | A project somebody started |
 
 ## Configuration
 
