@@ -1151,6 +1151,35 @@ the fixtures says so out loud.
 
 **Your own record; anybody's.** See ADR 0047.
 
+## The work a milestone is made of
+
+`tasks.milestone_id` has existed since migration 0002 and nothing ever wrote it. Milestones
+became real in ADR 0036 — a project can add one, reschedule it, reach it — but each was a date
+with a name on it and nothing underneath: "what is this waiting on" had no answer, and "are we
+going to make it" had none beyond looking at the calendar. The column that answers both was even
+copied faithfully into every occurrence of a repeating task, always as a null.
+
+- **Filing work against a milestone goes through `updateTask`**, so it passes the same
+  permission check, version check, activity line and audit record as every other change to that
+  task. The screen gets a panel; the write does not get its own path.
+- **A task's milestone belongs to its own project, enforced by a trigger.** A composite foreign
+  key was the obvious alternative and is worse: its `ON DELETE SET NULL` would null the project
+  too, so deleting a milestone would unfile its tasks from the project.
+- **A milestone cannot be called reached while work on it is open.** The refusal names what is
+  left and the three ways out. Cancelling *is* allowed with work on it — abandoning a milestone
+  with unfinished work is what abandoning one looks like.
+- **New work cannot be filed against a closed milestone**, and a repeating task carries its
+  milestone forward only while the milestone is open — both are the same rule: a closed
+  milestone said something true when it closed, and adding to it edits that retroactively.
+- **The counts are SQL's** — done, open, late, and *due after the milestone itself*. That last
+  one is the milestone saying it will slip, in advance, without anybody scoring it.
+
+Deliberately not built: filing at creation (so the agent's `create_task` cannot file work
+against a date on its own), and a milestone that rolls its date up from its work — a promise
+that cannot be missed is not a promise.
+
+**Work; any task on a project.** See ADR 0048.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1645,6 +1674,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0045](docs/adr/0045-a-grant-nobody-could-satisfy.md) | A grant nobody could satisfy |
 | [0046](docs/adr/0046-a-throttle-somebody-set.md) | A throttle somebody set |
 | [0047](docs/adr/0047-when-you-are-written-to.md) | When you are written to |
+| [0048](docs/adr/0048-the-work-a-milestone-is-made-of.md) | The work a milestone is made of |
 
 ## Configuration
 

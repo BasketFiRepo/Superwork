@@ -20,6 +20,10 @@ export interface MilestoneRow {
   dueOn: string | null
   status: string
   late: boolean
+  taskCount: number
+  openCount: number
+  overdueCount: number
+  dueAfterCount: number
 }
 
 export function Milestones({
@@ -83,6 +87,7 @@ export function Milestones({
               <thead>
                 <tr>
                   <th>Milestone</th>
+                  <th style={{ width: 200 }}>Work on it</th>
                   <th style={{ width: 140 }}>Due</th>
                   <th style={{ width: 120 }}>Status</th>
                   {canEdit ? <th style={{ width: 220 }} /> : null}
@@ -92,6 +97,25 @@ export function Milestones({
                 {milestones.map((milestone) => (
                   <tr key={milestone.id} data-testid="milestone-row">
                     <td>{milestone.name}</td>
+                    <td className="small secondary" data-testid="milestone-work">
+                      {milestone.taskCount === 0 ? (
+                        <span className="muted">Nothing filed against it yet</span>
+                      ) : (
+                        <span className="row-tight wrap">
+                          <span>
+                            {milestone.taskCount - milestone.openCount} of {milestone.taskCount} done
+                          </span>
+                          {milestone.overdueCount > 0 ? (
+                            <span className="chip chip-critical">{milestone.overdueCount} late</span>
+                          ) : null}
+                          {milestone.dueAfterCount > 0 ? (
+                            <span className="chip chip-attention" data-testid="milestone-due-after">
+                              {milestone.dueAfterCount} due after it
+                            </span>
+                          ) : null}
+                        </span>
+                      )}
+                    </td>
                     <td className="small secondary">
                       {canEdit ? (
                         <input
