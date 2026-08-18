@@ -1,6 +1,8 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
-import { computeProjectHealth, listProjects, PermissionError } from '@superwork/core'
+import { computeProjectHealth, listCompanies, listDepartments, listProjects, PermissionError } from '@superwork/core'
+import { can, readCeiling } from '@superwork/auth'
+import { StartProject } from '@/components/StartProject'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +11,35 @@ async function loadProjects(session: Awaited<ReturnType<typeof requireSession>>)
     const rows = await listProjects(ctx, actor)
     return Promise.all(rows.map(async (row) => ({ ...row, health: await computeProjectHealth(ctx, row.id) })))
   })
+}
+
+/**
+ * What starting one needs: the decision, and the lists the form offers (ADR 0049). Asked with
+ * the owner the row would have, which is what makes a scoped `project:create` grant mean
+ * anything (ADR 0045).
+ */
+async function loadStarting(session: Awaited<ReturnType<typeof requireSession>>) {
+  return withActor(session, async (ctx, actor) => ({
+    start: can(actor, 'project:create', {
+      type: 'project',
+      organizationId: ctx.organizationId,
+      ownerId: actor.userId,
+      createdBy: actor.userId,
+      riskTier: 'low',
+    }),
+    ceiling: readCeiling(actor),
+    people: await ctx.sql<{ id: string; name: string }[]>`
+      SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+        AND m.user_id <> ${actor.userId}
+      ORDER BY u.name`,
+    departments: await listDepartments(ctx, actor)
+      .then((rows) => rows.map((row) => ({ id: row.id, name: row.path ?? row.name })))
+      .catch(() => []),
+    companies: await listCompanies(ctx, actor, {})
+      .then((rows) => rows.map((row) => ({ id: row.id, name: row.name })))
+      .catch(() => []),
+  }))
 }
 
 /** Projects (§17). Primary action: unblock. Health is computed, never invented. */
@@ -30,6 +61,7 @@ export default async function ProjectsPage() {
     if (!(error instanceof PermissionError)) throw error
     denied = error.message
   }
+  const starting = await loadStarting(session)
 
   return (
     <div className="stack stack-8">
@@ -41,6 +73,15 @@ export default async function ProjectsPage() {
           velocity. Hover a score to see the arithmetic — the model only explains it.
         </p>
       </header>
+
+      <StartProject
+        canStart={starting.start.allow}
+        reason={starting.start.reason}
+        ceiling={starting.ceiling}
+        people={starting.people}
+        departments={starting.departments}
+        companies={starting.companies}
+      />
 
       {denied ? (
         <div className="panel">

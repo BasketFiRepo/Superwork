@@ -15,6 +15,7 @@ import {
   shareableRelations,
 } from '@superwork/core'
 import { Milestones } from '@/components/Milestones'
+import { ProjectStatus } from '@/components/ProjectStatus'
 import { ProjectRoster } from '@/components/ProjectRoster'
 import { ShareObject } from '@/components/ShareObject'
 
@@ -54,7 +55,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             departmentId: loaded.departmentId,
             teamIds: loaded.teamId ? [loaded.teamId] : [],
             riskTier: 'low',
-          }).allow,
+          }),
           relations: shareableRelations(actor, 'project', id, ctx.organizationId),
           teams: await listTeams(ctx, actor).catch(() => []),
           // Two lists, because they answer different questions. Sharing with yourself is
@@ -104,7 +105,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
         <ProjectRoster
           projectId={project.id}
-          canEdit={canStaff}
+          canEdit={canStaff.allow}
           people={everybody}
           members={roster.map((member) => ({
             userId: member.userId,
@@ -165,9 +166,16 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           </div>
         </section>
 
+        <ProjectStatus
+          projectId={project.id}
+          status={project.status}
+          canEdit={canStaff.allow}
+          denialReason={canStaff.reason}
+        />
+
         <Milestones
           projectId={project.id}
-          canEdit={canStaff}
+          canEdit={canStaff.allow}
           milestones={milestones.map((milestone) => ({
             id: milestone.id,
             name: milestone.name,

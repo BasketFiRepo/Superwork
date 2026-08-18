@@ -126,6 +126,8 @@ import {
   sweepFollowUps,
   agentGrants,
   addMilestone,
+  createProject,
+  setProjectStatus,
   setMilestoneStatus,
   archiveDepartment,
   archiveSpace,
@@ -2968,6 +2970,94 @@ try {
     written.rung.toISOString().slice(0, 16).replace('T', ' '))
 
 
+  // ---- A project somebody started ------------------------------------------
+  console.log('\nA project the company started itself…\n')
+
+  const started = await (async () => {
+    return withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const [department] = await ctx.sql<{ id: string }[]>`
+        SELECT id FROM departments
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY path LIMIT 1`
+
+      const project = await createProject(ctx, actor, {
+        name: 'loop project — Immingham reefer refit',
+        description: 'Started by the acceptance loop.',
+        departmentId: department!.id,
+        startsOn: calendarDate(ctx.timezone),
+        targetDate: new Date(Date.now() + 45 * 86_400_000).toISOString().slice(0, 10),
+        status: 'active',
+      })
+
+      // The owner is on its roster from the first moment, by trigger (ADR 0032).
+      const [onRoster] = await ctx.sql<{ role: string }[]>`
+        SELECT role FROM project_members
+        WHERE organization_id = ${ctx.organizationId} AND project_id = ${project.id}
+          AND user_id = ${actor.userId} AND deleted_at IS NULL`
+
+      const sameName = await createProject(ctx, actor, {
+        name: 'loop project — Immingham reefer refit',
+      }).then(() => 'allowed', (error: Error) => error.message)
+
+      const backwards = await createProject(ctx, actor, {
+        name: 'loop project — backwards',
+        startsOn: new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10),
+        targetDate: calendarDate(ctx.timezone),
+      }).then(() => 'allowed', (error: Error) => error.message)
+
+      // A project that cannot be closed is half a feature, so it can be: completing is
+      // refused while its work is open, cancelling never is.
+      const task = await createTask(ctx, actor, {
+        title: 'loop — quote the refit',
+        projectId: project.id,
+      })
+      const early = await setProjectStatus(ctx, actor, {
+        projectId: project.id,
+        status: 'completed',
+        reason: 'Trying to close it with work still open.',
+      }).then(() => 'allowed', (error: Error) => error.message)
+
+      await updateTask(ctx, actor, { id: task.id, status: 'completed' })
+      const closed = await setProjectStatus(ctx, actor, {
+        projectId: project.id,
+        status: 'completed',
+        reason: 'The refit is quoted and the work is finished.',
+      })
+
+      // And the name is free again the moment it closes, which is what the index says.
+      const reused = await createProject(ctx, actor, {
+        name: 'loop project — Immingham reefer refit',
+      })
+
+      // Put the demo back.
+      await ctx.sql`DELETE FROM activities WHERE organization_id = ${ctx.organizationId}
+        AND entity_id IN (${project.id}, ${reused.id}, ${task.id})`
+      await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task.id}`
+      await ctx.sql`DELETE FROM project_members WHERE organization_id = ${ctx.organizationId}
+        AND project_id IN (${project.id}, ${reused.id})`
+      await ctx.sql`DELETE FROM projects WHERE organization_id = ${ctx.organizationId}
+        AND id IN (${project.id}, ${reused.id})`
+
+      return { project, onRoster, sameName, backwards, early, closed, reused }
+    })
+  })()
+
+  ok('A project can be started in the product at last, not only by the seed',
+    started.project.status === 'active' && started.project.ownerName !== null,
+    `“${started.project.name}”, owned by ${started.project.ownerName}`)
+  ok('Its owner is on its roster from the first moment, by trigger',
+    started.onRoster?.role === 'owner')
+  ok('A second open project cannot take the same name',
+    /already open/i.test(started.sameName), started.sameName.slice(0, 60))
+  ok('A target before the start is refused with both dates',
+    /before the start/i.test(started.backwards), started.backwards.slice(0, 60))
+  ok('“Completed” is refused while its work is still open',
+    /1 task open/i.test(started.early), started.early.slice(0, 70))
+  ok('And once the work is finished it can be closed', started.closed.status === 'completed')
+  ok('The name it was using is free again the moment it closes',
+    started.reused.name === started.project.name)
+
+
   // ---- Adding to company memory, as an ordinary member ----------------------
   console.log('\nA member adds a document…\n')
 
@@ -3241,7 +3331,9 @@ try {
         'for, with nothing dropped and the guarantees not among the things that can be \n' +
         'switched off; and a milestone is no longer a date with nothing underneath it — the \n' +
         'work it is waiting on is filed against it, it says what is late and what lands after \n' +
-        'the date itself, and it cannot be called reached while that work is still open.\n',
+        'the date itself, and it cannot be called reached while that work is still open; and \n' +
+        'a company can start a project of its own at last, and close it again, instead of \n' +
+        'working on whatever a demo fixture invented.\n',
   )
 } catch (error) {
   console.error(error)
