@@ -126,6 +126,7 @@ import {
   sweepFollowUps,
   agentGrants,
   addMilestone,
+  setMilestoneStatus,
   archiveDepartment,
   archiveSpace,
   computeProjectHealth,
@@ -2393,6 +2394,98 @@ try {
   })
 
 
+  // ---- The work a milestone is made of -------------------------------------
+  console.log('\nA milestone with work underneath it…\n')
+
+  const underneath = await (async () => {
+    const projectId = milestoned.projectId
+    return withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      // Its own milestone: the one the beat above added has already been put back.
+      const added = await addMilestone(ctx, actor, {
+        projectId,
+        name: 'loop milestone — the work underneath',
+        dueOn: new Date(Date.now() + 10 * 86_400_000),
+      })
+      const target = added.find((row) => row.name === 'loop milestone — the work underneath')!
+      const before = target
+
+      // Two pieces of the project's own work, one of them due after the milestone is.
+      const onTime = await createTask(ctx, actor, {
+        title: 'loop — fit the probes',
+        projectId,
+        dueAt: new Date(Date.now() - 5 * 86_400_000),
+      })
+      const late = await createTask(ctx, actor, {
+        title: 'loop — sign the pilot off',
+        projectId,
+        dueAt: new Date(Date.now() + 20 * 86_400_000),
+      })
+      await updateTask(ctx, actor, { id: onTime.id, milestoneId: target.id })
+      await updateTask(ctx, actor, { id: late.id, milestoneId: target.id })
+      const withWork = (await projectMilestones(ctx, projectId)).find((row) => row.id === target.id)!
+
+      // A milestone of another project is refused, because a milestone is one project's promise.
+      const [otherProject] = await ctx.sql<{ id: string }[]>`
+        SELECT id FROM projects
+        WHERE organization_id = ${ctx.organizationId} AND id <> ${projectId} AND deleted_at IS NULL
+        LIMIT 1`
+      const elsewhere = await addMilestone(ctx, actor, {
+        projectId: otherProject!.id,
+        name: 'loop milestone — somewhere else',
+        dueOn: new Date(Date.now() + 30 * 86_400_000),
+      })
+      const crossed = await updateTask(ctx, actor, {
+        id: onTime.id,
+        milestoneId: elsewhere.find((row) => row.name === 'loop milestone — somewhere else')!.id,
+      }).then(() => 'allowed', (error: Error) => error.message)
+
+      // And "reached" is refused while its work is open.
+      const early = await setMilestoneStatus(ctx, actor, {
+        projectId,
+        milestoneId: target.id,
+        status: 'done',
+      }).then(() => 'allowed', (error: Error) => error.message)
+
+      await updateTask(ctx, actor, { id: onTime.id, status: 'completed' })
+      await updateTask(ctx, actor, { id: late.id, status: 'completed' })
+      const reached = await setMilestoneStatus(ctx, actor, {
+        projectId,
+        milestoneId: target.id,
+        status: 'done',
+      })
+
+      // Put the demo back: both tasks, both milestones.
+      for (const task of [onTime, late]) {
+        await ctx.sql`DELETE FROM activities WHERE organization_id = ${ctx.organizationId} AND entity_id = ${task.id}`
+        await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task.id}`
+      }
+      await removeMilestone(ctx, actor, { projectId, milestoneId: target.id })
+      await removeMilestone(ctx, actor, {
+        projectId: otherProject!.id,
+        milestoneId: elsewhere.find((row) => row.name === 'loop milestone — somewhere else')!.id,
+      })
+
+      return { before, withWork, crossed, early, reached: reached.find((row) => row.id === target.id)! }
+    })
+  })()
+
+  ok('A milestone starts as a date with nothing underneath it',
+    underneath.before.taskCount === 0)
+  ok('Work can be filed against it, and it counts what it is waiting on',
+    underneath.withWork.taskCount === 2 && underneath.withWork.openCount === 2,
+    `${underneath.withWork.taskCount} filed`)
+  ok('It says which of its work is already late, and which lands after the date itself',
+    underneath.withWork.overdueCount === 1 && underneath.withWork.dueAfterCount === 1,
+    `${underneath.withWork.overdueCount} late, ${underneath.withWork.dueAfterCount} due after it`)
+  ok('A milestone of another project is refused, because it is one project’s promise',
+    /belongs to another project/i.test(underneath.crossed), underneath.crossed.slice(0, 60))
+  ok('“Reached” is refused while its work is still open',
+    /still has 2 tasks open/i.test(underneath.early), underneath.early.slice(0, 70))
+  ok('And once the work is finished, reaching it is what the word then means',
+    underneath.reached.status === 'done' && underneath.reached.openCount === 0)
+
+
   // ---- Indexing that survives the request that asked for it ----------------
   console.log('\nA document that will not index…\n')
 
@@ -3146,7 +3239,9 @@ try {
         'chose, with a ceiling that cannot be taken off; and a person can finally say when \n' +
         'they are not to be interrupted and what each kind of thing is worth interrupting \n' +
         'for, with nothing dropped and the guarantees not among the things that can be \n' +
-        'switched off.\n',
+        'switched off; and a milestone is no longer a date with nothing underneath it — the \n' +
+        'work it is waiting on is filed against it, it says what is late and what lands after \n' +
+        'the date itself, and it cannot be called reached while that work is still open.\n',
   )
 } catch (error) {
   console.error(error)

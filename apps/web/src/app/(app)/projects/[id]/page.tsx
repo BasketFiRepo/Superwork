@@ -174,6 +174,10 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             dueOn: milestone.dueOn ? new Date(milestone.dueOn).toISOString() : null,
             status: milestone.status,
             late: milestone.late,
+            taskCount: milestone.taskCount,
+            openCount: milestone.openCount,
+            overdueCount: milestone.overdueCount,
+            dueAfterCount: milestone.dueAfterCount,
           }))}
         />
 

@@ -32,6 +32,11 @@ export interface TaskView {
   aiConfidence: number | null
   /** Set while this occurrence is the open one in a repeating series (ADR 0041). */
   recurrenceRule: string | null
+  /** The milestone of its project this work is filed against (ADR 0048). */
+  milestoneId: string | null
+  milestoneName: string | null
+  milestoneDueOn: string | null
+  milestoneStatus: string | null
   /** Unfinished prerequisites. Non-zero means this cannot be completed yet. */
   blockedByCount: number
   /** Tasks waiting on this one. Non-zero means finishing it frees somebody. */
@@ -51,6 +56,8 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
          t.created_by_actor_type AS "createdByActorType",
          t.created_by_agent_run_id AS "createdByAgentRunId",
          t.ai_confidence AS "aiConfidence", t.recurrence_rule AS "recurrenceRule",
+         t.milestone_id AS "milestoneId", ms.name AS "milestoneName",
+         ms.due_on::text AS "milestoneDueOn", ms.status AS "milestoneStatus",
          -- Both served by the two indexes on task_dependencies; the blocking side needed
          -- the one added in 0021, without which this was a sequential scan per row.
          (SELECT count(*)::int FROM task_dependencies d
@@ -64,6 +71,7 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
   FROM tasks t
   LEFT JOIN users u ON u.id = t.assignee_id
   LEFT JOIN projects p ON p.id = t.project_id
+  LEFT JOIN milestones ms ON ms.id = t.milestone_id AND ms.deleted_at IS NULL
   LEFT JOIN companies c ON c.id = p.company_id`
 
 export interface ListTasksFilter {
@@ -297,6 +305,12 @@ export interface UpdateTaskInput {
   waitingOn?: string | null
   blockedReason?: string | null
   teamId?: string | null
+  /**
+   * The milestone of this task's own project, or null to take it off one (ADR 0048).
+   * Through `updateTask` rather than a control of its own, so filing work against a date goes
+   * past the same version check, the same watchers and the same audit as every other change.
+   */
+  milestoneId?: string | null
   agentRunId?: string | null
 }
 
@@ -339,9 +353,38 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
     }
   }
 
+  // Filing work against a date the project is judged by. The database refuses a milestone
+  // belonging to another project whatever writes the row; this is where somebody is told why,
+  // and told what they can do instead.
+  const milestoneId = input.milestoneId !== undefined ? input.milestoneId : before.milestoneId
+  if (milestoneId && milestoneId !== before.milestoneId) {
+    if (!before.projectId) {
+      throw new ValidationError(
+        'A milestone belongs to a project, and this task is not on one. Put it on the project first.',
+      )
+    }
+    const [milestone] = await ctx.sql<{ name: string; status: string; projectId: string }[]>`
+      SELECT name, status, project_id AS "projectId" FROM milestones
+      WHERE organization_id = ${ctx.organizationId} AND id = ${milestoneId} AND deleted_at IS NULL`
+    if (!milestone || milestone.projectId !== before.projectId) {
+      throw new ValidationError(
+        'That milestone belongs to another project. A milestone is a promise one project makes, ' +
+          'so only its own work can be filed against it.',
+      )
+    }
+    if (milestone.status !== 'open') {
+      throw new ValidationError(
+        `“${milestone.name}” is ${milestone.status === 'done' ? 'already reached' : 'cancelled'}. ` +
+          'Reopen it or choose another — filing new work against a milestone that is finished ' +
+          'changes what it said when it was finished.',
+      )
+    }
+  }
+
   const sql = ctx.sql
   await sql`
     UPDATE tasks SET
+      milestone_id = ${milestoneId},
       title = ${input.title ?? before.title},
       description = ${input.description !== undefined ? input.description : before.description},
       status = ${status},
@@ -460,5 +503,8 @@ function describeChange(before: TaskView, after: TaskView): string {
   if (before.priority !== after.priority) parts.push(`priority ${before.priority} → ${after.priority}`)
   if (before.dueAt?.getTime() !== after.dueAt?.getTime()) parts.push('due date changed')
   if (before.title !== after.title) parts.push('renamed')
+  if (before.milestoneId !== after.milestoneId) {
+    parts.push(after.milestoneName ? `filed against “${after.milestoneName}”` : 'taken off its milestone')
+  }
   return parts.length ? `Updated "${after.title}": ${parts.join(', ')}` : `Updated "${after.title}"`
 }

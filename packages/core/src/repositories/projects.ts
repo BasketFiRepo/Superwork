@@ -127,6 +127,13 @@ export interface MilestoneView {
   dueOn: Date | null
   status: string
   late: boolean
+  /** The work filed against it — the answer `tasks.milestone_id` existed for (ADR 0048). */
+  taskCount: number
+  openCount: number
+  /** Open work already past its own due date. */
+  overdueCount: number
+  /** Open work due after the milestone itself, which is the milestone saying it will slip. */
+  dueAfterCount: number
 }
 
 /** The milestones of one project. Gated by the caller having read the project itself. */
@@ -136,10 +143,30 @@ export async function projectMilestones(ctx: TenantContext, projectId: string): 
   // organization's timezone cast in a UTC session, which lands on *yesterday* anywhere ahead
   // of UTC: a milestone due yesterday read as not yet late.
   const today = calendarDate(ctx.timezone)
+  // The counts are SQL's, not the caller's: a milestone that says "3 of 7, one already late"
+  // is reading the work, and a number assembled in TypeScript from a second query would be a
+  // number two screens could disagree about (§9.1).
   return ctx.sql<MilestoneView[]>`
     SELECT m.id, m.name, m.due_on AS "dueOn", m.status,
-           (m.status <> 'done' AND m.due_on < ${today}::date) AS late
+           (m.status <> 'done' AND m.due_on < ${today}::date) AS late,
+           coalesce(work.total, 0)::int AS "taskCount",
+           coalesce(work.open, 0)::int AS "openCount",
+           coalesce(work.overdue, 0)::int AS "overdueCount",
+           coalesce(work.due_after, 0)::int AS "dueAfterCount"
     FROM milestones m
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS total,
+             count(*) FILTER (WHERE t.status NOT IN ('completed', 'cancelled')) AS open,
+             count(*) FILTER (
+               WHERE t.status NOT IN ('completed', 'cancelled') AND t.due_at < ${today}::date
+             ) AS overdue,
+             count(*) FILTER (
+               WHERE t.status NOT IN ('completed', 'cancelled')
+                 AND m.due_on IS NOT NULL AND t.due_at::date > m.due_on
+             ) AS due_after
+      FROM tasks t
+      WHERE t.organization_id = m.organization_id AND t.milestone_id = m.id AND t.deleted_at IS NULL
+    ) work ON true
     WHERE m.organization_id = ${ctx.organizationId} AND m.project_id = ${projectId}
       AND m.deleted_at IS NULL
     ORDER BY m.due_on NULLS LAST, m.name`
@@ -227,6 +254,25 @@ export async function setMilestoneStatus(
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.milestoneId}
       AND project_id = ${input.projectId} AND deleted_at IS NULL`
   if (!before) throw new NotFoundError()
+
+  // Reaching a milestone with work still open on it would make "done" mean "somebody pressed
+  // the button". The two honest ways out are both offered by name: finish the work, or take
+  // it off the milestone — and "not doing it" is still available with work attached, because
+  // abandoning a milestone with unfinished work is exactly what abandoning one looks like.
+  // The same shape as refusing to disband a team that still has work scoped to it (ADR 0036).
+  if (input.status === 'done') {
+    const [open] = await ctx.sql<{ count: number; title: string | null }[]>`
+      SELECT count(*)::int AS count, min(title) AS title FROM tasks
+      WHERE organization_id = ${ctx.organizationId} AND milestone_id = ${input.milestoneId}
+        AND deleted_at IS NULL AND status NOT IN ('completed', 'cancelled')`
+    if ((open?.count ?? 0) > 0) {
+      throw new ValidationError(
+        `“${before.name}” still has ${open!.count} ${open!.count === 1 ? 'task' : 'tasks'} open on it, ` +
+          `starting with “${open!.title}”. Finish them, cancel them, or take them off this milestone — ` +
+          'a milestone marked reached with work still on it is a date nobody can trust afterwards.',
+      )
+    }
+  }
 
   await ctx.sql`
     UPDATE milestones

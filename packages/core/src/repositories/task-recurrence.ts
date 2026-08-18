@@ -311,7 +311,18 @@ export async function rollForwardRecurrence(
       status, priority, assignee_id, due_at, estimate_minutes, sensitivity,
       recurrence_rule, recurrence_series_id, created_by_actor_type, is_demo, created_by
     )
-    SELECT organization_id, project_id, milestone_id, department_id, team_id, title, description,
+    SELECT organization_id, project_id,
+           -- The milestone comes forward only while it is still open. A milestone marked
+           -- reached said something true about the work that was on it; giving it a fresh
+           -- open occurrence afterwards would quietly make that statement false (ADR 0048).
+           CASE
+             WHEN EXISTS (
+               SELECT 1 FROM milestones m
+               WHERE m.id = tasks.milestone_id AND m.deleted_at IS NULL AND m.status = 'open'
+             ) THEN milestone_id
+             ELSE NULL
+           END,
+           department_id, team_id, title, description,
            'todo', priority, assignee_id, ${nextDueAt}, estimate_minutes, sensitivity,
            recurrence_rule, recurrence_series_id, 'system', is_demo, ${ctx.userId}
     FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task.id}

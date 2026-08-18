@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import {
   getTask,
+  projectMilestones,
   listShares,
   listTasks,
   listTeams,
@@ -17,6 +18,7 @@ import {
 import { TaskComments } from '@/components/TaskComments'
 import { TaskDependencies } from '@/components/TaskDependencies'
 import { TaskTeam } from '@/components/TaskTeam'
+import { TaskMilestone } from '@/components/TaskMilestone'
 import { TaskWatchers } from '@/components/TaskWatchers'
 import { TaskRecurrence } from '@/components/TaskRecurrence'
 import { ShareObject } from '@/components/ShareObject'
@@ -32,7 +34,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers, recurrence } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers, recurrence, milestones } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -49,6 +51,9 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         comments: await taskComments(ctx, actor, id),
         watchers: await taskWatchers(ctx, actor, id),
         recurrence: await taskRecurrence(ctx, actor, id),
+        // The dates its own project is judged against. Only the project's own, because that
+        // is the only kind of milestone a task may be filed against (ADR 0048).
+        milestones: loaded.projectId ? await projectMilestones(ctx, loaded.projectId) : [],
         relations: shareableRelations(actor, 'task', id, ctx.organizationId),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
@@ -115,6 +120,21 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
+
+        <TaskMilestone
+          taskId={task.id}
+          projectName={task.projectName}
+          milestoneId={task.milestoneId}
+          dueAt={task.dueAt ? task.dueAt.toISOString() : null}
+          milestones={milestones
+            .filter((milestone) => milestone.status === 'open' || milestone.id === task.milestoneId)
+            .map((milestone) => ({
+              id: milestone.id,
+              name: milestone.name,
+              dueOn: milestone.dueOn ? milestone.dueOn.toISOString() : null,
+              status: milestone.status,
+            }))}
         />
 
         {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}

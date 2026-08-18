@@ -1051,6 +1051,52 @@ try {
     )
     .then(() => true, () => false)
   ok('It lands on the project with its date', milestoneLanded)
+  ok('And says nothing is filed against it yet, rather than showing a bare date',
+    /Nothing filed against it yet/i.test(
+      await page.locator('[data-testid="milestones"]').innerText(),
+    ))
+
+  // The work underneath it (ADR 0048). `tasks.milestone_id` was written by nothing, so a
+  // milestone was a date with a name and no way to say what it was waiting on.
+  const projectUrl = page.url()
+  await page.goto(`${BASE}/tasks?filter=all`)
+  await page.waitForSelector('[data-testid="task-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="task-row"] a').first().click()
+  await page.waitForSelector('[data-testid="task-milestone"]', { timeout: 15_000 })
+  const milestonePanel = await page.locator('[data-testid="task-milestone"]').innerText()
+  ok('A task says which milestone it is part of, or that it is on none',
+    /Part of/i.test(milestonePanel))
+
+  const options = page.locator('#task-milestone-select option')
+  if ((await options.count()) > 1) {
+    const value = (await options.nth(1).getAttribute('value')) ?? ''
+    await page.selectOption('#task-milestone-select', value)
+    const filed = await page
+      .waitForFunction(
+        () => !/No milestone/i.test(document.querySelector('[data-testid="task-milestone"]')?.textContent ?? ''),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('Work can be filed against one of its project’s milestones', filed)
+
+    // Put the demo back, through the same control.
+    await page.selectOption('#task-milestone-select', '')
+    await page
+      .waitForFunction(
+        () => /No milestone/i.test(document.querySelector('[data-testid="task-milestone"]')?.textContent ?? ''),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .catch(() => undefined)
+  } else {
+    ok('Work can be filed against one of its project’s milestones',
+      /not on one/i.test(milestonePanel),
+      'this task is on no project, and the panel says so')
+  }
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/task-milestone.png`, fullPage: true })
+  await page.goto(projectUrl)
+  await page.waitForSelector('[data-testid="milestones"]', { timeout: 15_000 })
 
   const projectShareText = await page.locator('[data-testid="share-object"]').innerText()
   ok('Sharing a project says it reaches the work inside it',
