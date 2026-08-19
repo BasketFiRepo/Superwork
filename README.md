@@ -1233,6 +1233,35 @@ reaches an outside system ran on a migration default of 5 and 200.
 
 **Settings → Custom tools.** See ADR 0050.
 
+## Days this office is closed
+
+ADR 0039 gave a department a working calendar and the ladder started obeying it. What it gave
+was a choice between four names — `none`, `weekends`, `uk-england-wales`, `us-federal` — whose
+dates are computed from published national rules, and **no way to name a single day**. That gap
+is the week between Christmas and New Year that most of the country takes and no statute names;
+the Monday the depot moves; and every public holiday of every country that is not England,
+Wales or the United States, which is to say most of them. A French department could pick
+`weekends` and was then chased through the fourteenth of July.
+
+- **A closure only ever adds a day nobody works.** There is deliberately no way to say "we do
+  work that bank holiday". What makes it safe for an unset calendar to mean the old behaviour is
+  that nothing here can make the product chase harder — so a closure on a Saturday changes
+  nothing, and the reason still reads "a Saturday".
+- **They accumulate down the tree; the calendar above them overrides.** The opposite rule, and
+  right for both: one calendar governs a person, while a company shutdown and a depot's own
+  closed day are both true at once. Nothing travels upwards.
+- **One answer, threaded through the four functions that already existed**, so scheduling, the
+  delivery gate, recurrence and the screen that says when you will not be chased cannot
+  disagree. Counted outside the calendar's own branch, so a department with no calendar at all
+  can still declare a day it is shut.
+- **Reopening keeps the row**, with who did it and why. It does not ask for a password the way
+  raising a limit does: it restores ordinary behaviour rather than granting reach, and a day
+  typed against the wrong date should be correctable without proving yourself.
+- **A day already gone is refused**, because a reminder is only ever held on the day it would
+  have arrived. Today is allowed — it has hours left in which to hold something.
+
+**Settings → Teams; Reminders.** See ADR 0051.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the

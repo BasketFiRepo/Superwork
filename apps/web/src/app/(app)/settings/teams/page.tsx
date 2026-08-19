@@ -78,6 +78,7 @@ export default async function TeamsPage() {
             holidayCalendar: department.holidayCalendar,
             effectiveHolidayCalendar: department.effectiveHolidayCalendar,
             holidayCalendarFrom: department.holidayCalendarFrom,
+            closures: department.closures,
             counts: department.counts,
           }))}
         />

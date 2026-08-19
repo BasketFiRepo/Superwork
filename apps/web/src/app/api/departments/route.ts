@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
-import { archiveDepartment, createDepartment, listDepartments, updateDepartment } from '@superwork/core'
+import {
+  archiveDepartment,
+  closeDepartmentDay,
+  createDepartment,
+  listDepartments,
+  reopenDepartmentDay,
+  updateDepartment,
+} from '@superwork/core'
 import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
@@ -23,6 +30,20 @@ const Body = z.discriminatedUnion('action', [
     holidayCalendar: z.string().max(40).nullish(),
   }),
   z.object({ action: z.literal('archive'), id: z.string().uuid(), reason: z.string().min(4).max(500) }),
+  // A day this department does not work that no calendar knows about (ADR 0051). The
+  // repository is the authority on whether the date is a real one and still ahead; this only
+  // refuses the obviously wrong shape.
+  z.object({
+    action: z.literal('close'),
+    id: z.string().uuid(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'A closed day is a date, as YYYY-MM-DD.'),
+    label: z.string().min(3).max(80),
+  }),
+  z.object({
+    action: z.literal('reopen'),
+    closureId: z.string().uuid(),
+    reason: z.string().min(4).max(500),
+  }),
 ])
 
 export async function GET() {
@@ -63,6 +84,16 @@ export async function POST(request: Request) {
           parentId: body.parentId,
           ...(body.holidayCalendar === undefined ? {} : { holidayCalendar: body.holidayCalendar }),
         })
+      }
+      if (body.action === 'close') {
+        return closeDepartmentDay(ctx, actor, {
+          departmentId: body.id,
+          date: body.date,
+          label: body.label,
+        })
+      }
+      if (body.action === 'reopen') {
+        return reopenDepartmentDay(ctx, actor, { closureId: body.closureId, reason: body.reason })
       }
       return archiveDepartment(ctx, actor, { id: body.id, reason: body.reason })
     })

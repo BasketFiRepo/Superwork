@@ -150,6 +150,21 @@ export interface Holiday {
   name: string
 }
 
+/**
+ * Days a *particular* department does not work, on top of whatever its calendar says
+ * (ADR 0051): date → what the day is. A national calendar cannot know about the week
+ * between Christmas and New Year, the Monday the depot moves, or the public holidays of
+ * any country outside the four names above.
+ *
+ * It is threaded through these functions rather than folded into `holidaysIn`, because
+ * `holidaysIn` is a pure function of a calendar name and a year and is cached as one. These
+ * days belong to one department in one organization and are read from the database.
+ *
+ * They only ever *add* a non-working day. There is no way to express "we do work that bank
+ * holiday" — the guarantee this whole area makes is that it may only quieten the product.
+ */
+export type ClosedDays = ReadonlyMap<string, string>
+
 function ukEnglandWales(year: number): Holiday[] {
   const taken = new Set<string>()
   const add = (date: string, name: string): Holiday => {
@@ -212,20 +227,38 @@ export function holidaysIn(id: CalendarId, year: number): Map<string, string> {
   return map
 }
 
-/** Why a date is not worked, or null when it is. */
-export function nonWorkingReason(id: string | null | undefined, date: string): string | null {
+/**
+ * Why a date is not worked, or null when it is.
+ *
+ * The calendar answers first and a department's own closed days answer second, so a closure
+ * declared on a Saturday still reads as "a Saturday" — the day was already not worked, and
+ * the closure did not make it so.
+ */
+export function nonWorkingReason(
+  id: string | null | undefined,
+  date: string,
+  closed?: ClosedDays,
+): string | null {
   const calendar = calendarInfo(id)
-  if (!calendar) return null
-  const weekday = isoWeekday(date)
-  if (calendar.restDays.includes(weekday)) {
-    return weekday === 6 ? 'a Saturday' : 'a Sunday'
+  if (calendar) {
+    const weekday = isoWeekday(date)
+    if (calendar.restDays.includes(weekday)) {
+      return weekday === 6 ? 'a Saturday' : 'a Sunday'
+    }
+    const named = holidaysIn(calendar.id, Number(date.slice(0, 4))).get(date)
+    if (named) return named
   }
-  const named = holidaysIn(calendar.id, Number(date.slice(0, 4))).get(date)
-  return named ?? null
+  // Deliberately outside the `if`: a department that has set no calendar at all can still
+  // declare a day it is shut, and that day has to count.
+  return closed?.get(date) ?? null
 }
 
-export function isWorkingDay(id: string | null | undefined, date: string): boolean {
-  return nonWorkingReason(id, date) === null
+export function isWorkingDay(
+  id: string | null | undefined,
+  date: string,
+  closed?: ClosedDays,
+): boolean {
+  return nonWorkingReason(id, date, closed) === null
 }
 
 /**
@@ -235,10 +268,15 @@ export function isWorkingDay(id: string | null | undefined, date: string): boole
  * otherwise spin, and a reminder pushed more than a fortnight is one nobody wants anyway —
  * at that point the honest answer is to deliver it rather than to defer for ever.
  */
-export function nextWorkingDay(id: string | null | undefined, date: string, limit = 14): string {
+export function nextWorkingDay(
+  id: string | null | undefined,
+  date: string,
+  closed?: ClosedDays,
+  limit = 14,
+): string {
   let candidate = date
   for (let i = 0; i < limit; i++) {
-    if (isWorkingDay(id, candidate)) return candidate
+    if (isWorkingDay(id, candidate, closed)) return candidate
     candidate = addCalendarDays(candidate, 1)
   }
   return candidate
@@ -250,15 +288,17 @@ export function upcomingNonWorkingDays(
   from: string,
   count = 5,
   horizonDays = 120,
+  closed?: ClosedDays,
 ): Holiday[] {
   const calendar = calendarInfo(id)
-  if (!calendar) return []
+  if (!calendar && !closed?.size) return []
+  const restDays = calendar?.restDays ?? []
   const found: Holiday[] = []
   let candidate = from
   for (let i = 0; i < horizonDays && found.length < count; i++) {
-    const reason = nonWorkingReason(calendar.id, candidate)
+    const reason = nonWorkingReason(id, candidate, closed)
     // Weekends are not news. What somebody wants to see is the days that are not obvious.
-    if (reason && !calendar.restDays.includes(isoWeekday(candidate))) {
+    if (reason && !restDays.includes(isoWeekday(candidate))) {
       found.push({ date: candidate, name: reason })
     }
     candidate = addCalendarDays(candidate, 1)
