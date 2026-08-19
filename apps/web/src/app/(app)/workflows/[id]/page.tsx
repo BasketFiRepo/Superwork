@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { checkCapacity, describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { can } from '@superwork/auth'
+import { formatDuration } from '@/lib/format'
 import { requireSession, withActor } from '@/lib/session'
 import { ScheduleEditor } from '@/components/ScheduleEditor'
 import { WorkflowControls } from '@/components/WorkflowControls'
@@ -164,11 +165,24 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
                   </span>
                 </div>
                 {run.error ? <p className="small" style={{ margin: 0 }}>{run.error}</p> : null}
-                <ul className="stack stack-2 small secondary" style={{ margin: 0, paddingLeft: 'var(--s-7)' }}>
+                <ul className="stack stack-2 small secondary" style={{ margin: 0, paddingLeft: 'var(--s-7)' }} data-testid="run-steps">
                   {run.steps.map((step, index) => (
-                    <li key={index}>
+                    <li key={index} data-testid="run-step">
                       <strong>{step.label}</strong> — {step.status}
                       {step.detail ? ` · ${step.detail}` : ''}
+                      {step.durationMs === null ? null : (
+                        <span className="mono muted" style={{ fontSize: 11 }}>
+                          {' · '}
+                          {formatDuration(step.durationMs)}
+                        </span>
+                      )}
+                      {/* The step that stopped says so where the reader already is, rather than
+                          leaving them to infer it from the run's own sentence (ADR 0053). */}
+                      {step.error ? (
+                        <div className="small" style={{ color: 'var(--critical)' }} data-testid="run-step-error">
+                          {step.error}
+                        </div>
+                      ) : null}
                     </li>
                   ))}
                 </ul>

@@ -14,6 +14,7 @@ import {
   recordSimulation,
   runAggregate,
   startOfDay,
+  SuperworkError,
   writeAudit,
   type AggregateQuery,
   type PreviewLine,
@@ -78,7 +79,10 @@ export interface WorkflowStepOutcome {
   nodeType: string
   label: string
   status: 'succeeded' | 'failed' | 'skipped' | 'awaiting_approval'
+  /** What the step did. Written for every step. */
   detail: string
+  /** Why it failed. Present only on a failure (ADR 0053). */
+  error?: string
 }
 
 export interface WorkflowRunOutcome {
@@ -98,6 +102,11 @@ export interface WorkflowRunOutcome {
   approvalId: string | null
   note: string
   error: string | null
+  /**
+   * Which kind of failure it was, taken from the error rather than guessed (§5.6, ADR 0053).
+   * Null while the run has not failed.
+   */
+  failureClass: string | null
 }
 
 /** Nothing fans out further than this in one run, however many rows the query returned. */
@@ -198,6 +207,7 @@ async function execute(
     approvalId: null,
     note: '',
     error: null,
+    failureClass: null,
   }
 
   if (!prepared.capacity.allow) {
@@ -220,6 +230,10 @@ async function execute(
   } catch (error) {
     outcome.status = 'failed'
     outcome.error = error instanceof Error ? error.message : String(error)
+    // The class travels with the error (§5.6) and this used to throw it away, stamping every
+    // workflow failure as 'tool' — a value that is not even in the taxonomy. A refusal, a
+    // missing row and a budget are three different things to the person reading the run.
+    outcome.failureClass = error instanceof SuperworkError ? error.failureClass : 'internal'
   }
   // Described here rather than inside the walk: a graph that stops at an approval returns
   // early, and a run with no sentence to show for it is a run nobody can read.
@@ -241,7 +255,9 @@ async function execute(
         outcome.status === 'awaiting_approval' ? 'awaiting_approval' : outcome.status,
         {
           summary: outcome.note,
-          ...(outcome.error ? { failureClass: 'tool', failureDetail: outcome.error } : {}),
+          ...(outcome.error
+            ? { failureClass: outcome.failureClass ?? 'internal', failureDetail: outcome.error }
+            : {}),
         },
       )
     }
@@ -289,6 +305,12 @@ async function walk(
     const node = byId.get(nodeId)
     if (!node) continue
 
+    // Per node, not per walk (ADR 0053). The `try` used to sit around the whole walk, so a
+    // node that threw left no row: the step list on the screen ended at the last thing that
+    // worked, the run said it failed, and nothing said which step was the one. The reason is
+    // written where a reader is already looking, and then re-thrown so the run still fails.
+    const startedAt = Date.now()
+    try {
     switch (node.type) {
       case 'trigger': {
         outcome.occurrences =
@@ -296,6 +318,7 @@ async function walk(
             ? countFirings(graph.trigger.spec, windowFrom, windowTo, session.timezone)
             : 1
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
+          durationMs: Date.now() - startedAt,
           detail:
             graph.trigger.kind === 'schedule'
               ? `${graph.trigger.description} — ${outcome.occurrences} firings in the last ${days(windowFrom, windowTo)} days`
@@ -314,6 +337,7 @@ async function walk(
         items = result.rows.slice(0, ceiling)
         outcome.matched = result.rows.length
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
+          durationMs: Date.now() - startedAt,
           detail: `${result.rows.length} matched. ${result.basis}`,
           output: { total: result.total, basis: result.basis, matched: result.rows.length },
         })
@@ -322,6 +346,7 @@ async function walk(
 
       case 'for_each': {
         await step(session, traceId, outcome, ordinal++, node, items.length ? 'succeeded' : 'skipped', {
+          durationMs: Date.now() - startedAt,
           detail: items.length
             ? `${items.length} to work through${outcome.matched > items.length ? ` — of ${outcome.matched}; the rest are over what this run may do and will be picked up next time` : ''}`
             : 'Nothing matched, so nothing was worked through.',
@@ -331,7 +356,10 @@ async function walk(
 
       case 'action': {
         if (items.length === 0) {
-          await step(session, traceId, outcome, ordinal++, node, 'skipped', { detail: 'Nothing to act on.' })
+          await step(session, traceId, outcome, ordinal++, node, 'skipped', {
+            detail: 'Nothing to act on.',
+            durationMs: Date.now() - startedAt,
+          })
           break
         }
         const planned = items.map((item, index) => plan(node, item, index, workflow))
@@ -340,6 +368,7 @@ async function walk(
         pending.push(...planned)
         outcome.wouldHave.push({ label: node.label, count: planned.length })
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
+          durationMs: Date.now() - startedAt,
           detail: outcome.simulated
             ? `Would have run ${planned.length} × ${node.ref}`
             : `${planned.length} prepared for ${node.ref}`,
@@ -351,6 +380,7 @@ async function walk(
       case 'approval': {
         if (outcome.simulated || pending.length === 0) {
           await step(session, traceId, outcome, ordinal++, node, outcome.simulated ? 'succeeded' : 'skipped', {
+            durationMs: Date.now() - startedAt,
             detail: outcome.simulated
               ? `Would have held ${pending.length} ${pending.length === 1 ? 'change' : 'changes'} for a person to approve.`
               : 'Nothing to approve.',
@@ -361,6 +391,7 @@ async function walk(
         outcome.approvalId = await raiseApproval(session, traceId, workflow, outcome, previews)
         outcome.status = 'awaiting_approval'
         await step(session, traceId, outcome, ordinal++, node, 'awaiting_approval', {
+          durationMs: Date.now() - startedAt,
           detail: `Waiting for a person to approve ${pending.length} ${pending.length === 1 ? 'change' : 'changes'}.`,
           output: { approvalId: outcome.approvalId, pending: pending.map(serialize) },
         })
@@ -370,6 +401,7 @@ async function walk(
       case 'notify': {
         if (outcome.simulated) {
           await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
+            durationMs: Date.now() - startedAt,
             detail: `Would have told ${items.length} ${items.length === 1 ? 'owner' : 'owners'} what happened.`,
             wouldHave: { notified: items.length },
           })
@@ -378,9 +410,18 @@ async function walk(
         const sent = await notifyOwners(session, traceId, workflow, items)
         await step(session, traceId, outcome, ordinal++, node, 'succeeded', {
           detail: `Told ${sent} ${sent === 1 ? 'person' : 'people'} what happened.`,
+          durationMs: Date.now() - startedAt,
         })
         break
       }
+    }
+    } catch (error) {
+      await step(session, traceId, outcome, ordinal++, node, 'failed', {
+        detail: 'It stopped here.',
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - startedAt,
+      })
+      throw error
     }
   }
 
@@ -677,6 +718,7 @@ export async function continueWorkflowAfterApproval(
     approvalId: null,
     note: '',
     error: null,
+    failureClass: null,
   }
 
   await applyActions(session, traceId, outcome, state.pending)
@@ -784,6 +826,14 @@ async function openRun(
   return row!.id
 }
 
+/**
+ * One row per step, written once, in the state it ended in.
+ *
+ * `error` and `duration_ms` were declared on this table and written by nothing (ADR 0053).
+ * `detail` says what the step *did* and is written for every step; `error` says why it failed
+ * and exists only on a failure — the database holds both halves of that as a constraint, so
+ * "it failed and we do not know what happened" cannot be stored by anybody.
+ */
 async function step(
   session: RunSession,
   traceId: string,
@@ -791,19 +841,36 @@ async function step(
   ordinal: number,
   node: WorkflowNode,
   status: WorkflowStepOutcome['status'],
-  extra: { detail: string; output?: Record<string, unknown>; wouldHave?: Record<string, unknown> | null },
+  extra: {
+    detail: string
+    output?: Record<string, unknown>
+    wouldHave?: Record<string, unknown> | null
+    /** Required when `status` is 'failed', and refused otherwise. */
+    error?: string
+    /** How long this node took. Null only where a step is recorded outside the walk. */
+    durationMs?: number
+  },
 ): Promise<void> {
-  outcome.steps.push({ nodeId: node.id, nodeType: node.type, label: node.label, status, detail: extra.detail })
+  const error = status === 'failed' ? (extra.error?.trim() || 'It stopped here, and did not say why.') : null
+  outcome.steps.push({
+    nodeId: node.id,
+    nodeType: node.type,
+    label: node.label,
+    status,
+    detail: extra.detail,
+    ...(error ? { error } : {}),
+  })
   await withTenant({ ...session, traceId }, async (ctx) => {
     await ctx.sql`
       INSERT INTO workflow_step_runs (
-        organization_id, workflow_run_id, node_id, node_type, ordinal, status, input, output, would_have, created_by
+        organization_id, workflow_run_id, node_id, node_type, ordinal, status, input, output,
+        would_have, error, duration_ms, created_by
       ) VALUES (
         ${ctx.organizationId}, ${outcome.runId}, ${node.id}, ${node.type}, ${ordinal}, ${status},
         ${ctx.sql.json(asJson({ label: node.label, ref: node.ref ?? null, detail: extra.detail }))},
         ${extra.output ? ctx.sql.json(asJson(extra.output)) : null},
         ${extra.wouldHave ? ctx.sql.json(asJson(extra.wouldHave)) : null},
-        ${ctx.userId}
+        ${error}, ${extra.durationMs ?? null}, ${ctx.userId}
       )`
   })
 }

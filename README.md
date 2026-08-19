@@ -1293,6 +1293,29 @@ re-derived coverage list separates two failures that look alike and are opposite
 
 **Settings → Organization.** See ADR 0052.
 
+## Why a step stopped
+
+`workflow_step_runs.error` is selected by `listWorkflowRuns` straight into the run detail screen
+and **no code path had ever written it**. That was the smaller half. The larger half: the
+executor's `try` sat around the whole walk rather than each node, so when a node threw, the run was
+marked failed and **no row was written for the node that threw** — a person saw four steps that
+succeeded, a run marked failed, and nothing saying which step was the one.
+
+- **The `try` moves inside the node loop.** The failing node writes its own row with the reason and
+  how long it had been running, then the error is re-thrown so the run fails exactly as before.
+- **A failed step says why, and the database holds both directions.** "It failed and we do not know
+  what happened" cannot be stored; nor can a reason on a step that is fine, which would read as a
+  failure on a screen that shows one.
+- **`detail` and `error` mean different things** — what the step did, and why it stopped. Before
+  this, a failure had neither.
+- **The failure class comes from the error.** Every workflow failure was recorded as `'tool'`, a
+  value not even in the taxonomy, while the error being caught already carried its own class.
+- **`duration_ms` gets a writer**, so a slow run can say which step was slow.
+- **Not built:** the two `cost_cents` columns. Cost is metered per model call in `usage_records`;
+  writing it here as well would be a second place counting the same money.
+
+**Workflows → any automation.** See ADR 0053.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
