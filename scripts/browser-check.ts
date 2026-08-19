@@ -160,6 +160,59 @@ try {
   ok('Every fact carries its source', cited === facts, `${cited}/${facts} cited`)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company.png`, fullPage: true })
 
+  // ---- A customer somebody added (ADR 0056) --------------------------------
+  // Both tables were written by the seed and by nothing else: there was no way to add a customer
+  // to this product. The domain is the field it acts on, so that is what this exercises.
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('[data-testid="add-company"]', { timeout: 15_000 })
+  await page.locator('[data-testid="add-company-open"]').click()
+  await page.waitForSelector('[data-testid="company-editor"]', { timeout: 15_000 })
+  const domainHint = await page.locator('[data-testid="company-editor"]').innerText()
+  ok('The screen says what a domain decides, and that two companies may not share one',
+    /whose customer an incoming message is/i.test(domainHint) && /same domain/i.test(domainHint))
+
+  // A domain another company in the demo already has: refused by name rather than made a coin
+  // toss between the two of them.
+  // A name that is never created, so the domain rule is what refuses on every run rather than
+  // the name rule getting there first on a second one.
+  expectingRefusal = true
+  await page.fill('#company-name', 'Browser Check Domain Probe')
+  await page.fill('#company-domains', 'meridiantextiles.example')
+  await page.locator('[data-testid="company-confirm"]').click()
+  const clash = page.locator('[data-testid="add-company"] [role="alert"]')
+  await clash.waitFor({ timeout: 15_000 }).catch(() => undefined)
+  const clashText = (await clash.count()) ? await clash.innerText() : '(no message shown)'
+  ok('A domain another company already receives mail from is refused, and it says which',
+    /already receives mail from/i.test(clashText), clashText.slice(0, 90))
+  expectingRefusal = false
+
+  // Then a domain nobody has. There is deliberately no way to delete a company from a screen, so
+  // this cannot put the demo back the way the other walks do — instead it accepts either outcome:
+  // added now, or already there from a previous run. A second run must not turn a working check
+  // red over a row the first one left.
+  await page.fill('#company-name', 'Browser Check Cold Chain')
+  await page.fill('#company-domains', 'browsercheck.example')
+  await page.locator('[data-testid="company-confirm"]').click()
+  const addedCompany = await page
+    .locator('[data-testid="company-row"]', { hasText: 'Browser Check Cold Chain' })
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('A company can be added from the screen, and is there on a second run too', addedCompany)
+
+  // Somebody at it, which a member may do and opening an account is not. A repeat here is not a
+  // refusal at all — it goes to the merge queue, which is the point.
+  await page.locator('[data-testid="add-contact-open"]').click()
+  await page.waitForSelector('[data-testid="contact-editor"]', { timeout: 15_000 })
+  await page.fill('#contact-name', 'Browser Check Contact')
+  await page.fill('#contact-email', 'browser.check@browsercheck.example')
+  await page.locator('[data-testid="contact-confirm"]').click()
+  const addedContact = await page
+    .waitForSelector('[data-testid="contact-editor"]', { state: 'detached', timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And somebody at it, without opening a second account for them', addedContact)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/add-company.png`, fullPage: true })
+
   // ---- Briefing -----------------------------------------------------------
   await page.goto(`${BASE}/briefing`)
   // On a freshly seeded org the worker has not run yet, so the empty state offers to
