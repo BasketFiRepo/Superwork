@@ -10,6 +10,8 @@ export interface AppSession {
   organizationName: string
   isDemo: boolean
   timezone: string
+  /** The ISO code money is written in on every screen (ADR 0052). */
+  currency: string
   name: string
   email: string
   flags: FlagSet
@@ -27,8 +29,11 @@ export async function requireSession(): Promise<AppSession> {
   return withTenant(
     { organizationId: identity.organizationId, userId: identity.userId, timezone: identity.timezone },
     async (ctx) => {
-      const [org] = await ctx.sql<{ name: string; is_demo: boolean; agent_kill_switch: boolean; timezone: string }[]>`
-        SELECT name, is_demo, agent_kill_switch, timezone FROM organizations WHERE id = ${ctx.organizationId}`
+      const [org] = await ctx.sql<
+        { name: string; is_demo: boolean; agent_kill_switch: boolean; timezone: string; currency: string }[]
+      >`
+        SELECT name, is_demo, agent_kill_switch, timezone, currency::text AS currency
+        FROM organizations WHERE id = ${ctx.organizationId}`
       const overrides = await ctx.sql<{ flag: string; enabled: boolean; user_id: string | null }[]>`
         SELECT flag, enabled, user_id FROM feature_flag_overrides
         WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
@@ -47,6 +52,9 @@ export async function requireSession(): Promise<AppSession> {
         organizationName: org?.name ?? 'Organization',
         isDemo: org?.is_demo ?? false,
         timezone: identity.timezone || org?.timezone || 'UTC',
+        // How money is written on every screen. It was a column nothing read, so every
+        // organization saw pounds (ADR 0052).
+        currency: org?.currency ?? 'GBP',
         name: identity.name,
         email: identity.email,
         flags: resolveFlags(orgOverrides, userOverrides),

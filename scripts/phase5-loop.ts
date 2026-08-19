@@ -33,7 +33,7 @@ import {
   totpCounter,
 } from '@superwork/auth'
 import { asAgent, can, loadActor, login } from '@superwork/auth'
-import { compileWorkflow } from '@superwork/ai'
+import { compileWorkflow, loadSystemPrompt, renderPrompt } from '@superwork/ai'
 import {
   activateCustomTool,
   activateWorkflow,
@@ -162,6 +162,12 @@ import {
   addCalendarDays,
   closeDepartmentDay,
   reopenDepartmentDay,
+  organizationProfile,
+  updateOrganizationProfile,
+  organizationCurrency,
+  setGlossaryTerm,
+  removeGlossaryTerm,
+  formatCents,
   calendarDate,
   ingestionBacklog,
   requestReindex,
@@ -2835,6 +2841,91 @@ try {
     workingDays.afterReopening.closed.has(workingDays.closedDay) === false &&
       workingDays.onceOpenAgain.delivered === 1)
 
+  // ---- What the organization says about itself (ADR 0052) -------------------
+  // `organizations` was written by the seed and by almost nothing else, so every organization
+  // was Northwind Logistics, in Europe/London, that thinks a reefer is a temperature-controlled
+  // trailer. Two of these columns were read by nothing at all, which is fixed the other way
+  // round: they are given a reader here rather than a settings field that does nothing.
+  const orgProfile = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const before = await organizationProfile(ctx, actor)
+
+    const rejectedClock = await organizationProfile(ctx, actor)
+      .then(() => updateOrganizationProfile(ctx, actor, { timezone: 'Mars/Olympus' }))
+      .then(() => null, (error: Error) => error.message)
+    const rejectedMoney = await updateOrganizationProfile(ctx, actor, { currency: 'POUNDS' })
+      .then(() => null, (error: Error) => error.message)
+
+    const renamed = await updateOrganizationProfile(ctx, actor, {
+      name: 'Northwind Logistics and Cold Chain',
+      industry: 'Freight forwarding, third-party logistics and cold chain',
+      tone: 'Direct, warm, never breezy. Short sentences.',
+      currency: 'USD',
+    })
+    // The reader that makes the currency a control rather than a stored string: money is
+    // written in it, including in the refusal that quotes a budget.
+    const money = formatCents(125_00, await organizationCurrency(ctx))
+    // And the one that makes the tone a control: it reaches the prompt the model is sent, and
+    // does not displace the rules above it.
+    const prompt = renderPrompt(loadSystemPrompt(), {
+      org: { name: renamed.name, industry: renamed.industry ?? '', tone: `This organization asks to be written to like this: ${renamed.tone}` },
+      user: { name: actor.displayName, role: actor.role, department: 'Executive', timezone: 'Europe/London' },
+      now: new Date().toISOString(),
+      route_context: '/loop',
+      mode: 'ask',
+      effective_capabilities: 'read only',
+    })
+
+    // A word this company says out loud, and the search that then finds what spells it out.
+    await setGlossaryTerm(ctx, actor, { term: 'BHX', meaning: 'Birmingham depot' })
+    const found = await hybridSearch(ctx, actor, 'BHX handover')
+    const doubled = await setGlossaryTerm(ctx, actor, { term: 'bhx', meaning: 'Birmingham depot' })
+    const shortTerm = await setGlossaryTerm(ctx, actor, { term: 'x', meaning: 'anything at all' })
+      .then(() => null, (error: Error) => error.message)
+
+    // Put the demo back.
+    await updateOrganizationProfile(ctx, actor, {
+      name: before.name,
+      industry: before.industry,
+      timezone: before.timezone,
+      currency: before.currency,
+      tone: before.tone,
+    })
+    const restored = await organizationProfile(ctx, actor)
+    const bhxWasSeeded = before.glossary.some((entry) => entry.term.toLowerCase() === 'bhx')
+    if (!bhxWasSeeded) await removeGlossaryTerm(ctx, actor, { term: 'BHX' })
+    else await setGlossaryTerm(ctx, actor, { term: 'BHX', meaning: 'Birmingham depot' })
+
+    return { before, rejectedClock, rejectedMoney, renamed, money, prompt, found, doubled, shortTerm, restored }
+  })
+
+  ok('An organization can say what it is called and what it does',
+    orgProfile.renamed.name === 'Northwind Logistics and Cold Chain' &&
+      (orgProfile.renamed.industry ?? '').includes('cold chain'),
+    orgProfile.renamed.name)
+  ok('A clock this machine cannot work in is refused by name, not stored',
+    (orgProfile.rejectedClock ?? '').includes('IANA'),
+    orgProfile.rejectedClock ?? 'accepted')
+  ok('And money that cannot be written is refused the same way',
+    (orgProfile.rejectedMoney ?? '').includes('three-letter'),
+    orgProfile.rejectedMoney ?? 'accepted')
+  ok('Money is written in the currency the organization keeps its books in',
+    orgProfile.money.includes('$'), orgProfile.money)
+  ok('The tone it asks for reaches the model, without displacing what is promised anyway',
+    orgProfile.prompt.includes('never breezy') && orgProfile.prompt.includes('Hedge honestly'))
+  ok('A word this company says out loud finds the document that spells it out',
+    orgProfile.found.expandedQuery === 'BHX handover Birmingham depot',
+    orgProfile.found.expandedQuery)
+  ok('Saying a term twice corrects it rather than expanding a search twice',
+    orgProfile.doubled.glossary.filter((entry) => entry.term.toLowerCase() === 'bhx').length === 1)
+  ok('A term short enough to match every search is refused',
+    (orgProfile.shortTerm ?? '').includes('almost every search'),
+    orgProfile.shortTerm ?? 'accepted')
+  ok('The loop puts the organization back as it found it',
+    orgProfile.restored.name === orgProfile.before.name &&
+      orgProfile.restored.currency === orgProfile.before.currency &&
+      orgProfile.restored.timezone === orgProfile.before.timezone)
+
 
   // ---- What the model was asked, and what it cost -------------------------
   console.log('\nWhere the model spend actually went…\n')
@@ -3518,7 +3609,10 @@ try {
         'a company can start a project of its own at last, and close it again, instead of \n' +
         'working on whatever a demo fixture invented; and the budget every tool has declared \n' +
         'since the first phase now stops something, counted from the calls that really \n' +
-        'happened, with the numbers a person can set.\n',
+        'happened, with the numbers a person can set; and an organization can finally say what \n' +
+        'it is called, what it does, what clock it keeps, what money it writes in and what its \n' +
+        'own words mean — including the two of those that were read by nothing at all until \n' +
+        'something was given to read them.\n',
   )
 } catch (error) {
   console.error(error)

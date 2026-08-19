@@ -17,6 +17,20 @@ export interface PromptTemplate {
 
 const cache = new Map<string, PromptTemplate>()
 
+/**
+ * The system prompt in force.
+ *
+ * It lives here rather than at the call site, because a caller that names its own version can
+ * disagree with the tests about which prompt the product actually sends — and a prompt is
+ * exactly the kind of thing where that disagreement is invisible. One writer, as everywhere
+ * else two places would otherwise have to agree (ADRs 0028, 0040, 0047, 0052).
+ */
+export const SYSTEM_PROMPT_VERSION = 2
+
+export function loadSystemPrompt(): PromptTemplate {
+  return loadPrompt('system', SYSTEM_PROMPT_VERSION)
+}
+
 export function loadPrompt(id: string, version = 1): PromptTemplate {
   const key = `${id}.v${version}`
   const cached = cache.get(key)
@@ -31,7 +45,13 @@ export function loadPrompt(id: string, version = 1): PromptTemplate {
 }
 
 export interface PromptVariables {
-  org: { name: string; industry: string }
+  /**
+   * `tone` is the organization's own note about how it asks to be written to (ADR 0052),
+   * already phrased as a sentence by the caller, or empty when it has not said. It extends the
+   * VOICE section and cannot replace it — hedging honestly and carrying a number's basis are
+   * not the organization's to switch off.
+   */
+  org: { name: string; industry: string; tone: string }
   user: { name: string; role: string; department: string; timezone: string }
   now: string
   route_context: string

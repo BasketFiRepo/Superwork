@@ -84,17 +84,21 @@ export interface LimitDecision {
 
 export async function checkSpendLimits(ctx: TenantContext, tier: PlanTier): Promise<LimitDecision> {
   const snap = await spendSnapshot(ctx, tier)
+  // A refusal that quotes a figure has to quote it in the money this organization keeps its
+  // books in. `formatCents` has taken a currency since Phase 1 and no caller ever passed one,
+  // so every budget in the product was refused in pounds (ADR 0052).
+  const currency = await organizationCurrency(ctx)
 
   if (snap.userDailyCapCents !== null && snap.userTodayCents >= snap.userDailyCapCents) {
     return {
       allow: false,
-      reason: `You have reached your daily AI budget of ${formatCents(snap.userDailyCapCents)}. It resets at midnight in your timezone, or an admin can raise it in Settings → Billing.`,
+      reason: `You have reached your daily AI budget of ${formatCents(snap.userDailyCapCents, currency)}. It resets at midnight in your timezone, or an admin can raise it in Settings → Billing.`,
     }
   }
   if (snap.capCents !== null && snap.monthToDateCents >= snap.capCents) {
     return {
       allow: false,
-      reason: `This organization has reached its monthly AI spend cap of ${formatCents(snap.capCents)}. An admin can raise the cap in Settings → Billing. Nothing has been silently degraded — the agent is stopped.`,
+      reason: `This organization has reached its monthly AI spend cap of ${formatCents(snap.capCents, currency)}. An admin can raise the cap in Settings → Billing. Nothing has been silently degraded — the agent is stopped.`,
     }
   }
   if (snap.utilization >= 0.8) {
@@ -109,4 +113,16 @@ export async function checkSpendLimits(ctx: TenantContext, tier: PlanTier): Prom
 
 export function formatCents(cents: number, currency = 'GBP'): string {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency }).format(cents / 100)
+}
+
+/**
+ * The money this organization keeps its books in (ADR 0052).
+ *
+ * One place asks, so there is one answer. The fallback is the column's own default rather than
+ * a second opinion about what it should be.
+ */
+export async function organizationCurrency(ctx: TenantContext): Promise<string> {
+  const [row] = await ctx.sql<{ currency: string }[]>`
+    SELECT currency::text AS currency FROM organizations WHERE id = ${ctx.organizationId}`
+  return row?.currency ?? 'GBP'
 }

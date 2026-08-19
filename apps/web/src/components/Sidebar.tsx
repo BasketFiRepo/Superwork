@@ -86,6 +86,7 @@ export function Sidebar({
     {
       title: 'Admin',
       items: [
+        { href: '/settings/organization', label: 'Organization' },
         { href: '/settings/agents', label: 'Agents' },
         { href: '/settings/approvals', label: 'Approvals' },
         { href: '/settings/integrations', label: 'Integrations' },

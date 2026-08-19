@@ -1491,6 +1491,73 @@ try {
     .then(() => true, () => false)
   ok('And taking it back off asks why, and puts the day back to being worked', dayReopened)
 
+  // ---- What the organization says about itself (ADR 0052) -------------------
+  // `organizations` was written by the seed and by almost nothing else, so every organization
+  // was Northwind Logistics with a freight glossary. Each field on this screen is read by
+  // something, and two of them had no reader at all before this.
+  await page.goto(`${BASE}/settings/organization`)
+  await page.waitForSelector('[data-testid="organization-profile"]', { timeout: 15_000 })
+  const orgExplainer = await page.locator('[data-testid="organization-explainer"]').innerText()
+  ok('The screen says what each of these is read by',
+    /grounding the assistant is given/i.test(orgExplainer) &&
+      /what “today” and “overdue” mean/i.test(orgExplainer))
+  ok('And that the web address is deliberately not one of them',
+    /deliberately not changeable|not changeable/i.test(orgExplainer))
+  const seededName = await page.locator('[data-testid="organization-name"]').inputValue()
+  ok('It shows what the organization is called now', seededName === 'Northwind Logistics', seededName)
+
+  // Change the money, which is a column that had no reader at all: every organization saw
+  // pounds. The dashboard is where it shows.
+  await page.locator('[data-testid="organization-currency"]').fill('USD')
+  await page.locator('[data-testid="organization-save"]').click()
+  const savedCurrency = await page
+    .locator('[data-testid="organization-saved"]')
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false)
+  ok('The money it keeps its books in can be changed', savedCurrency)
+
+  await page.goto(`${BASE}/settings/ai-governance`)
+  await page.waitForSelector('.metric', { timeout: 15_000 })
+  const spendText = await page.locator('body').innerText()
+  ok('And money is then written in it, on a screen that was hardcoded to pounds',
+    /US\$|\$\d/.test(spendText) && !/£/.test(spendText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/organization.png`, fullPage: true })
+
+  // A word this company says out loud, and the search that then finds what spells it out.
+  await page.goto(`${BASE}/settings/organization`)
+  await page.waitForSelector('[data-testid="organization-glossary"]', { timeout: 15_000 })
+  const glossaryText = await page.locator('[data-testid="glossary-explainer"]').innerText()
+  ok('The glossary says it widens a search rather than changing what it means',
+    /widened with these/i.test(glossaryText) && /never as a pattern/i.test(glossaryText))
+  const seededTerms = await page.locator('[data-testid="glossary-row"]').count()
+  ok('The demo carries the words this company actually uses', seededTerms > 0, `${seededTerms} terms`)
+
+  await page.locator('[data-testid="glossary-term"]').fill('BHX')
+  await page.locator('[data-testid="glossary-meaning"]').fill('Birmingham depot')
+  await page.locator('[data-testid="glossary-add"]').click()
+  const added = await page
+    .locator('[data-testid="glossary-row"]', { hasText: 'Birmingham depot' })
+    .first()
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false)
+  ok('A word can be added from the screen', added)
+
+  // Put the demo back: the money, and the word if it was not already there.
+  await page.locator('[data-testid="organization-currency"]').fill('GBP')
+  await page.locator('[data-testid="organization-save"]').click()
+  await page.locator('[data-testid="organization-saved"]').waitFor({ timeout: 15_000 }).catch(() => undefined)
+  await page
+    .locator('[data-testid="glossary-row"]', { hasText: 'Birmingham depot' })
+    .first()
+    .locator('[data-testid="glossary-remove"]')
+    .click()
+  const removed = await page
+    .locator('[data-testid="glossary-row"]', { hasText: 'Birmingham depot' })
+    .first()
+    .waitFor({ state: 'detached', timeout: 15_000 })
+    .then(() => true, () => false)
+  ok('And taken back off again, which is what puts the demo back', removed)
+
   // The other end of the same fact: the person is told which days they are safe on.
   await page.goto(`${BASE}/reminders`)
   await page.waitForSelector('[data-testid="working-calendar"]', { timeout: 15_000 })

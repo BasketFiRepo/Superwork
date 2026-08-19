@@ -233,15 +233,15 @@ export default async function AiGovernancePage() {
             <div className="panel-body stack stack-4">
               <div className="spread">
                 <span className="small secondary">This month</span>
-                <span className="metric">{formatCents(data.spend.monthToDateCents)}</span>
+                <span className="metric">{formatCents(data.spend.monthToDateCents, session.currency)}</span>
               </div>
               <div className="spread">
                 <span className="small secondary">Organization cap</span>
-                <span className="metric">{data.spend.capCents ? formatCents(data.spend.capCents) : 'none'}</span>
+                <span className="metric">{data.spend.capCents ? formatCents(data.spend.capCents, session.currency) : 'none'}</span>
               </div>
               <div className="spread">
                 <span className="small secondary">Your spend today</span>
-                <span className="metric">{formatCents(data.spend.userTodayCents)}</span>
+                <span className="metric">{formatCents(data.spend.userTodayCents, session.currency)}</span>
               </div>
               <p className="small muted">
                 Soft warning at 80%, hard stop at the cap. Quality is never silently degraded — the

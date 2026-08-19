@@ -1262,6 +1262,37 @@ Wales or the United States, which is to say most of them. A French department co
 
 **Settings → Teams; Reminders.** See ADR 0051.
 
+## An organization that describes itself
+
+`organizations` is the first table the product ever wrote and almost the last one it learned to
+change. Two columns picked up a control along the way — the data region and the kill switch — and
+the rest of the row stayed whatever the seed said, so **every organization was Northwind
+Logistics, in Europe/London, that thinks a reefer is a temperature-controlled trailer**. The
+re-derived coverage list separates two failures that look alike and are opposite in the fix.
+
+- **Read by live code, settable by nobody.** The name is the header of every screen, half the
+  grounding the model gets, and the name on the transparency report a person can ask for about
+  themselves. The clock is what "today" and "overdue" mean for everybody without a timezone of
+  their own. The glossary is expanded into every search query before it is embedded.
+- **Read by nothing at all.** `formatCents` has taken a currency since Phase 1 and no caller ever
+  passed one, so all money was written in pounds — including the refusal that quotes a budget back
+  at somebody. And the seed's note about how the company writes reached nothing: the system prompt
+  has a VOICE section and the organization had no say in it.
+- **So the four become settable and the two get a reader**, not a settings field. A control whose
+  effect nobody can name is the thing this build exists to remove; adding one while removing four
+  would be a poor trade.
+- **The tone adds to the voice and cannot replace it.** It lands after the rules about hedging
+  honestly and every number carrying its basis, which are not the organization's to switch off.
+- **Which prompt version is live has one writer.** With the version named at the call site, a test
+  could assert the template renders the tone while the product sent a prompt without the
+  placeholder — and pass. Verified by reverting the constant and watching the test fail.
+- **The address is not the name.** The slug stays fixed: changing it would silently break every
+  link anybody kept.
+- **The clock says what it reaches** — the people and departments that fall back to it — and moving
+  it goes on the activity feed, because it changes which work is late for other people.
+
+**Settings → Organization.** See ADR 0052.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
