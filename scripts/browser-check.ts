@@ -470,6 +470,21 @@ try {
   const ranText = await page.locator('[data-testid="workflow-outcome"]').innerText()
   ok('A real run stops for a person', /stopped for approval/i.test(ranText), ranText.slice(0, 160))
 
+  // ---- What each step did, and how long it took (ADR 0053) -----------------
+  // `duration_ms` and `error` were declared on `workflow_step_runs` and written by nothing, so
+  // the run detail listed steps with no time against them and a failure with no reason. The
+  // failing half is exercised for real by the tests and the acceptance loop, which break the
+  // graph on purpose; here the screen has to show the timings and no false alarm.
+  await page.reload()
+  await page.waitForSelector('[data-testid="run-step"]', { timeout: 20_000 })
+  const stepText = await page.locator('[data-testid="run-steps"]').first().innerText()
+  ok('The run detail lists what each step did', (await page.locator('[data-testid="run-step"]').count()) >= 3)
+  ok('And how long each one took, which nothing wrote before',
+    /\d+(\.\d+)?(ms|s)\b/i.test(stepText), stepText.split('\n')[0])
+  ok('A run that worked shows no reason against any step',
+    (await page.locator('[data-testid="run-step-error"]').count()) === 0)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-steps.png`, fullPage: true })
+
   // ---- Approve with edits -------------------------------------------------
   await page.goto(`${BASE}/approvals`)
   const editButton = page.locator('[data-testid="approve-with-edits"]').first()

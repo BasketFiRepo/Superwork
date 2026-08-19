@@ -9,6 +9,8 @@
  * activity timeline, the run inspector and audit views.
  */
 
+import { formatDuration } from '@/lib/format'
+
 export interface TraceStep {
   ordinal: number
   phase: string
@@ -46,11 +48,6 @@ function formatTime(value: string | null | undefined, timeZone: string): string 
     second: '2-digit',
     hour12: false,
   }).format(new Date(value))
-}
-
-function formatDuration(ms?: number | null): string {
-  if (!ms) return ''
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 export function TraceRail({

@@ -303,6 +303,52 @@ try {
 
   const runs = await withTenant(session, async (ctx) => listWorkflowRuns(ctx, await loadActor(ctx), { workflowId }))
   ok('Every step is on the record', runs.length >= 2 && runs[0]!.steps.length >= 4, `${runs.length} runs`)
+  ok('And every step says how long it took, which nothing wrote before',
+    runs[0]!.steps.every((step) => step.durationMs !== null),
+    `${runs[0]!.steps.map((step) => step.durationMs).join('ms, ')}ms`)
+
+  // ---- A step that stops says which one, and why (ADR 0053) -----------------
+  // The executor's `try` sat outside the node loop, so a node that threw left no row at all:
+  // the step list ended at the last thing that worked and nothing said which step was the one.
+  // Broken on purpose, for real — the query node is pointed at an aggregate that does not
+  // exist, which is what `runAggregate` refuses — and then put back.
+  const [queryRef] = await withTenant(session, (ctx) => ctx.sql<{ ref: string }[]>`
+    SELECT node->>'ref' AS ref
+    FROM workflow_versions v, jsonb_array_elements(v.graph->'nodes') AS node
+    WHERE v.organization_id = ${ctx.organizationId} AND v.workflow_id = ${workflowId}
+      AND node->>'type' = 'query'
+    LIMIT 1`)
+  const pointQueryAt = async (ref: string): Promise<void> => {
+    await withTenant(session, (ctx) => ctx.sql`
+      UPDATE workflow_versions
+      SET graph = jsonb_set(graph, '{nodes}', (
+            SELECT jsonb_agg(CASE WHEN node->>'type' = 'query'
+                                  THEN jsonb_set(node, '{ref}', to_jsonb(${ref}::text))
+                                  ELSE node END)
+            FROM jsonb_array_elements(graph->'nodes') AS node))
+      WHERE organization_id = ${ctx.organizationId} AND workflow_id = ${workflowId}`)
+  }
+
+  await pointQueryAt('an_aggregate_that_does_not_exist')
+  const broken = await simulateWorkflow(session, { workflowId, windowDays: 30 })
+  const brokenStep = broken.steps.find((step) => step.status === 'failed')
+  const brokenRows = await withTenant(session, (ctx) => ctx.sql<{ status: string; error: string | null }[]>`
+    SELECT status, error FROM workflow_step_runs
+    WHERE organization_id = ${ctx.organizationId} AND workflow_run_id = ${broken.runId}
+    ORDER BY ordinal`)
+  await pointQueryAt(queryRef!.ref)
+  const mended = await simulateWorkflow(session, { workflowId, windowDays: 30 })
+
+  ok('The step that stopped a run has a row of its own',
+    brokenStep !== undefined && brokenRows.some((row) => row.status === 'failed'),
+    `${brokenRows.length} steps recorded, ${brokenRows.filter((r) => r.status === 'failed').length} failed`)
+  ok('And it says why, where the reader is already looking',
+    (brokenStep?.error ?? '').includes('an_aggregate_that_does_not_exist'),
+    brokenStep?.error ?? 'nothing')
+  ok('The run says which kind of failure it was, taken from the error',
+    broken.failureClass === 'validation', broken.failureClass ?? 'nothing')
+  ok('The loop puts the workflow back, and it runs clean again',
+    mended.status !== 'failed' && mended.steps.every((step) => step.error === undefined))
 
   // ---- 4. Approve with edits ----------------------------------------------
   if (live.approvalId) {
@@ -3612,7 +3658,9 @@ try {
         'happened, with the numbers a person can set; and an organization can finally say what \n' +
         'it is called, what it does, what clock it keeps, what money it writes in and what its \n' +
         'own words mean — including the two of those that were read by nothing at all until \n' +
-        'something was given to read them.\n',
+        'something was given to read them; and a workflow step that stopped a run says which \n' +
+        'step it was and why, in a row of its own, instead of leaving the list to end at the \n' +
+        'last thing that worked.\n',
   )
 } catch (error) {
   console.error(error)

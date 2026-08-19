@@ -478,10 +478,14 @@ export interface WorkflowRunView {
     nodeType: string
     status: string
     label: string
+    /** What the step did. Present for every step. */
     detail: string | null
     output: Record<string, unknown> | null
     wouldHave: Record<string, unknown> | null
+    /** Why it failed, written only on a failure and never null when it did (ADR 0053). */
     error: string | null
+    /** How long this step took, so a slow run can say which step was slow. */
+    durationMs: number | null
   }[]
 }
 
@@ -523,7 +527,7 @@ export async function listWorkflowRuns(
     const steps = await sql<WorkflowRunView['steps']>`
       SELECT node_id AS "nodeId", node_type AS "nodeType", status,
              coalesce(input->>'label', node_id) AS label, input->>'detail' AS detail,
-             output, would_have AS "wouldHave", error
+             output, would_have AS "wouldHave", error, duration_ms AS "durationMs"
       FROM workflow_step_runs
       WHERE organization_id = ${ctx.organizationId} AND workflow_run_id = ${run.id} AND deleted_at IS NULL
       ORDER BY ordinal`
