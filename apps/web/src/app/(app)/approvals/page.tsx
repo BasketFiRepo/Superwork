@@ -1,16 +1,21 @@
 import { requireSession, withActor } from '@/lib/session'
-import { listApprovals, trustLedger } from '@superwork/core'
+import { listApprovals, listOutgoing, trustLedger } from '@superwork/core'
 import { ApprovalCard } from '@/components/ApprovalCard'
+import { OutgoingMail } from '@/components/OutgoingMail'
 
 export const dynamic = 'force-dynamic'
 
 /** Approvals (§17). Primary action: decide. */
 export default async function ApprovalsPage() {
   const session = await requireSession()
-  const { pending, decided, ledger } = await withActor(session, async (ctx, actor) => ({
+  const { pending, decided, ledger, outgoing } = await withActor(session, async (ctx, actor) => ({
     pending: await listApprovals(ctx, actor, { status: 'pending' }),
     decided: (await listApprovals(ctx, actor, { limit: 20 })).filter((a) => a.status !== 'pending'),
     ledger: await trustLedger(ctx),
+    // What a decision made here has already put in motion, and can still be stopped
+    // (ADR 0054). It belongs on this screen rather than the inbox: somebody who has just
+    // changed their mind about sending is still standing where they approved it.
+    outgoing: await listOutgoing(ctx, actor),
   }))
 
   const serialize = (list: typeof pending) =>
@@ -31,6 +36,18 @@ export default async function ApprovalsPage() {
           here. Each card shows the exact change before it is made.
         </p>
       </header>
+
+      <OutgoingMail
+        outgoing={outgoing.map((row) => ({
+          id: row.id,
+          subject: row.subject,
+          toAddresses: row.toAddresses,
+          secondsLeft: row.secondsLeft,
+          dispatching: row.dispatching,
+          sentByName: row.sentByName,
+          mine: row.mine,
+        }))}
+      />
 
       {ledger.length > 0 ? (
         <section className="panel">

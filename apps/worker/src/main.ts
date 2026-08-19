@@ -2,9 +2,12 @@ import { adminSql, closePools, withTenant } from '@superwork/db'
 import {
   applyRetention,
   claimBatch,
+  claimSendForDispatch,
+  deferMessage,
   deliverDueNudges,
   markDispatched,
   markFailed,
+  markSendFailed,
   openLaddersForDueWork,
   runIngestionJobs,
   sweepFollowUps,
@@ -74,35 +77,58 @@ async function dispatchOutbox(org: { id: string; ownerId: string; timezone: stri
     for (const message of batch) {
       try {
         if (message.topic === 'email.send') {
-          await dispatchEmail(ctx, message.payload as { sendId: string; draftId: string })
+          const outcome = await dispatchEmail(ctx, message.payload as { sendId: string; draftId: string })
+          if (outcome.deferUntil) {
+            // Waiting is not failing (ADR 0054). The attempt `claimBatch` counted is given back,
+            // so a recall window cannot eat the retry budget of the send it is protecting.
+            await deferMessage(ctx, message.id, outcome.deferUntil)
+            continue
+          }
         }
         await markDispatched(ctx, message.id)
         dispatched += 1
       } catch (error) {
-        await markFailed(ctx, message.id, error instanceof Error ? error.message : String(error), message.attempts)
+        const reason = error instanceof Error ? error.message : String(error)
+        // The row says it gave up, not only the outbox message. `failed_at` and `error` have
+        // been on `email_sends` since migration 0003 and nothing wrote either, so a send that
+        // had exhausted its retries looked exactly like one still waiting (ADR 0054).
+        if (message.topic === 'email.send') {
+          const { sendId } = message.payload as { sendId: string }
+          await markSendFailed(ctx, sendId, reason, { terminal: message.attempts >= 6 })
+        }
+        await markFailed(ctx, message.id, reason, message.attempts)
       }
     }
     return dispatched
   })
 }
 
+/**
+ * Hands one message to the provider, or explains why it did not.
+ *
+ * The row is *claimed* before the provider is called (ADR 0054). Reading `recalled_at` and then
+ * sending leaves a gap: a recall arriving inside it would mark a message recalled that the
+ * recipient already had. `claimSendForDispatch` checks everything in the update, so a recall and
+ * a dispatch cannot both succeed — one of the two finds no row.
+ */
 async function dispatchEmail(
   ctx: Parameters<typeof writeActivity>[0],
   payload: { sendId: string; draftId: string },
-): Promise<void> {
+): Promise<{ deferUntil: Date | null }> {
   const [send] = await ctx.sql<
-    { id: string; send_after: Date; recalled_at: Date | null; sent_at: Date | null; idempotency_key: string }[]
+    { id: string; send_after: Date; recalled_at: Date | null; sent_at: Date | null }[]
   >`
-    SELECT id, send_after, recalled_at, sent_at, idempotency_key FROM email_sends
+    SELECT id, send_after, recalled_at, sent_at FROM email_sends
     WHERE organization_id = ${ctx.organizationId} AND id = ${payload.sendId}`
-  if (!send) return
+  if (!send) return { deferUntil: null }
 
-  // The recall window: a user who changes their mind inside it wins.
-  if (send.recalled_at) return
-  if (send.sent_at) return
-  if (send.send_after.getTime() > Date.now()) {
-    throw new Error('Still inside the recall window; will retry after it closes.')
-  }
+  // A person who changed their mind inside the window wins, and the message is finished with.
+  if (send.recalled_at || send.sent_at) return { deferUntil: null }
+  if (send.send_after.getTime() > Date.now()) return { deferUntil: send.send_after }
+
+  const claimed = await claimSendForDispatch(ctx, payload.sendId)
+  // Somebody stopped it, or another worker has it. Either way this message is done.
+  if (!claimed) return { deferUntil: null }
 
   const [draft] = await ctx.sql<{ subject: string; body_text: string; to_addresses: string[] }[]>`
     SELECT subject, body_text, to_addresses FROM email_drafts
@@ -113,7 +139,7 @@ async function dispatchEmail(
     to: draft.to_addresses,
     subject: draft.subject,
     body: draft.body_text,
-    idempotencyKey: send.idempotency_key,
+    idempotencyKey: claimed.idempotencyKey,
   })
 
   await ctx.sql`
@@ -129,6 +155,7 @@ async function dispatchEmail(
     entityLabel: draft.subject,
     summary: `Sent "${draft.subject}" to ${draft.to_addresses.join(', ')} after the recall window closed.`,
   })
+  return { deferUntil: null }
 }
 
 async function main(): Promise<void> {

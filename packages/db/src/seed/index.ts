@@ -428,6 +428,7 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     counts['dependencies'] = await seedTaskDependencies(ctx, userIds)
     counts['teams'] = await seedTeams(ctx, userIds, departmentIds)
     counts['views'] = await seedViewsAndWatchers(ctx, userIds)
+    counts['outgoing'] = await seedOutgoingEmail(ctx, userIds, companyIds)
     const { refreshCompanyInteractionTimes } = await import('@superwork/core')
     await refreshCompanyInteractionTimes(ctx)
   })
@@ -1179,6 +1180,39 @@ async function seedTaskDependencies(ctx: TenantContext, userIds: Map<string, str
  * one a colleague has shared, and Maya following two pieces of work she is not doing herself
  * — which is the case the feature exists for.
  */
+/**
+ * One approved email on its way out (ADR 0054).
+ *
+ * `send_email` dates a send a minute ahead and the dispatcher will not touch it before then, so
+ * the demo has something in the state the recall window exists for: approved, not gone, still
+ * stoppable. The worker sends it a minute after the demo is seeded, exactly as it would in life
+ * — which is the point, and is why the window here is the product's own and not a stretched one.
+ */
+async function seedOutgoingEmail(
+  ctx: TenantContext,
+  userIds: Map<string, string>,
+  companyIds: Map<string, string>,
+): Promise<number> {
+  const sender = userIds.get('priya')!
+  const [draft] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO email_drafts (
+      organization_id, company_id, to_addresses, subject, body_text, status, is_demo, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${companyIds.get('Meridian Foods') ?? null},
+      ARRAY['ops@meridianfoods.example'], 'Reefer 4471 — revised handover window',
+      'The trailer is pre-cooled and the handover moves to 14:00. Nothing else changes.',
+      'sent', true, ${sender}
+    ) RETURNING id`
+  await ctx.sql`
+    INSERT INTO email_sends (
+      organization_id, draft_id, provider, send_after, idempotency_key, is_demo, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${draft!.id}, 'mock', now() + interval '60 seconds',
+      ${`seed-send-${draft!.id}`}, true, ${sender}
+    )`
+  return 1
+}
+
 async function seedViewsAndWatchers(ctx: TenantContext, userIds: Map<string, string>): Promise<number> {
   const maya = userIds.get('maya')!
   const david = userIds.get('david')!

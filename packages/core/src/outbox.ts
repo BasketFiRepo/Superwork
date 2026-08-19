@@ -60,3 +60,18 @@ export async function markFailed(ctx: TenantContext, id: string, error: string, 
         next_attempt_at = now() + make_interval(secs => ${delaySeconds})
     WHERE id = ${id}`
 }
+
+/**
+ * Puts a message back without counting the attempt against it.
+ *
+ * Waiting is not failing. A message deferred because the thing it dispatches is not due yet
+ * would otherwise burn a retry — and with a dead-letter terminus at six attempts and a recall
+ * window an organization may want to lengthen, the wait could exhaust the budget before the work
+ * was ever tried. The attempt `claimBatch` counted is given back.
+ */
+export async function deferMessage(ctx: TenantContext, id: string, until: Date): Promise<void> {
+  await ctx.sql`
+    UPDATE outbox
+    SET status = 'pending', attempts = greatest(attempts - 1, 0), next_attempt_at = ${until}
+    WHERE id = ${id}`
+}

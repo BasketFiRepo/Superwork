@@ -145,8 +145,17 @@ try {
     const drafts = await ctx.sql<{ count: number }[]>`
       SELECT count(*)::int AS count FROM email_drafts
       WHERE organization_id = ${ctx.organizationId} AND agent_run_id = ${act.runId}`
+    // Scoped to what *this run* drafted, as the draft count beside it always was. Counting every
+    // send in the organization made the claim "this run did not send" depend on nothing else in
+    // the demo ever having sent anything — which stopped being true the moment the demo grew an
+    // email waiting out its recall window (ADR 0054). The assertion is about the run.
     const sends = await ctx.sql<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM email_sends WHERE organization_id = ${ctx.organizationId}`
+      SELECT count(*)::int AS count FROM email_sends s
+      WHERE s.organization_id = ${ctx.organizationId}
+        AND s.draft_id IN (
+          SELECT d.id FROM email_drafts d
+          WHERE d.organization_id = ${ctx.organizationId} AND d.agent_run_id = ${act.runId}
+        )`
     const undo = await listUndoOperations(ctx, act.runId)
     return {
       taskCount: tasks.tasks.length,
