@@ -84,6 +84,19 @@ stated blind spot: a write built out of interpolated identifiers is invisible to
 right and uncountable. Naming each column in full is clearer anyway, and it means the instrument
 can see the thing it asked for.
 
+## And one the wiring found immediately
+
+`ROOT` was a string literal: one developer's home directory, hardcoded for eleven increments,
+because that developer's machine was the only thing that had ever run the detector. The CI step
+failed before reading a file — `ENOENT: scandir '/home/runner/work/Superwork/Superwork'` — which
+is the same error in the other direction. It is now derived from the script's own location, and
+`tests/unit/column-coverage.test.ts` checks both halves: that `ROOT` finds this repository
+wherever it sits, and that the source contains no absolute path literal at all. The first
+assertion passes on the machine where a hardcoded path happens to be right, which is exactly the
+machine where nobody notices; the second is about the mechanism.
+
+Putting a tool in CI is how you find out it was never a tool, only a habit.
+
 ## Consequences
 
 - The queue is **108 candidates, not 127**, and every one of them is a question worth asking.

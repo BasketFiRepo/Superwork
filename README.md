@@ -1478,7 +1478,14 @@ The CHECK refuses the value; this refuses the code path, which is not the same s
 On its first run it found that **four of the five §29.5 pins had no test attempting them** — the
 test named "states the five things no setting can turn on" asserted the list had five entries and
 tried exactly one. All five are attempted now, by name, and so is the disclosure pin, on INSERT as
-well as UPDATE. The queue is 108, and every entry is a question worth asking. See ADR 0060.
+well as UPDATE. The queue is 108, and every entry is a question worth asking.
+
+Wiring it into CI found one more thing, in the detector itself: `ROOT` was a string literal — one
+developer's home directory, hardcoded for eleven increments, because that machine was the only
+thing that had ever run it. The step failed before reading a file. It is derived from the script's
+own location now, and a test checks both that it finds this repository wherever it sits and that
+the source names no absolute path at all. Putting a tool in CI is how you find out it was never a
+tool, only a habit. See ADR 0060.
 
 ## The one error the check names
 

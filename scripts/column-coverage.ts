@@ -44,10 +44,19 @@
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { adminSql, closePools } from '@superwork/db'
 
-const ROOT = '/home/user/Superwork'
+/**
+ * The repository, found from this file rather than written down.
+ *
+ * It was written down — as one developer's home directory — for eleven increments, because the
+ * only thing that ever ran this was that developer. Wiring it into CI is what found it: the
+ * checkout lives at `/home/runner/work/Superwork/Superwork`, `walk` was handed a path that does
+ * not exist, and the step failed before it had read a single file. A detector that only works
+ * on one machine is a detector nobody else can be held to.
+ */
+export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
 
 /** Columns the database or the base row shape owns; not controls anybody sets. */
 const INFRASTRUCTURE = new Set([

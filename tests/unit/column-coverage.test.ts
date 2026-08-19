@@ -1,5 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { pinnedColumns, stampedByTheDatabase } from '../../scripts/column-coverage.js'
+import { pinnedColumns, ROOT, stampedByTheDatabase } from '../../scripts/column-coverage.js'
 
 /**
  * The detector's two classifiers (ADR 0060).
@@ -15,6 +17,27 @@ import { pinnedColumns, stampedByTheDatabase } from '../../scripts/column-covera
  * a column wrongly classified as stamped or pinned drops out of the queue and is never asked
  * about again. So they are tested against the shapes Postgres actually hands back.
  */
+
+describe('the repository it reads', () => {
+  it('is found from this file, not written down', () => {
+    // It was written down, as one developer's home directory, for eleven increments — because
+    // that developer's machine was the only thing that ever ran it. Putting the detector in CI
+    // is what found it: the checkout is somewhere else, `walk` was handed a path that does not
+    // exist, and the step failed before reading a single file.
+    expect(existsSync(join(ROOT, 'package.json'))).toBe(true)
+    expect(existsSync(join(ROOT, 'packages', 'db', 'migrations'))).toBe(true)
+    expect(existsSync(join(ROOT, 'scripts', 'column-coverage.ts'))).toBe(true)
+  })
+
+  it('and the source names no absolute path at all', () => {
+    // The behavioural check above passes on the machine where a hardcoded path happens to be
+    // right, which is exactly the machine where nobody notices. This one is about the mechanism:
+    // a string literal beginning with `/` is a path that will be wrong somewhere else.
+    const source = readFileSync(join(ROOT, 'scripts', 'column-coverage.ts'), 'utf8')
+    const literals = [...source.matchAll(/'(\/[A-Za-z0-9_./-]*)'/g)].map((match) => match[1])
+    expect(literals).toEqual([])
+  })
+})
 
 describe('a default that calls the clock', () => {
   it('is a writer, in every spelling Postgres returns', () => {
