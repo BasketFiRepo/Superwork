@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { latestBriefing } from '@superwork/agent'
 import { asOfLabel } from '@superwork/core'
+import { requestNow } from '@/lib/request-now'
 import { BriefingPanel } from '@/components/BriefingPanel'
 
 export const dynamic = 'force-dynamic'
@@ -118,7 +119,7 @@ export default async function BriefingPage({ searchParams }: { searchParams: Pro
         </section>
       ) : null}
 
-      <p className="small muted">{asOfLabel(session.timezone)}</p>
+      <p className="small muted">{asOfLabel(session.timezone, requestNow())}</p>
     </div>
   )
 }

@@ -8,7 +8,7 @@ interface ActorRow {
   name: string
   role: Role
   department_id: string | null
-  extra_permissions: string[]
+  extra_permissions: string[] | null
   team_ids: string[] | null
 }
 
@@ -19,7 +19,14 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
            u.name,
            m.role,
            m.department_id,
-           m.extra_permissions,
+           -- Exceptions this person holds right now (ADR 0055). Read from the grants table
+           -- rather than from a column kept in step with it, because an expiry has to be exact:
+           -- a permission that lingers until a sweep runs is one that outlives its reason.
+           (SELECT array_agg(g.permission)
+              FROM permission_grants g
+             WHERE g.organization_id = m.organization_id AND g.user_id = m.user_id
+               AND g.revoked_at IS NULL AND g.deleted_at IS NULL
+               AND (g.expires_at IS NULL OR g.expires_at > now())) AS extra_permissions,
            array_remove(array_agg(tm.team_id), NULL) AS team_ids
     FROM memberships m
     JOIN users u ON u.id = m.user_id
@@ -28,7 +35,7 @@ export async function loadActor(ctx: TenantContext, userId = ctx.userId): Promis
       AND m.organization_id = ${ctx.organizationId}
       AND m.deleted_at IS NULL
       AND m.status = 'active'
-    GROUP BY m.user_id, u.name, m.role, m.department_id, m.extra_permissions`
+    GROUP BY m.user_id, u.name, m.role, m.department_id, m.organization_id`
 
   const row = rows[0]
   if (!row) throw new Error('Not found.')

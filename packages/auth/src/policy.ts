@@ -146,10 +146,14 @@ function splitAction(action: string, resourceType: string): [string, string] {
 }
 
 function checkHumanPermissions(actor: Actor, resourceType: string, verb: string, resource: Resource): Decision {
-  const grants = [...ROLE_PERMISSIONS[actor.role], ...actor.extraPermissions]
+  const fromRole = ROLE_PERMISSIONS[actor.role]
+  const grants = [...fromRole, ...actor.extraPermissions]
   let best: PermissionScope | null = null
+  // Which of the two allowed it. Saying "allowed by your admin role" when the answer was an
+  // exception somebody granted last week hides the thing a reader most needs to see (ADR 0055).
+  let byException = false
 
-  for (const raw of grants) {
+  for (const [index, raw] of grants.entries()) {
     let grant
     try {
       grant = parsePermission(raw)
@@ -159,7 +163,10 @@ function checkHumanPermissions(actor: Actor, resourceType: string, verb: string,
     if (grant.resource !== '*' && grant.resource !== resourceType) continue
     if (grant.action !== '*' && grant.action !== verb) continue
     if (!scopeSatisfied(grant.scope, actor, resource)) continue
-    if (best === null || SCOPE_RANK[grant.scope] > SCOPE_RANK[best]) best = grant.scope
+    if (best === null || SCOPE_RANK[grant.scope] > SCOPE_RANK[best]) {
+      best = grant.scope
+      byException = index >= fromRole.length
+    }
   }
 
   if (best === null) {
@@ -171,7 +178,11 @@ function checkHumanPermissions(actor: Actor, resourceType: string, verb: string,
     if (onIt) return ALLOW(onIt)
     return DENY(explainMissing(actor, resourceType, verb, resource))
   }
-  return ALLOW(`Allowed by ${actor.role} role (${resourceType}:${verb}:${best}).`)
+  return ALLOW(
+    byException
+      ? `Allowed by an exception granted to you (${resourceType}:${verb}:${best}), not by your ${actor.role} role.`
+      : `Allowed by ${actor.role} role (${resourceType}:${verb}:${best}).`,
+  )
 }
 
 /** The weakest relation that satisfies a verb. Ordered, so `owner` satisfies everything. */

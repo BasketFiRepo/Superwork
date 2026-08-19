@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { listSavedViews, listTasks, asOfLabel, startOfDay } from '@superwork/core'
+import { requestNow } from '@/lib/request-now'
 import type { TaskStatus } from '@superwork/db'
 import { SavedViews } from '@/components/SavedViews'
 
@@ -54,7 +55,7 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
         <span className="micro">Work</span>
         <h1>Tasks</h1>
         <p className="prose secondary">
-          {tasks.length} open {tasks.length === 1 ? 'task' : 'tasks'} shown ({asOfLabel(session.timezone)}).
+          {tasks.length} open {tasks.length === 1 ? 'task' : 'tasks'} shown ({asOfLabel(session.timezone, requestNow())}).
           Overdue is computed in your timezone, not the server's.
         </p>
       </header>

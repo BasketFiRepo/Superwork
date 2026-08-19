@@ -54,7 +54,7 @@ export interface MembershipRow {
   role: Role
   department_id: string | null
   title: string | null
-  extra_permissions: string[]
+  /** Exceptions live in `permission_grants` (ADR 0055), not on the membership row. */
 }
 
 export interface TaskRow {

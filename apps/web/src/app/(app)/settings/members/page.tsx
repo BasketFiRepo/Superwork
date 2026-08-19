@@ -1,6 +1,8 @@
 import { requireSession, withActor } from '@/lib/session'
-import { listInvitations, PermissionError } from '@superwork/core'
+import { can } from '@superwork/auth'
+import { listInvitations, listPermissionGrants, PermissionError } from '@superwork/core'
 import { Invitations } from '@/components/Invitations'
+import { PermissionGrants } from '@/components/PermissionGrants'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,6 +21,8 @@ export default async function MembersPage() {
     members: { id: string; name: string; email: string; role: string; status: string }[]
     departments: { id: string; name: string }[]
     role: string
+    grants: Awaited<ReturnType<typeof listPermissionGrants>>
+    canGrant: boolean
   } | null = null
   let denied: string | null = null
 
@@ -34,6 +38,14 @@ export default async function MembersPage() {
         SELECT id, path AS name FROM departments
         WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY path`,
       role: actor.role,
+      // One capability, for one person, that their role does not carry (ADR 0055). It belongs on
+      // this screen because it is a fact about a member, next to the role it is an exception to.
+      grants: await listPermissionGrants(ctx, actor),
+      canGrant: can(actor, 'member:update', {
+        type: 'member',
+        organizationId: ctx.organizationId,
+        riskTier: 'high',
+      }).allow,
     }))
   } catch (error) {
     if (!(error instanceof PermissionError)) throw error
@@ -73,6 +85,28 @@ export default async function MembersPage() {
             }))}
             departments={data.departments}
             maxRole={data.role}
+          />
+
+          <PermissionGrants
+            canEdit={data.canGrant}
+            members={data.members
+              .filter((member) => member.status === 'active')
+              .map((member) => ({ id: member.id, name: member.name, role: member.role }))}
+            grants={data.grants.map((grant) => ({
+              id: grant.id,
+              userId: grant.userId,
+              userName: grant.userName,
+              role: grant.role,
+              permission: grant.permission,
+              reason: grant.reason,
+              grantedByName: grant.grantedByName,
+              grantedAt: grant.grantedAt.toISOString(),
+              expiresAt: grant.expiresAt?.toISOString() ?? null,
+              live: grant.live,
+              revokedAt: grant.revokedAt?.toISOString() ?? null,
+              revokedByName: grant.revokedByName,
+              revokeReason: grant.revokeReason,
+            }))}
           />
 
           <section className="panel" data-testid="members">

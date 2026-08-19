@@ -1341,6 +1341,66 @@ try {
     /does not work/i.test(await guest.locator('h1').innerText()))
   await guest.close()
 
+  // ---- One capability, for one person (ADR 0055) ---------------------------
+  // The policy engine has always ended its check with the role's grants plus this person's own,
+  // and nothing could write the second half: an administrator who needed to give somebody one
+  // extra capability had to change their role, handing them everything else it carries.
+  await page.goto(`${BASE}/settings/members`)
+  await page.waitForSelector('[data-testid="permission-grants"]', { timeout: 15_000 })
+  const grantsText = await page.locator('[data-testid="grants-explainer"]').innerText()
+  ok('The screen says what an exception may not be',
+    /cannot be a wildcard/i.test(grantsText) && /does not have it themselves/i.test(grantsText))
+  ok('And that nobody has one to begin with',
+    (await page.locator('[data-testid="grants-empty"]').count()) > 0)
+
+  await page.locator('[data-testid="grant-add"]').click()
+  await page.waitForSelector('[data-testid="grant-editor"]', { timeout: 15_000 })
+  ok('An exception will not be granted without a reason',
+    await page.locator('[data-testid="grant-confirm"]').isDisabled())
+
+  await page.selectOption('#grant-user', { index: 1 })
+  await page.fill('#grant-permission', 'document:update:org')
+  await page.fill('#grant-reason', 'Covering the Felixstowe desk while Omar is on leave.')
+  // Read while the editor is still open: it closes the moment the grant lands.
+  const editorText = await page.locator('[data-testid="grant-editor"]').innerText()
+  await page.locator('[data-testid="grant-confirm"]').click()
+
+  // Granting one is the widening direction, so it needs a proven identity. Whether the prompt
+  // appears here depends on how recently this walk proved one — a step-up lasts a window, and an
+  // earlier beat used it. Both paths are real; the assertion is that the grant needed one, which
+  // the screen says and the tests and the acceptance loop prove against a fresh session.
+  const askedForPassword = await page
+    .waitForSelector('#step-up-password', { timeout: 5_000 })
+    .then(() => true, () => false)
+  if (askedForPassword) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  ok('Granting one needs a proven identity, because it widens what somebody may do',
+    /asks for your password first/i.test(editorText),
+    askedForPassword ? 'it asked here' : 'said so, and the identity was already proven this session')
+  const grantLanded = await page
+    .locator('[data-testid="grant-row"]')
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And the exception is then on the record', grantLanded)
+  const grantRow = await page.locator('[data-testid="grant-row"]').first().innerText()
+  ok('It says what it lets them do, why, and that it has no end date',
+    /document:update:org/.test(grantRow) && /Felixstowe/.test(grantRow) && /No end date/i.test(grantRow))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/permission-grants.png`, fullPage: true })
+
+  // Taking it back does not ask for a password — the narrowing direction never does.
+  await page.locator('[data-testid="grant-revoke"]').first().click()
+  await page.waitForSelector('[data-testid="grant-revoke-editor"]', { timeout: 15_000 })
+  await page.fill('#grant-revoke-reason', 'Omar is back, so the browser check is finished with it.')
+  await page.locator('[data-testid="grant-revoke-confirm"]').click()
+  const grantRemoved = await page
+    .locator('[data-testid="grants-empty"]')
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And taking it back needs no password, which is what puts the demo back', grantRemoved)
+
   // ---- Who is answerable for whom -----------------------------------------
   await page.goto(`${BASE}/settings/reporting`)
   await page.waitForSelector('[data-testid="org-chart"]', { timeout: 15_000 })
