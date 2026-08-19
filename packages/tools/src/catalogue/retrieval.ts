@@ -9,6 +9,7 @@ import {
   runAggregate,
   type AggregateQuery,
 } from '@superwork/core'
+import { readCeiling } from '@superwork/auth'
 import { register, type ToolContext } from '../registry.js'
 
 /** Read-tier tools. The Researcher sub-agent holds only these. */
@@ -272,11 +273,16 @@ export const readThread = register({
   redactions: [],
   async execute(input, ctx: ToolContext) {
     const sql = ctx.tenantDb.sql
+    // A thread above the caller's clearance answers the way a thread that is not here answers
+    // (ADR 0061). The ceiling is the agent facet's, so an agent capped below its principal is
+    // capped here too — the tool layer is where §4.2 asks for the second check, and the inbox
+    // repository is not on this path.
     const [conv] = await sql<{ subject: string; company_name: string | null; last_message_at: Date | null }[]>`
       SELECT conv.subject, c.name AS company_name, conv.last_message_at
       FROM conversations conv LEFT JOIN companies c ON c.id = conv.company_id
       WHERE conv.organization_id = ${ctx.organizationId} AND conv.id = ${input.conversationId}
-        AND conv.deleted_at IS NULL`
+        AND conv.deleted_at IS NULL
+        AND conv.sensitivity <= ${readCeiling(ctx.policy)}::sw_sensitivity`
     if (!conv) return { ok: false as const, code: 'NOT_FOUND', message: 'That conversation does not exist.' }
 
     const messages = await sql<

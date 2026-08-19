@@ -1487,6 +1487,35 @@ own location now, and a test checks both that it finds this repository wherever 
 the source names no absolute path at all. Putting a tool in CI is how you find out it was never a
 tool, only a habit. See ADR 0060.
 
+## How far a thread may travel
+
+Nine tables carry a `sensitivity` column. Three mean something — documents and their passages,
+companies and contacts. The other five have carried `internal` since Phase 0 with nothing writing
+them, and the detector reported that much. What it could not see was worse: **nothing reads them
+either.** `checkClearance` only ever sees what a repository puts into the resource it checks, and
+no repository put `conversations.sensitivity` there, so the column decided nothing — not who could
+open a thread, not whose inbox it appeared in, not what the agent could read out of it. Every
+member holds `conversation:read:org`, so the inbox listed every thread in the company to everybody
+in it, and a thread carrying a customer's unagreed pricing could not be marked as anything else.
+
+The policy engine said so out loud and was wrong about the reason — *"tasks, projects and notes
+have no classification column at all"*. They all have one. That comment is why nobody looked again.
+
+A **thread** is now the unit that gets classified, with the attribution shape documents have had
+since ADR 0041 plus a third source, `unset`: `internal` on a row nobody weighed is a default, not
+a decision, and a database CHECK keeps the two apart. A message is as classified as its thread,
+kept by trigger both ways — classifying each message separately would let a thread marked
+confidential keep one message marked internal, which is a leak that reads as a rounding error.
+`can()` is asked about the row **as it will be**, so nobody files a thread above their own reach.
+Lowering asks for the password and cascades; raising never asks.
+
+Enforcement follows the content, not the page: the list, the counts, the sidebar badge, the direct
+open (**404, never 403**), the `read_conversation` tool, the stale-thread watcher and the follow-up
+composer. `notes`, `tasks` and `projects` are deliberately left — every one of those rows carries
+`internal`, and enforcing that would put them all back above the guest ceiling, which is the
+regression the clearance change was written to undo. See ADR 0061.
+
+
 ## The one error the check names
 
 Browser-check runs kept going red on React error #418 — React finding that the DOM it had been

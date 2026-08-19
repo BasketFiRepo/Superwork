@@ -48,6 +48,10 @@ export const STEP_UP_ACTIONS = {
   // Raising a tool's budget lets it reach a system outside this company more often, with
   // nobody watching. Lowering one never asks (ADR 0050).
   'custom_tool.limits': 'letting a tool call an outside system more often',
+  // Same direction as a document (ADR 0044): lowering a thread's classification widens who can
+  // read the correspondence in it, and cascades to every message already sent. Raising one only
+  // narrows, so it never asks.
+  'conversation.declassify': 'widening who can read a thread of correspondence',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

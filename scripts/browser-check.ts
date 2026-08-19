@@ -2104,6 +2104,105 @@ try {
   ok('And it is gone from the library', documentsAfter === documentsBefore - 1,
     `${documentsBefore} → ${documentsAfter}`)
 
+  // ---- How far a thread may travel (ADR 0061) ------------------------------
+  // `conversations.sensitivity` carried `internal` since Phase 0, written by nothing and read by
+  // nothing: no repository put it in the resource the policy engine checks. Every member holds
+  // `conversation:read:org`, so every member read every thread in the organization.
+  await page.goto(`${BASE}/inbox`)
+  await page.waitForSelector('[data-testid="inbox-row"]', { timeout: 15_000 })
+  // A row opens on double-click, the way the follow-up walk above opens one.
+  await page.locator('[data-testid="inbox-row"]').first().dblclick()
+  await page.waitForSelector('[data-testid="conversation-classification"]', { timeout: 15_000 })
+  const threadUrl = page.url()
+  const threadSubject = await page.locator('h1').first().innerText()
+  const unclassified = await page.locator('[data-testid="classification-summary"]').innerText()
+  ok('A thread says whether anybody has decided who may read it',
+    /Nobody has classified this thread/i.test(unclassified), unclassified.slice(0, 60))
+
+  await page.locator('[data-testid="classification-edit"]').click()
+  await page.waitForSelector('[data-testid="classification-editor"]', { timeout: 15_000 })
+  ok('Nothing is classified without a reason',
+    await page.locator('[data-testid="classification-confirm"]').isDisabled())
+  await page.selectOption('#conversation-level', 'confidential')
+  const reach = await page.locator('[data-testid="classification-reach"]').innerText()
+  ok('It says who the level will reach, not just what it is called',
+    /managers, administrators and the owner/i.test(reach), reach.slice(0, 70))
+  await page.fill('#conversation-reason', 'Renewal terms the account team has not agreed yet.')
+  await page.locator('[data-testid="classification-confirm"]').click()
+  const threadRaised = await page
+    .waitForFunction(
+      () => /confidential/i.test(
+        document.querySelector('[data-testid="classification-level"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Raising it asks for no password, because raising only narrows', threadRaised)
+  ok('And it names who decided and why',
+    /decided by a person/i.test(await page.locator('[data-testid="classification-level"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/conversation-classification.png`, fullPage: true })
+
+  // The half that matters: a classification that changes nothing is decoration.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'priya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(`${BASE}/inbox?view=all`)
+  await page.waitForTimeout(1_000)
+  const memberSubjects = await page.locator('[data-testid="inbox-row"]').allInnerTexts()
+  ok('A member no longer has the thread on their list',
+    !memberSubjects.some((text) => text.includes(threadSubject)), threadSubject.slice(0, 50))
+  expectingRefusal = true
+  await page.goto(threadUrl)
+  await page.waitForTimeout(1_000)
+  const openedText = await page.locator('body').innerText()
+  ok('And opening it directly answers as though it is not here, never as forbidden',
+    !/conversation-classification/.test(await page.content()) && !/forbidden|not allowed/i.test(openedText))
+  expectingRefusal = false
+
+  // Put the demo back, through the control that widens — which is the one that asks.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'maya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(threadUrl)
+  await page.waitForSelector('[data-testid="conversation-classification"]', { timeout: 15_000 })
+  await page.locator('[data-testid="classification-edit"]').click()
+  await page.waitForSelector('[data-testid="classification-editor"]', { timeout: 15_000 })
+  await page.selectOption('#conversation-level', 'internal')
+  const lowering = await page.locator('[data-testid="classification-lowering"]').innerText()
+  ok('Lowering it says it widens who can read the thread, and every message in it',
+    /widens who can read/i.test(lowering))
+  await page.fill('#conversation-reason', 'The browser check putting the demo back.')
+  // The refusal that asks for the password arrives as a 401, which is the walk working.
+  expectingRefusal = true
+  await page.locator('[data-testid="classification-confirm"]').click()
+  // The identity may already have been proven earlier in this walk, in which case it goes
+  // straight through; both are correct, and only one of them shows a prompt.
+  const asked = await page
+    .locator('[data-testid="step-up"]')
+    .waitFor({ state: 'visible', timeout: 6_000 })
+    .then(() => true, () => false)
+  if (asked) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  expectingRefusal = false
+  const lowered = await page
+    .waitForFunction(
+      () => /internal/i.test(
+        document.querySelector('[data-testid="classification-level"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And the thread is back where the demo found it', lowered,
+    asked ? 'the password was asked for' : 'the identity was already proven this session')
+
   // ---- Adding to company memory, as an ordinary member ---------------------
   // "Add a document" was offered to everybody and worked for almost nobody: a member's
   // `document:create:own` grant could never be satisfied, so the refusal arrived after they

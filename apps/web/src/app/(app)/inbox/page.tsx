@@ -23,7 +23,7 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
 
   const { conversations, counts, views } = await withActor(session, async (ctx, actor) => ({
     conversations: await listConversations(ctx, actor, { view, limit: 100 }),
-    counts: await inboxCounts(ctx),
+    counts: await inboxCounts(ctx, actor),
     views: await listSavedViews(ctx, actor, 'inbox'),
   }))
 

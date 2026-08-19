@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { env } from '@superwork/config'
 import { enqueue, writeActivity, type PreviewLine } from '@superwork/core'
+import { readCeiling } from '@superwork/auth'
 import { register, type ToolContext } from '../registry.js'
 
 /**
@@ -312,7 +313,9 @@ async function composeFollowUp(ctx: ToolContext, conversationId: string | null):
              WHERE conversation_id = conv.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS excerpt,
            (SELECT name FROM users WHERE id = ${ctx.principalUserId}) AS sender
     FROM conversations conv LEFT JOIN companies c ON c.id = conv.company_id
-    WHERE conv.organization_id = ${ctx.organizationId} AND conv.id = ${conversationId}`
+    WHERE conv.organization_id = ${ctx.organizationId} AND conv.id = ${conversationId}
+      -- The excerpt goes into a draft somebody will read (ADR 0061).
+      AND conv.sensitivity <= ${readCeiling(ctx.policy)}::sw_sensitivity`
 
   const { MockLLMProvider } = await import('@superwork/ai')
   const provider = new MockLLMProvider()

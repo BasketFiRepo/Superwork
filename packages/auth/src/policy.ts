@@ -313,14 +313,20 @@ function requiredRoleFor(resourceType: string, verb: string): string {
 function checkClearance(actor: Actor, resource: Resource): Decision {
   // Only a resource that actually carries a classification is checked against one. This
   // used to default an absent classification to `internal`, which silently put every
-  // unclassified resource — tasks, projects and notes have no classification column at all
-  // — above the guest ceiling of `public`. That was the fourth independent reason the guest
-  // role could read nothing, and the least visible: the denial talked about classification
-  // for a resource that has none.
+  // resource that arrives here without one above the guest ceiling of `public`. That was the
+  // fourth independent reason the guest role could read nothing, and the least visible: the
+  // denial talked about classification for a resource that had none.
   //
   // The blast radius is exactly the guest role. Every other role's ceiling is `internal` or
-  // higher, so the old default was already satisfied for them. Anything that does carry a
-  // classification — documents, chunks — still passes it and is still checked.
+  // higher, so the old default was already satisfied for them.
+  //
+  // An earlier version of this comment said tasks, projects and notes "have no classification
+  // column at all". They do — nine tables carry `sensitivity`, and those three have carried it
+  // since Phase 0 with nothing writing or reading it (ADR 0061). What is true is narrower and
+  // is the thing that matters here: a classification decides nothing until a repository puts it
+  // in the `Resource` it checks. Documents, chunks and conversations do. Tasks, projects and
+  // notes do not yet, and starting would put every one of them above the guest ceiling again —
+  // which is why that is its own decision and not a tidy-up.
   if (resource.sensitivity === undefined) return ALLOW('This resource carries no data classification.')
   const sensitivity: Sensitivity = resource.sensitivity
   const ceiling = readCeiling(actor)
