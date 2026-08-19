@@ -161,15 +161,58 @@ describe('how hard this system may chase people', () => {
     ).rejects.toThrow(PermissionError)
   })
 
-  it('states the five things no setting can turn on', async () => {
+  it('states the five things no setting can turn on, and refuses all five', async () => {
     const policy = await withTenant(session, async (ctx) => monitoringPolicy(ctx, await loadActor(ctx)))
     expect(policy.prohibited).toHaveLength(5)
-    // And the database refuses them, which is what makes the sentence true.
+
+    // And the database refuses them, which is what makes the sentence true. This tried exactly
+    // one of the five until the column detector pointed out that the other four were a claim
+    // nothing checked — a guarantee asserted for a fifth of itself is a guarantee by adjacency.
+    //
+    // Each column is named in full rather than interpolated, so the detector can see that
+    // something tries to defeat the pin. A test written the other way is a test the instrument
+    // cannot count, which is how the gap got here in the first place.
+    const org_ = org.organizationId
+    const attempts: [string, () => Promise<unknown>][] = [
+      ['individual_scoring_enabled', () =>
+        adminSql()`UPDATE monitoring_policies SET individual_scoring_enabled = true WHERE organization_id = ${org_}`],
+      ['screen_or_keystroke_monitoring', () =>
+        adminSql()`UPDATE monitoring_policies SET screen_or_keystroke_monitoring = true WHERE organization_id = ${org_}`],
+      ['covert_monitoring', () =>
+        adminSql()`UPDATE monitoring_policies SET covert_monitoring = true WHERE organization_id = ${org_}`],
+      ['automated_employment_decisions', () =>
+        adminSql()`UPDATE monitoring_policies SET automated_employment_decisions = true WHERE organization_id = ${org_}`],
+      ['read_private_dms', () =>
+        adminSql()`UPDATE monitoring_policies SET read_private_dms = true WHERE organization_id = ${org_}`],
+    ]
+    for (const [column, attempt] of attempts) {
+      await expect(attempt(), `${column} can be turned on`).rejects.toThrow(
+        /monitoring_prohibited_by_design/i,
+      )
+    }
+  })
+
+  it('cannot hide a disclosure from the person it is about', async () => {
+    // §29.3, pinned the same way: `disclosures.visible_to_subject` can only be true, so nothing
+    // about somebody can reach their manager by a route the person cannot see.
+    const [disclosure] = await adminSql()<{ id: string }[]>`
+      INSERT INTO disclosures (organization_id, subject_user_id, recipient_label, kind, summary)
+      VALUES (${org.organizationId}, ${org.memberId}, 'Their manager', 'summary',
+              'What was passed on, and to whom.')
+      RETURNING id`
     await expect(
       adminSql()`
-        UPDATE monitoring_policies SET individual_scoring_enabled = true
-        WHERE organization_id = ${org.organizationId}`,
-    ).rejects.toThrow(/violates check constraint/i)
+        UPDATE disclosures SET visible_to_subject = false WHERE id = ${disclosure!.id}`,
+    ).rejects.toThrow(/disclosure_never_covert/i)
+    // And it cannot be written that way in the first place, which is the half a later UPDATE
+    // would not have caught.
+    await expect(
+      adminSql()`
+        INSERT INTO disclosures (organization_id, subject_user_id, recipient_label, kind, summary,
+                                 visible_to_subject)
+        VALUES (${org.organizationId}, ${org.memberId}, 'Their manager', 'summary', 'Quietly.',
+                false)`,
+    ).rejects.toThrow(/disclosure_never_covert/i)
   })
 })
 
