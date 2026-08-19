@@ -1,7 +1,9 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
+import { can } from '@superwork/auth'
 import { listCompanies, listMergeCandidates } from '@superwork/core'
 import { MergeQueue } from '@/components/MergeQueue'
+import { AddCompany } from '@/components/AddCompany'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,14 +12,36 @@ export default async function CompaniesPage({ searchParams }: { searchParams: Pr
   const session = await requireSession()
   const params = await searchParams
 
-  const { companies, merges } = await withActor(session, async (ctx, actor) => ({
-    companies: await listCompanies(ctx, actor, {
-      ...(params.type ? { type: params.type } : {}),
-      ...(params.search ? { search: params.search } : {}),
-      limit: 200,
+  const { companies, merges, canAddCompany, canAddContact, allCompanies } = await withActor(
+    session,
+    async (ctx, actor) => ({
+      companies: await listCompanies(ctx, actor, {
+        ...(params.type ? { type: params.type } : {}),
+        ...(params.search ? { search: params.search } : {}),
+        limit: 200,
+      }),
+      merges: await listMergeCandidates(ctx, actor),
+      // Two different gates, and they differ on purpose: a member may add somebody they have
+      // met, and only an administrator may open an account (ADR 0056). An exception can be
+      // granted for `company:create:org` where that is wrong for a particular person (ADR 0055).
+      canAddCompany: can(actor, 'company:create', {
+        type: 'company',
+        organizationId: ctx.organizationId,
+        ownerId: actor.userId,
+        riskTier: 'low',
+      }).allow,
+      canAddContact: can(actor, 'contact:create', {
+        type: 'contact',
+        organizationId: ctx.organizationId,
+        ownerId: actor.userId,
+        riskTier: 'low',
+      }).allow,
+      allCompanies: (await listCompanies(ctx, actor, { limit: 200 })).map((row) => ({
+        id: row.id,
+        name: row.name,
+      })),
     }),
-    merges: await listMergeCandidates(ctx, actor),
-  }))
+  )
 
   const types = ['customer', 'vendor', 'partner', 'prospect']
 
@@ -42,6 +66,8 @@ export default async function CompaniesPage({ searchParams }: { searchParams: Pr
           </Link>
         ))}
       </div>
+
+      <AddCompany canAddCompany={canAddCompany} canAddContact={canAddContact} companies={allCompanies} />
 
       <MergeQueue
         candidates={merges.map((m) => ({

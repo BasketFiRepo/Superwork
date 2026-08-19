@@ -586,3 +586,379 @@ export async function refreshCompanyInteractionTimes(ctx: TenantContext): Promis
     WHERE c.organization_id = ${ctx.organizationId} AND c.id = sub.company_id
       AND (c.last_interaction_at IS NULL OR c.last_interaction_at < sub.last_at)`
 }
+
+// ---------------------------------------------------------------------------
+// Adding a customer, and keeping the record true (ADR 0056)
+// ---------------------------------------------------------------------------
+
+/**
+ * The health of an account, as the screen shows it. Kept here and in a CHECK: the column had no
+ * vocabulary at all, so it could have held anything the day something started writing it.
+ */
+export const HEALTH_STATUSES = ['unknown', 'healthy', 'at_risk', 'critical'] as const
+export type HealthStatus = (typeof HEALTH_STATUSES)[number]
+
+export const COMPANY_TYPES = ['customer', 'vendor', 'partner', 'prospect', 'other'] as const
+
+/** What a domain has to look like to match an address. The database holds the same rule. */
+const DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+const EMAIL = /^[^@\s]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+
+function normalizeDomains(raw: string[] | undefined): string[] {
+  return [...new Set((raw ?? []).map((entry) => entry.trim().toLowerCase().replace(/^@/, '')).filter(Boolean))]
+}
+
+function normalizeEmails(raw: string[] | undefined): string[] {
+  return [...new Set((raw ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean))]
+}
+
+/**
+ * Adds a company.
+ *
+ * The interesting rule is the domain list. `companyForAddress` splits an inbound address at the
+ * `@` and looks the remainder up here, so a second company claiming a domain makes the answer to
+ * "whose customer is this?" arbitrary — and nothing would ever say so. It is refused, naming the
+ * company that already has it, rather than left to whichever row the planner returns first.
+ */
+export async function createCompany(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    name: string
+    type?: string
+    legalName?: string | null
+    industry?: string | null
+    sizeBand?: string | null
+    domains?: string[]
+    ownerId?: string | null
+    sensitivity?: string
+  },
+): Promise<CompanyView> {
+  const sensitivity = input.sensitivity ?? 'internal'
+  const decision = can(actor, 'company:create', {
+    type: 'company',
+    organizationId: ctx.organizationId,
+    // The row this will become, so an `own`-scoped grant is judged against the right owner
+    // (ADR 0045): a create check that does not say who will own it is checking nothing.
+    ownerId: input.ownerId ?? actor.userId,
+    sensitivity: sensitivity as never,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const name = input.name.trim()
+  if (name.length < 2) throw new ValidationError('A company needs a name somebody would recognise.')
+  if (name.length > 200) throw new ValidationError('That is longer than a name needs to be.')
+
+  const type = input.type ?? 'customer'
+  if (!COMPANY_TYPES.includes(type as (typeof COMPANY_TYPES)[number])) {
+    throw new ValidationError(`A company is one of: ${COMPANY_TYPES.join(', ')}.`)
+  }
+
+  // Nobody may file a record they could not then read. That rule is not repeated here: the
+  // classification is handed to `can()` above, and the policy engine already refuses it against
+  // the actor's ceiling — with a better sentence than a second copy would produce. Documents
+  // need their own check (ADR 0045) because there the level comes from a classifier reading the
+  // content rather than from the caller.
+  const domains = normalizeDomains(input.domains)
+  for (const domain of domains) {
+    if (!DOMAIN.test(domain)) {
+      throw new ValidationError(
+        `“${domain}” is not a domain mail can be matched on. It looks like northwind.example — ` +
+          'no @, and at least one dot.',
+      )
+    }
+  }
+
+  const [existing] = await ctx.sql<{ name: string }[]>`
+    SELECT name FROM companies
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND lower(btrim(name)) = lower(${name})`
+  if (existing) {
+    throw new ConflictError(`There is already a company called “${existing.name}”.`)
+  }
+
+  if (domains.length > 0) {
+    const [clash] = await ctx.sql<{ name: string; domains: string[] }[]>`
+      SELECT name, domains FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND domains && ${domains}`
+    if (clash) {
+      const shared = clash.domains.filter((domain) => domains.includes(domain))
+      throw new ConflictError(
+        `“${clash.name}” already receives mail from ${shared.join(', ')}. Two companies on one ` +
+          'domain would make it a coin toss which of them a message belongs to.',
+      )
+    }
+  }
+
+  const [row] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO companies (
+      organization_id, name, legal_name, type, industry, size_band, domains, owner_id,
+      sensitivity, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${name}, ${input.legalName?.trim() || null}, ${type}::sw_company_type,
+      ${input.industry?.trim() || null}, ${input.sizeBand?.trim() || null}, ${domains},
+      ${input.ownerId ?? actor.userId}, ${sensitivity}::sw_sensitivity, ${actor.userId}
+    ) RETURNING id`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'company.created',
+    entityType: 'company',
+    entityId: row!.id,
+    before: null,
+    after: { name, type, domains, sensitivity },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'added',
+    entityType: 'company',
+    entityId: row!.id,
+    entityLabel: name,
+    summary:
+      `${name} was added as a ${type}.` +
+      (domains.length ? ` Mail from ${domains.join(', ')} will be attributed to them.` : ''),
+  })
+
+  return getCompany(ctx, actor, row!.id)
+}
+
+/**
+ * Changes one.
+ *
+ * The three numbers here are what watchers act on — how long a thread may go unanswered, how long
+ * the account may go quiet, and how it is doing — and they have run on the column defaults for
+ * every company in every organization since Phase 0.
+ */
+export async function updateCompany(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    id: string
+    name?: string
+    legalName?: string | null
+    type?: string
+    industry?: string | null
+    sizeBand?: string | null
+    domains?: string[]
+    ownerId?: string | null
+    healthStatus?: string
+    replySlaDays?: number
+    checkInDays?: number
+    contractRenewsOn?: string | null
+  },
+): Promise<CompanyView> {
+  const before = await getCompany(ctx, actor, input.id)
+
+  const decision = can(actor, 'company:update', {
+    type: 'company',
+    organizationId: ctx.organizationId,
+    id: input.id,
+    ownerId: before.ownerId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const name = input.name === undefined ? before.name : input.name.trim()
+  if (name.length < 2) throw new ValidationError('A company needs a name somebody would recognise.')
+
+  const type = input.type ?? before.type
+  if (!COMPANY_TYPES.includes(type as (typeof COMPANY_TYPES)[number])) {
+    throw new ValidationError(`A company is one of: ${COMPANY_TYPES.join(', ')}.`)
+  }
+
+  const healthStatus = input.healthStatus ?? before.healthStatus
+  if (!HEALTH_STATUSES.includes(healthStatus as HealthStatus)) {
+    throw new ValidationError(`An account is one of: ${HEALTH_STATUSES.join(', ')}.`)
+  }
+
+  const replySlaDays = input.replySlaDays ?? before.replySlaDays
+  if (!Number.isInteger(replySlaDays) || replySlaDays < 1 || replySlaDays > 90) {
+    throw new ValidationError(
+      'A reply promise is between 1 and 90 days. Zero would mean chasing the moment a message ' +
+        'arrives, for ever.',
+    )
+  }
+  const checkInDays = input.checkInDays ?? before.checkInDays
+  if (!Number.isInteger(checkInDays) || checkInDays < 1 || checkInDays > 365) {
+    throw new ValidationError('A check-in window is between 1 and 365 days.')
+  }
+
+  const domains = input.domains === undefined ? before.domains : normalizeDomains(input.domains)
+  for (const domain of domains) {
+    if (!DOMAIN.test(domain)) {
+      throw new ValidationError(
+        `“${domain}” is not a domain mail can be matched on. It looks like northwind.example — ` +
+          'no @, and at least one dot.',
+      )
+    }
+  }
+  if (domains.length > 0) {
+    const [clash] = await ctx.sql<{ name: string; domains: string[] }[]>`
+      SELECT name, domains FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND id <> ${input.id}
+        AND domains && ${domains}`
+    if (clash) {
+      const shared = clash.domains.filter((domain) => domains.includes(domain))
+      throw new ConflictError(
+        `“${clash.name}” already receives mail from ${shared.join(', ')}. Two companies on one ` +
+          'domain would make it a coin toss which of them a message belongs to.',
+      )
+    }
+  }
+
+  if (input.name !== undefined && name.toLowerCase() !== before.name.toLowerCase()) {
+    const [existing] = await ctx.sql<{ name: string }[]>`
+      SELECT name FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND id <> ${input.id}
+        AND lower(btrim(name)) = lower(${name})`
+    if (existing) throw new ConflictError(`There is already a company called “${existing.name}”.`)
+  }
+
+  const sql = ctx.sql
+  await sql`
+    UPDATE companies
+    SET name = ${name},
+        legal_name = ${input.legalName === undefined ? sql`legal_name` : input.legalName?.trim() || null},
+        type = ${type}::sw_company_type,
+        industry = ${input.industry === undefined ? sql`industry` : input.industry?.trim() || null},
+        size_band = ${input.sizeBand === undefined ? sql`size_band` : input.sizeBand?.trim() || null},
+        domains = ${domains},
+        owner_id = ${input.ownerId === undefined ? sql`owner_id` : input.ownerId},
+        health_status = ${healthStatus},
+        reply_sla_days = ${replySlaDays},
+        check_in_days = ${checkInDays},
+        contract_renews_on = ${
+          input.contractRenewsOn === undefined
+            ? sql`contract_renews_on`
+            : input.contractRenewsOn
+              ? sql`${input.contractRenewsOn}::date`
+              : null
+        },
+        updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}`
+
+  const after = await getCompany(ctx, actor, input.id)
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'company.updated',
+    entityType: 'company',
+    entityId: input.id,
+    before: {
+      name: before.name,
+      type: before.type,
+      domains: before.domains,
+      healthStatus: before.healthStatus,
+      replySlaDays: before.replySlaDays,
+      checkInDays: before.checkInDays,
+      ownerId: before.ownerId,
+    },
+    after: {
+      name,
+      type,
+      domains,
+      healthStatus,
+      replySlaDays,
+      checkInDays,
+      ownerId: after.ownerId,
+    },
+  })
+
+  // The health of an account is the one thing here other people act on, so it goes on the feed
+  // rather than only into the audit log.
+  if (before.healthStatus !== healthStatus) {
+    await writeActivity(ctx, {
+      actorType: actor.type,
+      actorUserId: actor.userId,
+      actorLabel: actor.displayName,
+      verb: 'marked',
+      entityType: 'company',
+      entityId: input.id,
+      entityLabel: name,
+      summary: `${name} is now ${healthStatus.replace('_', ' ')}, was ${before.healthStatus.replace('_', ' ')}.`,
+    })
+  }
+
+  return after
+}
+
+/**
+ * Adds a contact.
+ *
+ * A duplicate address is *not* refused. Two records for the same person is what the merge queue
+ * exists to notice (§8.4), and refusing the row would remove the thing that queue works on. So
+ * the queue is asked to look immediately after the row lands: the duplicate surfaces as something
+ * a person resolves, with both records in front of them, rather than as a refusal at the moment
+ * they were trying to write something down.
+ */
+export async function createContact(
+  ctx: TenantContext,
+  actor: Actor,
+  input: {
+    name: string
+    companyId?: string | null
+    emails?: string[]
+    title?: string | null
+    seniority?: string | null
+    ownerId?: string | null
+    sensitivity?: string
+  },
+): Promise<ContactView> {
+  const sensitivity = input.sensitivity ?? 'internal'
+  const decision = can(actor, 'contact:create', {
+    type: 'contact',
+    organizationId: ctx.organizationId,
+    ownerId: input.ownerId ?? actor.userId,
+    sensitivity: sensitivity as never,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const name = input.name.trim()
+  if (name.length < 2) throw new ValidationError('A contact needs a name somebody would recognise.')
+
+  // The ceiling is the engine's, as above.
+  const emails = normalizeEmails(input.emails)
+  for (const address of emails) {
+    if (!EMAIL.test(address)) {
+      throw new ValidationError(`“${address}” is not an email address.`)
+    }
+  }
+
+  if (input.companyId) {
+    const [company] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.companyId} AND deleted_at IS NULL`
+    if (!company) throw new NotFoundError()
+  }
+
+  const [row] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO contacts (
+      organization_id, company_id, name, emails, title, seniority, owner_id, sensitivity, created_by
+    ) VALUES (
+      ${ctx.organizationId}, ${input.companyId ?? null}, ${name}, ${emails},
+      ${input.title?.trim() || null}, ${input.seniority?.trim() || null},
+      ${input.ownerId ?? actor.userId}, ${sensitivity}::sw_sensitivity, ${actor.userId}
+    ) RETURNING id`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'contact.created',
+    entityType: 'contact',
+    entityId: row!.id,
+    before: null,
+    after: { name, emails, companyId: input.companyId ?? null },
+  })
+
+  // The same sweep the nervous system runs, asked now rather than on its own cadence: a person
+  // who has just typed an address that already exists should see that while they remember why.
+  if (emails.length > 0) await detectDuplicateContacts(ctx, actor)
+
+  return getContact(ctx, actor, row!.id)
+}

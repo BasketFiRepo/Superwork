@@ -168,6 +168,10 @@ import {
   organizationCurrency,
   grantPermission,
   revokePermissionGrant,
+  createCompany,
+  updateCompany,
+  createContact,
+  companyForAddress,
   listOutgoing,
   recallSend,
   claimSendForDispatch,
@@ -589,6 +593,72 @@ try {
     `${exception.grant.grantedByName} · ${exception.grant.expiresAt ? 'ends' : 'no end date'}`)
   ok('Taking it back stops it, without asking for a password',
     exception.afterRevoke.allow === false)
+
+  // ---- A customer somebody added (ADR 0056) ---------------------------------
+  // `companies` and `contacts` are read by the companies screen, the relationship view, the
+  // inbox's routing and the watchers that ask whether an account has gone quiet — and both were
+  // written by the seed and by nothing else. There was no way to add a customer to this product.
+  const crm = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const company = await createCompany(ctx, actor, {
+      name: 'Loop Cold Chain',
+      type: 'customer',
+      industry: 'Chilled distribution',
+      domains: ['LoopCold.example'],
+    })
+    // The reason the domain list exists: it decides whose customer a message is.
+    const matched = await companyForAddress(ctx, 'ops@loopcold.example')
+    const clash = await createCompany(ctx, actor, {
+      name: 'Loop Cold Chain (South)',
+      domains: ['loopcold.example'],
+    }).then(() => null, (error: Error) => error.message)
+    const badDomain = await createCompany(ctx, actor, {
+      name: 'Loop Bad Domain',
+      domains: ['ops@loopcold.example'],
+    }).then(() => null, (error: Error) => error.message)
+
+    // The numbers the watchers act on, which ran on the column defaults for every company.
+    const tightened = await updateCompany(ctx, actor, {
+      id: company.id,
+      healthStatus: 'at_risk',
+      replySlaDays: 2,
+      checkInDays: 14,
+    })
+    const impossible = await updateCompany(ctx, actor, { id: company.id, replySlaDays: 0 })
+      .then(() => null, (error: Error) => error.message)
+
+    const contact = await createContact(ctx, actor, {
+      name: 'Loop Contact',
+      companyId: company.id,
+      emails: ['Loop.Contact@LoopCold.example'],
+      title: 'Head of logistics',
+    })
+
+    // Put the demo back.
+    await ctx.sql`DELETE FROM contacts WHERE organization_id = ${ctx.organizationId} AND id = ${contact.id}`
+    await ctx.sql`DELETE FROM activities WHERE organization_id = ${ctx.organizationId} AND entity_id = ${company.id}`
+    await ctx.sql`DELETE FROM companies WHERE organization_id = ${ctx.organizationId} AND id = ${company.id}`
+
+    return { company, matched, clash, badDomain, tightened, impossible, contact }
+  })
+
+  ok('A company can be added at last, rather than only seeded',
+    crm.company.name === 'Loop Cold Chain' && crm.company.ownerId !== null,
+    `${crm.company.name} · ${crm.company.domains.join(', ')}`)
+  ok('Its domain is what decides whose customer a message is',
+    crm.matched?.id === crm.company.id, crm.matched?.name ?? 'nothing matched')
+  ok('And no second company may claim it, because that answer would be a coin toss',
+    /coin toss/i.test(crm.clash ?? ''), (crm.clash ?? 'it was allowed').slice(0, 70))
+  ok('A domain that could never match an address is refused by name',
+    /not a domain mail can be matched on/i.test(crm.badDomain ?? ''),
+    (crm.badDomain ?? 'it was allowed').slice(0, 70))
+  ok('The numbers the watchers act on are numbers somebody chose',
+    crm.tightened.replySlaDays === 2 && crm.tightened.checkInDays === 14 &&
+      crm.tightened.healthStatus === 'at_risk')
+  ok('And a promise nobody could keep is refused',
+    /for ever/i.test(crm.impossible ?? ''), (crm.impossible ?? 'it was allowed').slice(0, 70))
+  ok('Somebody at that company can be added too, with their address normalised',
+    crm.contact.emails[0] === 'loop.contact@loopcold.example', crm.contact.emails.join(', '))
 
   // ---- 4b. The clock -------------------------------------------------------
   console.log('\nPutting it on the clock…\n')
@@ -3823,7 +3893,9 @@ try {
         'a button behind it, with the row itself deciding between the person who changed their \n' +
         'mind and the dispatcher that was about to send it; and one person can be given one \n' +
         'capability their role does not carry, with who gave it, why, and when it ends — so \n' +
-        'nobody has to be made an administrator to be trusted with one thing.\n',
+        'nobody has to be made an administrator to be trusted with one thing; and a customer can \n' +
+        'be added at last, with the domain that decides whose mail is whose refused to a second \n' +
+        'company rather than left a coin toss.\n',
   )
 } catch (error) {
   console.error(error)

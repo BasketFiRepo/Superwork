@@ -1371,6 +1371,35 @@ read-and-never-written, and that is the guarantee working.
 
 **Settings → Members.** See ADR 0055.
 
+## A customer somebody added
+
+`companies` and `contacts` are read by the companies screen, the relationship view, the inbox's
+routing, the watchers that ask whether an account has gone quiet, and the ACL that decides who may
+see either — and both were written by the seed and by nothing else since Phase 0. **There was no
+way to add a customer to this product.** Neither table had ever carried a single CHECK, so the
+fields it acts on could hold anything.
+
+- **The domain list needed the most care**, because it is what decides whose customer an inbound
+  message is. An entry with an `@`, or no dot, or in the wrong case matches nothing and fails
+  silently; two companies claiming one domain makes the answer arbitrary. Normalised, refused with
+  the name of the company that already has it, and refused again by a database function.
+- **The two day counts have a floor of 1.** Zero means "chase the moment a message arrives, for
+  ever", which nobody would choose on purpose.
+- **`health_status` got a vocabulary**, having had none at all.
+- **The classification ceiling is not re-checked here.** `can()` already refuses a record somebody
+  could not read afterwards. The second copy was written, found redundant, and deleted — a rule
+  enforced twice is a rule that will eventually be enforced differently.
+- **A duplicate contact is not refused**, because that is what the merge queue works on. The sweep
+  is asked to look immediately instead, so it surfaces as something to resolve rather than a
+  refusal at the moment somebody was writing a name down.
+- **A member may add a contact and not open an account** — and where that is wrong for one person,
+  an exception (ADR 0055) is now the answer rather than making them an administrator.
+- **Not built:** conversations and messages. They are the record of correspondence, which arrives
+  through an integration this product has no credentials for; a form that fabricates an inbound
+  email would put words in a customer's mouth.
+
+**Companies.** See ADR 0056.
+
 ## The clock that only sometimes matched
 
 Three browser-check runs went red on React error #418 before the pattern was clear, always on the
