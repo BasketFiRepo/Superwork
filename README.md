@@ -1419,11 +1419,38 @@ customer this morning could watch the product decide the account had gone quiet.
 - **No audit record**: the interaction *is* the record. It goes on the activity feed instead,
   because a colleague about to ring the same customer should know somebody already has.
 
-Noted and deliberately not changed: a **manager** cannot log one, because their `note:*:department`
-scope is not satisfied by a company — while a member's `note:create:org` is. That predates this
-change, it looks wrong, and it deserves a decision of its own rather than a quiet fix inside a form.
+Noted at the time and deliberately not changed inside a form: a **manager** could not log one,
+because their `note:*:department` scope is not satisfied by a company — while a member's
+`note:create:org` is. That got the decision of its own it deserved; see below.
 
 **Companies → any company.** See ADR 0057.
+
+## A rung that only adds
+
+Chasing that one refusal turned it into a class. Walking every `resource:action` any role list
+mentions, through four shapes of resource — owned by the person, in their department, in their
+team, and filed against nothing — **twenty-one** pairs came back where a *higher* rung could do
+less than a lower one.
+
+- **Ten are the manager**, and the shape of a company caused all ten. `scopeSatisfied('department')`
+  needs the resource to *have* a department, and a company has none — nor does a document somebody
+  is about to create and own, nor a task filed against nothing. The manager's grants are
+  department-scoped where the member baseline is `own` or `org`, so the baseline reached further
+  down than the rung above it. The refusal a manager saw said *"You need Member access to create
+  this note"*, which is the product telling an account manager to be demoted.
+- **Eleven are the administrator**, and a missing word caused all eleven. The admin list never
+  mentions `milestone`; `*:read:org` covers reading it and nothing else.
+
+Nobody decided any of that. It is what four hand-maintained lists look like after eleven
+increments. So the ladder is **built rather than remembered** — a member is a viewer who does the
+work, a manager is a member with a department, an admin is a manager whose department is the
+organization — and the invariant is a property test that rebuilds the catalogue from the role
+tables themselves, so a resource added tomorrow is covered the day it appears. Undoing the
+composition fails it and names every break by hand.
+
+`guest` and `service` are not rungs, and the code says why where the lists are: a guest is somebody
+from outside invited to one team, sideways from the ladder rather than beneath it, and a viewer
+deliberately cannot write the note a guest can. See ADR 0059.
 
 ## The one error the check names
 
