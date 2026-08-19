@@ -1208,6 +1208,31 @@ through the agent.
 
 **Work; the projects screen.** See ADR 0049.
 
+## A budget that stops something
+
+Every tool in the registry declares `rateLimit: { perRun, perOrgPerHour }` — a required field,
+hand-picked numbers on twenty built-ins, two columns on `custom_tools` — and **nothing ever read
+it**. The type system enforced the shape of a limit the product enforced nothing about. For a
+custom tool it was worse: the columns were read out of the row and handed to the registry, so
+they looked enforced, while `saveCustomTool` never wrote either — every admin-authored tool that
+reaches an outside system ran on a migration default of 5 and 200.
+
+- **The limits are enforced, counted from the calls that really happened** — the same source the
+  workflow throttle uses, not a counter in a process that restarts.
+- **Two budgets, two failures.** Per run stops one plan doing the same thing forty times; per
+  organization per hour stops many runs adding up to the same thing — that one belongs to the
+  organization because it is what somebody else's system feels.
+- **Checked in both executors, in one function.** A budget enforced on the agent path and not
+  the workflow path is not a budget. Not on undo (refusing an undo leaves the world in the state
+  the budget was preventing) and not on MCP (read-tier only, and an API key has its own).
+- **The refusal says which budget and what happens next** — the hour is rolling, so it will run
+  again by itself.
+- **The custom-tool numbers are settable**, 1–100 per run and 1–5,000 an hour, with the hour
+  never smaller than the run, and with who chose them and why. Raising asks for a fresh proof;
+  lowering — which is what you do when a supplier asks you to slow down — never does.
+
+**Settings → Custom tools.** See ADR 0050.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the
@@ -1704,6 +1729,7 @@ changelog: each says what was chosen, what it rules out, and what it costs.
 | [0047](docs/adr/0047-when-you-are-written-to.md) | When you are written to |
 | [0048](docs/adr/0048-the-work-a-milestone-is-made-of.md) | The work a milestone is made of |
 | [0049](docs/adr/0049-a-project-somebody-started.md) | A project somebody started |
+| [0050](docs/adr/0050-a-budget-that-stops-something.md) | A budget that stops something |
 
 ## Configuration
 

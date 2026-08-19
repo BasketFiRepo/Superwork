@@ -59,6 +59,7 @@ export default async function CustomToolsPage() {
             ...tool,
             approvedAt: tool.approvedAt ? tool.approvedAt.toISOString() : null,
             lastCalledAt: tool.lastCalledAt ? tool.lastCalledAt.toISOString() : null,
+            limitsSetAt: tool.limitsSetAt ? tool.limitsSetAt.toISOString() : null,
           }))}
           hosts={(data?.hosts ?? []).map((host) => ({
             ...host,

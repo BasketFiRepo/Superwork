@@ -26,6 +26,11 @@ interface ToolRow {
   approvedAt: string | null
   hostReviewed: boolean
   lastCalledAt: string | null
+  perRunLimit: number
+  perHourLimit: number
+  limitsSetByName: string | null
+  limitsReason: string | null
+  usedThisHour: number
 }
 
 interface HostRow {
@@ -54,6 +59,11 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
   const [riskTier, setRiskTier] = useState('read')
   const [permission, setPermission] = useState(PERMISSIONS[0]!)
   const [parameters, setParameters] = useState('')
+  // The budgets every tool declared and nothing enforced until ADR 0050.
+  const [editingLimits, setEditingLimits] = useState<string | null>(null)
+  const [perRun, setPerRun] = useState('')
+  const [perHour, setPerHour] = useState('')
+  const [limitsReason, setLimitsReason] = useState('')
 
   async function post(body: Record<string, unknown>) {
     setBusy(true)
@@ -202,6 +212,7 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
               <thead>
                 <tr>
                   <th>Tool</th>
+                  <th style={{ width: 220 }}>How often it may run</th>
                   <th style={{ width: 200 }}>Calls</th>
                   <th style={{ width: 90 }}>Risk</th>
                   <th style={{ width: 150 }}>Status</th>
@@ -214,6 +225,97 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
                     <td>
                       <div>{tool.name}</div>
                       <div className="small muted">{tool.description}</div>
+                    </td>
+                    <td className="small secondary" data-testid="custom-tool-budget">
+                      {editingLimits === tool.id ? (
+                        <div className="stack stack-2" data-testid="custom-tool-limits-editor">
+                          <div className="row-tight">
+                            <input
+                              className="input"
+                              id={`per-run-${tool.id}`}
+                              aria-label="Calls in one run"
+                              type="number"
+                              min={1}
+                              max={100}
+                              style={{ width: 70 }}
+                              value={perRun}
+                              onChange={(event) => setPerRun(event.target.value)}
+                            />
+                            <span className="micro">per run</span>
+                            <input
+                              className="input"
+                              id={`per-hour-${tool.id}`}
+                              aria-label="Calls an hour"
+                              type="number"
+                              min={1}
+                              max={5000}
+                              style={{ width: 80 }}
+                              value={perHour}
+                              onChange={(event) => setPerHour(event.target.value)}
+                            />
+                            <span className="micro">an hour</span>
+                          </div>
+                          <input
+                            className="input"
+                            id={`limits-reason-${tool.id}`}
+                            aria-label="Why"
+                            placeholder="The supplier asked us to slow down."
+                            value={limitsReason}
+                            onChange={(event) => setLimitsReason(event.target.value)}
+                          />
+                          {Number(perRun) > tool.perRunLimit || Number(perHour) > tool.perHourLimit ? (
+                            <span className="small" data-testid="custom-tool-limits-raising">
+                              That lets it reach an outside system more often, so you will be asked to
+                              confirm your password. Lowering never asks.
+                            </span>
+                          ) : null}
+                          <div className="row-tight">
+                            <button
+                              className="btn small"
+                              data-testid="custom-tool-limits-confirm"
+                              disabled={busy || limitsReason.trim().length < 4}
+                              onClick={async () => {
+                                const saved = await post({
+                                  action: 'limits',
+                                  id: tool.id,
+                                  perRunLimit: Number(perRun),
+                                  perHourLimit: Number(perHour),
+                                  reason: limitsReason.trim(),
+                                })
+                                if (saved) setEditingLimits(null)
+                              }}
+                            >
+                              Set
+                            </button>
+                            <button className="btn btn-ghost small" disabled={busy} onClick={() => setEditingLimits(null)}>
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="stack stack-1">
+                          <span>
+                            {tool.perRunLimit} per run · {tool.perHourLimit} an hour
+                          </span>
+                          <span className="micro muted">
+                            {tool.usedThisHour} in the last hour ·{' '}
+                            {tool.limitsSetByName ? `set by ${tool.limitsSetByName}` : 'nobody has chosen these'}
+                          </span>
+                          <button
+                            className="btn btn-ghost small"
+                            data-testid="custom-tool-limits-edit"
+                            disabled={busy}
+                            onClick={() => {
+                              setEditingLimits(tool.id)
+                              setPerRun(String(tool.perRunLimit))
+                              setPerHour(String(tool.perHourLimit))
+                              setLimitsReason('')
+                            }}
+                          >
+                            Change
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="small secondary">
                       {tool.method} {tool.host}

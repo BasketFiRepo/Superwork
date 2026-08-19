@@ -1,4 +1,5 @@
 export * from './registry.js'
+export * from './rate-limit.js'
 
 // Importing the catalogue registers every tool exactly once.
 import './catalogue/retrieval.js'

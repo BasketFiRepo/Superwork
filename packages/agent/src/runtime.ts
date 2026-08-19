@@ -19,6 +19,7 @@ import {
 } from '@superwork/core'
 import { completeWithFallback, loadPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
 import {
+  checkRateLimit,
   customToolsFor,
   hashArgs,
   redactInput,
@@ -805,6 +806,25 @@ async function runStep(
         riskTier: tool.riskTier,
       })
       return { ok: true, message: 'already applied', looping: false, undoRecorded: false }
+    }
+
+    // The budget every tool has declared since Phase 1 and nothing ever read (ADR 0050).
+    // Checked before the arguments, because a call that is over budget should not reach the
+    // outside system whether or not its arguments would have parsed.
+    const budget = await checkRateLimit(ctx, tool, runId)
+    if (!budget.allow) {
+      await recordStep(ctx, runId, {
+        ordinal: phase.ordinal - 1,
+        phase: 'act',
+        label: describeStep(tool.name, step),
+        status: 'failed',
+        toolName: tool.name,
+        riskTier: tool.riskTier,
+        errorClass: 'rate_limit',
+        errorMessage: budget.reason,
+      })
+      publish(runId, { type: 'tool.result', tool: tool.name, ok: false, summary: budget.reason })
+      return { ok: false, message: budget.reason, looping: false, undoRecorded: false }
     }
 
     const started = Date.now()
