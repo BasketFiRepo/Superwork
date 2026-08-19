@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { checkCapacity, describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { can } from '@superwork/auth'

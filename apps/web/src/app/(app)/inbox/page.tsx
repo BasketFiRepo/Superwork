@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { inboxCounts, listConversations, listSavedViews } from '@superwork/core'
 import { SavedViews } from '@/components/SavedViews'

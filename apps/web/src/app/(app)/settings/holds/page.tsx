@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { listHolds, PermissionError, retentionPolicies } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
 import { LegalHolds } from '@/components/LegalHolds'

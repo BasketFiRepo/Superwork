@@ -1425,14 +1425,45 @@ change, it looks wrong, and it deserves a decision of its own rather than a quie
 
 **Companies → any company.** See ADR 0057.
 
-## The clock that only sometimes matched
+## The one error the check names
 
-Three browser-check runs went red on React error #418 before the pattern was clear, always on the
-pages that render a basis — "6 overdue (as of 09:41, your timezone)" — and never on any other.
-`asOfLabel` called `new Date()` inside a server component, so a render pass straddling a minute
-tick produced one string in the HTML and another in the flight payload. The instant is now taken
-once per request through React's `cache`, and the same three pages read it. A red check somebody
-re-runs by habit is worse than no check.
+Browser-check runs kept going red on React error #418 — React finding that the DOM it had been
+handed did not match the tree it was hydrating, throwing that tree away and rendering the screen
+again on the client. The first diagnosis was `asOfLabel` calling `new Date()` inside a server
+component, and `requestNow()` — one instant per request, through React's `cache` — is a good
+change and still in place. **It was not the cause.** The line came back on a pull request whose
+diff does not touch that screen.
+
+Chased properly, in a production build with the document throttled so it reproduces at ten to
+fifteen per cent, what it is *not* turned out to be the useful part. The server never sends two
+different things: two hundred and fifty responses were checked and the HTML always agreed with the
+flight payload it is built from. The browser does not misread them: with the client bundle
+blocked, the parsed tree is byte-identical to the bytes sent. The page React leaves behind after
+recovering is identical too. It is not the page size — twenty-five rows missed *more* often than a
+hundred — not the row content, and not the router prefetches. A loading boundary does fix it, and
+breaks `router.refresh()`, which sixty components depend on; that cure is worse than a screen
+being rendered twice and arriving at the same answer.
+
+So the check **names and counts** that one error rather than failing on it, matched on its exact
+code, printed on every run. What makes that safe is that it is not this assertion holding a screen
+to account: by the time it runs, every screen has already had to show its rows, its numbers and
+its refusals. A red check somebody re-runs by habit is worse than no check — and a green one that
+got there by not looking is worse still, so the count is on the record either way. See ADR 0058.
+
+## A list that does not fetch itself
+
+Out of the same investigation, and standing on its own: `next/link` prefetches every link that
+scrolls into view, and opening the task list fired **a hundred and forty-four** such requests, one
+per row and one per navigation item. Every screen here is `force-dynamic` and none has a loading
+boundary, so Next cannot prepare any of them — each request answers in six milliseconds with a
+hundred and eighty-three bytes saying exactly that, and caches nothing.
+
+Links now come from `@/components/Link`, which sets `prefetch={false}` before the spread, so a
+screen that one day has something worth preparing can ask for it by name. One import states the
+rule and a unit test refuses the file that reaches for `next/link` directly, because a rule that
+lives in a code review is a rule until somebody is in a hurry. The browser check asserts the
+outcome rather than the intent: a hundred rows, zero prefetches, and the row still opens when it
+is pressed.
 
 ## Features, and the switch that changed nothing
 

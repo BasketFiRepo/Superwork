@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { ingestionBacklog, knowledgeHealth, listDocuments, listSpaces } from '@superwork/core'
 import { can, readCeiling } from '@superwork/auth'
