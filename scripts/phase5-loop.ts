@@ -172,6 +172,9 @@ import {
   updateCompany,
   createContact,
   companyForAddress,
+  logInteraction,
+  listInteractions,
+  listCompanies,
   listOutgoing,
   recallSend,
   claimSendForDispatch,
@@ -659,6 +662,54 @@ try {
     /for ever/i.test(crm.impossible ?? ''), (crm.impossible ?? 'it was allowed').slice(0, 70))
   ok('Somebody at that company can be added too, with their address normalised',
     crm.contact.emails[0] === 'loop.contact@loopcold.example', crm.contact.emails.join(', '))
+
+  // ---- What was said, and when (ADR 0057) -----------------------------------
+  // The company screen has always shown a relationship timeline, and `last_interaction_at` — what
+  // the quiet-account watcher acts on — is derived from it. Only an agent could add to it.
+  const logged = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const company = await createCompany(ctx, actor, {
+      name: 'Loop Interaction Co',
+      domains: ['loopinteraction.example'],
+    })
+    const [before] = await listCompanies(ctx, actor, { search: 'Loop Interaction Co' })
+
+    await logInteraction(ctx, actor, {
+      companyId: company.id,
+      kind: 'call',
+      summary: 'Rang about the reefer handover — happy with 14:00 from Monday.',
+    })
+    const [after] = await listCompanies(ctx, actor, { search: 'Loop Interaction Co' })
+    const timeline = await listInteractions(ctx, company.id, 10)
+
+    const future = await logInteraction(ctx, actor, {
+      companyId: company.id,
+      kind: 'call',
+      summary: 'Will ring them next week.',
+      occurredAt: new Date(Date.now() + 7 * 86_400_000),
+    }).then(() => null, (error: Error) => error.message)
+    const nobody = await logInteraction(ctx, actor, {
+      kind: 'call',
+      summary: 'Rang somebody, cannot say who.',
+    }).then(() => null, (error: Error) => error.message)
+
+    // Put the demo back.
+    await ctx.sql`DELETE FROM interactions WHERE organization_id = ${ctx.organizationId} AND company_id = ${company.id}`
+    await ctx.sql`DELETE FROM activities WHERE organization_id = ${ctx.organizationId} AND entity_id = ${company.id}`
+    await ctx.sql`DELETE FROM companies WHERE organization_id = ${ctx.organizationId} AND id = ${company.id}`
+
+    return { before: before!, after: after!, timeline, future, nobody }
+  })
+
+  ok('A person can log a call at last, not only an agent',
+    logged.timeline.length === 1 && logged.timeline[0]!.kind === 'call',
+    logged.timeline[0]?.summary.slice(0, 60) ?? 'nothing logged')
+  ok('And the account stops being counted as quiet the moment they do',
+    logged.before.lastInteractionAt === null && logged.after.daysSinceInteraction === 0)
+  ok('One dated in the future is refused, because it has not happened',
+    /Log it after it happens/i.test(logged.future ?? ''), (logged.future ?? 'allowed').slice(0, 60))
+  ok('And one about nobody is refused, because nothing would ever show it',
+    /about a company or a person/i.test(logged.nobody ?? ''), (logged.nobody ?? 'allowed').slice(0, 60))
 
   // ---- 4b. The clock -------------------------------------------------------
   console.log('\nPutting it on the clock…\n')
@@ -3895,7 +3946,8 @@ try {
         'capability their role does not carry, with who gave it, why, and when it ends — so \n' +
         'nobody has to be made an administrator to be trusted with one thing; and a customer can \n' +
         'be added at last, with the domain that decides whose mail is whose refused to a second \n' +
-        'company rather than left a coin toss.\n',
+        'company rather than left a coin toss; and the call somebody made this morning can be \n' +
+        'written down by the person who made it, so the account stops being counted as quiet.\n',
   )
 } catch (error) {
   console.error(error)

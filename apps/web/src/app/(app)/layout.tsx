@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { Sidebar } from '@/components/Sidebar'
 import { AgentRail } from '@/components/AgentRail'

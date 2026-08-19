@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { describeCron, listWorkflows } from '@superwork/core'
 import { requireSession, withActor } from '@/lib/session'
 import { WorkflowComposer } from '@/components/WorkflowComposer'

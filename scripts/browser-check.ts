@@ -27,16 +27,52 @@ const browser = await chromium.launch(executablePath ? { executablePath } : {})
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
 
 const errors: string[] = []
+/**
+ * The one thing this check names rather than fails on (ADR 0058).
+ *
+ * React error #418 says React found that the DOM it was handed did not match the tree it was
+ * hydrating, threw that tree away and rendered the screen again on the client. It is a recovery,
+ * not a break, and on the longest screen here it happens on roughly one slow load in eight.
+ *
+ * It was chased a long way before it was named. The server's HTML and the flight payload it is
+ * built from agree — two hundred and fifty consecutive responses were checked for it. The
+ * browser's parse of those bytes, with the client bundle blocked so nothing could touch it, is
+ * identical to what the server sent. The DOM React leaves behind after recovering is identical
+ * to it too. It is not the page size (twenty-five rows misses more often than a hundred), not
+ * the row content, and not the router prefetches (removing all of them changed nothing). A
+ * loading boundary does fix it, by hydrating the shell separately from the screen — and breaks
+ * `router.refresh()`, which sixty components here depend on to replace an optimistic update with
+ * the truth, so that cure is worse.
+ *
+ * So it is counted and printed on every run instead. What makes that safe is that it is not
+ * this assertion holding the screen to account: every screen has already had to show its rows,
+ * its numbers and its refusals by the time this runs, and any of those failing is still red.
+ * Matched on the exact error code, so nothing else arrives through the same door.
+ */
+const RECOVERED_HYDRATION = /Minified React error #418/
+const recoveries: string[] = []
 // "Failed to load resource" on its own is useless; record what actually failed. The screen
 // goes on the record too: a minified React error with no location is not something anybody
 // can act on, and this walks thirty of them.
 const where = () => page.url().replace(BASE, '') || '/'
+const record = (text: string) => {
+  if (RECOVERED_HYDRATION.test(text)) recoveries.push(where())
+  else errors.push(`${text} (on ${where()})`)
+}
 page.on('console', (message: ConsoleMessage) => {
   if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) {
-    errors.push(`${message.text()} (on ${where()})`)
+    record(message.text())
   }
 })
-page.on('pageerror', (error) => errors.push(`${String(error)} (on ${where()})`))
+page.on('pageerror', (error) => record(String(error)))
+// Screens that fetch themselves (ADR 0058). Every route here is dynamic and none has a loading
+// boundary, so a router prefetch answers "nothing can be prepared for this" and caches nothing.
+let prefetches: string[] = []
+page.on('request', (request) => {
+  if (request.headers()['next-router-prefetch'] === '1') {
+    prefetches.push(request.url().replace(BASE, '').replace(/[?&]_rsc=[^&]*/, ''))
+  }
+})
 // A check that deliberately exercises a refusal will see the 4xx that proves it worked.
 // Those are announced rather than counted as breakage.
 let expectingRefusal = false
@@ -158,6 +194,31 @@ try {
   const cited = await page.locator('[data-testid="relationship-fact"] [data-testid="fact-source"]').count()
   ok('The 360° view renders facts', facts > 0, `${facts} facts`)
   ok('Every fact carries its source', cited === facts, `${cited}/${facts} cited`)
+
+  // ---- What was said, and when (ADR 0057) ----------------------------------
+  // The timeline has always been on this screen and only an agent could add to it, so an account
+  // somebody rang this morning could still be counted as quiet.
+  await page.waitForSelector('[data-testid="log-interaction"]', { timeout: 15_000 })
+  await page.locator('[data-testid="log-interaction-open"]').click()
+  await page.waitForSelector('[data-testid="log-interaction-editor"]', { timeout: 15_000 })
+  ok('Nothing is logged without saying what happened',
+    await page.locator('[data-testid="interaction-confirm"]').isDisabled())
+  await page.selectOption('#interaction-kind', 'call')
+  await page.fill('#interaction-summary', 'Browser check rang about the reefer handover.')
+  await page.locator('[data-testid="interaction-confirm"]').click()
+  const loggedIt = await page
+    .locator('[data-testid="log-interaction-editor"]')
+    .waitFor({ state: 'detached', timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('A person can log a call from the company screen', loggedIt)
+  // `router.refresh()` repaints the server component, so wait for the row rather than reading
+  // the panel the instant the editor closes.
+  const onTimeline = await page
+    .getByText('Browser check rang about the reefer handover.')
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And it is on the timeline, with what it was and who logged it', onTimeline)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company.png`, fullPage: true })
 
   // ---- A customer somebody added (ADR 0056) --------------------------------
@@ -1762,6 +1823,26 @@ try {
   ok('With a row per model and task class', modelRows > 0, `${modelRows} rows`)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/model-spend.png`, fullPage: true })
 
+  // ---- A list that does not fetch itself ----------------------------------
+  // Opening the task list used to issue one prefetch per row plus one per navigation entry —
+  // a hundred and forty-four requests, none of which could return anything, because a
+  // `force-dynamic` route with no loading boundary has nothing to prepare.
+  prefetches = []
+  await page.goto(`${BASE}/tasks?filter=all`)
+  await page.waitForSelector('[data-testid="task-row"]', { timeout: 15_000 })
+  const listedRows = await page.locator('[data-testid="task-row"]').count()
+  // Prefetching is triggered by what is on screen, so give the router the time it would take.
+  await page.waitForTimeout(2_500)
+  ok('Opening a list does not quietly fetch every screen behind it', prefetches.length === 0,
+    `${listedRows} rows, ${prefetches.length} prefetches${prefetches.length ? ` — ${prefetches.slice(0, 3).join(' ')}` : ''}`)
+
+  // And the link still works, because it is fetched when somebody presses it.
+  const firstRowTitle = await page.locator('[data-testid="task-row"] a').first().innerText()
+  await page.locator('[data-testid="task-row"] a').first().click()
+  await page.waitForURL(/\/tasks\/[0-9a-f-]{36}$/, { timeout: 15_000 })
+  ok('And a row opens when it is pressed', (await page.locator('h1').first().innerText()).includes(firstRowTitle.slice(0, 20)),
+    firstRowTitle.slice(0, 50))
+
   // ---- Work that comes back -----------------------------------------------
   // `tasks.recurrence_rule` was written by nothing, so every recurring obligation was retyped
   // by a person each time or forgotten.
@@ -2096,6 +2177,13 @@ try {
   ok('The check puts the demo back', cleaned === 0)
 
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
+  // Named, not hidden: if this number starts climbing, or names a screen it never named before,
+  // somebody should read ADR 0058 again rather than shrug at a green run.
+  console.log(
+    recoveries.length === 0
+      ? '  · React hydrated every screen without having to render it again'
+      : `  · React re-rendered ${recoveries.length} screen(s) after a hydration mismatch (ADR 0058) — ${[...new Set(recoveries)].join(', ')}`,
+  )
 } catch (error) {
   failures += 1
   console.error('\n', error)

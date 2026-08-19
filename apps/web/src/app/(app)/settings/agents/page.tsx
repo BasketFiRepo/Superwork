@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { listAgents, listChangeRequests, PermissionError } from '@superwork/core'
 import { NewAgentForm } from '@/components/NewAgentForm'

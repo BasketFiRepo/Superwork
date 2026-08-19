@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { ledgerReport, ledgerRuns, parseMonthKey, shiftMonth } from '@superwork/core'
 import { PermissionError } from '@superwork/core'

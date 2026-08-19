@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import { listCitations, listRunMessages, listSteps, listToolCalls, listUndoOperations, getRun } from '@superwork/core'
 import { TraceRail } from '@/components/TraceRail'

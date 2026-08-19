@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
+import { Link } from '@/components/Link'
 
 /**
  * What the system asked you, and what it told you (§29.2, §29.3).

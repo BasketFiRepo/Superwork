@@ -517,6 +517,22 @@ export async function rejectMergeCandidate(ctx: TenantContext, actor: Actor, can
 // Interactions
 // ---------------------------------------------------------------------------
 
+/**
+ * What was said, and when (ADR 0057).
+ *
+ * The relationship timeline, and the thing `last_interaction_at` is derived from — so this is
+ * also what the quiet-account watcher acts on. It was reachable through `log_interaction@v1` and
+ * from nowhere else, which meant a person who rang a customer this morning could watch the
+ * product decide the account had gone quiet.
+ *
+ * It had **no permission check at all**. That was survivable while the only caller was a tool
+ * with `requiredPermissions` of its own; it stops being survivable the moment a person-facing
+ * route calls it. The gate here is the same one the tool declares — `note:create` — so the two
+ * layers cannot disagree about who may write to the timeline (§4.2).
+ */
+export const INTERACTION_KINDS = ['email', 'call', 'meeting', 'note', 'task'] as const
+export type InteractionKind = (typeof INTERACTION_KINDS)[number]
+
 export async function logInteraction(
   ctx: TenantContext,
   actor: Actor,
@@ -532,7 +548,50 @@ export async function logInteraction(
     agentRunId?: string | null
   },
 ): Promise<string> {
-  if (!input.summary.trim()) throw new ValidationError('An interaction needs a summary.')
+  const decision = can(actor, 'note:create', {
+    type: 'note',
+    organizationId: ctx.organizationId,
+    ownerId: actor.userId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const summary = input.summary.trim()
+  if (summary.length < 3) {
+    throw new ValidationError('Say what happened, in a sentence somebody else could act on.')
+  }
+  if (summary.length > 2000) throw new ValidationError('That is longer than a note needs to be.')
+
+  if (!INTERACTION_KINDS.includes(input.kind as InteractionKind)) {
+    throw new ValidationError(`An interaction is one of: ${INTERACTION_KINDS.join(', ')}.`)
+  }
+
+  if (!input.companyId && !input.contactId) {
+    throw new ValidationError(
+      'An interaction has to be about a company or a person. One attached to neither is a note ' +
+        'nothing would ever show.',
+    )
+  }
+
+  // Not a CHECK: a constraint cannot call `now()`, and a row that was legitimate when written
+  // must not become invalid as the clock passes it.
+  const occurredAt = input.occurredAt ?? new Date()
+  if (occurredAt.getTime() > Date.now() + 60_000) {
+    throw new ValidationError('That is in the future. Log it after it happens.')
+  }
+
+  if (input.companyId) {
+    const [company] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.companyId} AND deleted_at IS NULL`
+    if (!company) throw new NotFoundError()
+  }
+  if (input.contactId) {
+    const [contact] = await ctx.sql<{ id: string }[]>`
+      SELECT id FROM contacts
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.contactId} AND deleted_at IS NULL`
+    if (!contact) throw new NotFoundError()
+  }
 
   const [row] = await ctx.sql<{ id: string }[]>`
     INSERT INTO interactions (
@@ -540,22 +599,42 @@ export async function logInteraction(
       occurred_at, source_type, source_id, agent_run_id, created_by
     ) VALUES (
       ${ctx.organizationId}, ${input.companyId ?? null}, ${input.contactId ?? null}, ${actor.userId},
-      ${input.kind}, ${input.direction ?? null}, ${input.summary.trim()},
-      ${input.occurredAt ?? new Date()}, ${input.sourceType ?? null}, ${input.sourceId ?? null},
+      ${input.kind}, ${input.direction ?? null}, ${summary},
+      ${occurredAt}, ${input.sourceType ?? null}, ${input.sourceId ?? null},
       ${input.agentRunId ?? null}, ${ctx.userId}
     ) RETURNING id`
 
   if (input.companyId) {
     await ctx.sql`
       UPDATE companies SET last_interaction_at = GREATEST(
-        coalesce(last_interaction_at, 'epoch'::timestamptz), ${input.occurredAt ?? new Date()})
+        coalesce(last_interaction_at, 'epoch'::timestamptz), ${occurredAt})
       WHERE organization_id = ${ctx.organizationId} AND id = ${input.companyId}`
   }
   if (input.contactId) {
     await ctx.sql`
       UPDATE contacts SET last_interaction_at = GREATEST(
-        coalesce(last_interaction_at, 'epoch'::timestamptz), ${input.occurredAt ?? new Date()})
+        coalesce(last_interaction_at, 'epoch'::timestamptz), ${occurredAt})
       WHERE organization_id = ${ctx.organizationId} AND id = ${input.contactId}`
+  }
+
+  // On the feed, so a colleague about to ring the same customer knows somebody already has.
+  // Deliberately no audit record: the interaction *is* the record, and it already carries who
+  // logged it and when. A second row saying the same thing would be ceremony.
+  if (input.companyId) {
+    const [company] = await ctx.sql<{ name: string }[]>`
+      SELECT name FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.companyId}`
+    await writeActivity(ctx, {
+      actorType: actor.type,
+      actorUserId: actor.userId,
+      actorLabel: actor.displayName,
+      verb: 'logged',
+      entityType: 'company',
+      entityId: input.companyId,
+      entityLabel: company?.name ?? 'a company',
+      summary: `${input.kind} with ${company?.name ?? 'a company'}: ${summary.slice(0, 160)}`,
+      ...(input.agentRunId ? { agentRunId: input.agentRunId } : {}),
+    })
   }
 
   return row!.id
