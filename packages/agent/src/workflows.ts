@@ -21,7 +21,7 @@ import {
   type WorkflowView,
 } from '@superwork/core'
 import type { WorkflowGraph, WorkflowNode } from '@superwork/ai'
-import { getTool, hashArgs, redactInput, type ToolContext } from '@superwork/tools'
+import { checkRateLimit, getTool, hashArgs, redactInput, type ToolContext } from '@superwork/tools'
 import { insertRun, recordToolCall, recordUndo, setRunStatus } from './persistence.js'
 import type { RunSession } from './runtime.js'
 
@@ -511,6 +511,12 @@ async function applyActions(
 
       const parsed = tool.inputSchema.safeParse(action.args)
       if (!parsed.success) return { ok: false, message: parsed.error.issues.map((i) => i.message).join('; ') }
+
+      // The same budget the agent runtime measures against, from the same counter: a workflow
+      // is another caller of the tool registry, not a way around it (ADR 0050). Its own daily
+      // action cap is about this automation; this one is about the system on the other end.
+      const budget = await checkRateLimit(ctx, tool, outcome.agentRunId ?? null)
+      if (!budget.allow) return { ok: false, message: budget.reason }
 
       const argsHash = hashArgs(tool.name, action.args)
       const idempotencyKey = `${outcome.runId}:${action.nodeId}:${argsHash}`

@@ -488,6 +488,40 @@ try {
   const toolsText = await page.locator('main').innerText()
   ok('Custom tools explains the rule it enforces', /same permission check/i.test(toolsText))
   ok('It says outbound HTTP is simulated here', /simulated/i.test(toolsText))
+
+  // The budgets every tool declared and nothing enforced until ADR 0050. The demo seeds no
+  // custom tools — the loop makes one and puts it back — so the panel is exercised only when
+  // this organization actually has one, and says so plainly when it does not.
+  const toolRows = await page.locator('[data-testid="custom-tool-row"]').count()
+  if (toolRows > 0) {
+    const budgetText = await page.locator('[data-testid="custom-tool-budget"]').first().innerText()
+    ok('A tool says how often it may be called, and how often it has been',
+      /per run/i.test(budgetText) && /in the last hour/i.test(budgetText),
+      budgetText.replace(/\n/g, ' · ').slice(0, 80))
+    ok('And says nobody has chosen those numbers yet',
+      /nobody has chosen these/i.test(budgetText))
+
+    await page.locator('[data-testid="custom-tool-limits-edit"]').first().click()
+    await page.waitForSelector('[data-testid="custom-tool-limits-editor"]', { timeout: 15_000 })
+    ok('A budget with no reason cannot be saved',
+      await page.locator('[data-testid="custom-tool-limits-confirm"]').isDisabled())
+    const editor = page.locator('[data-testid="custom-tool-limits-editor"]')
+    await editor.getByLabel('Calls an hour').fill('20')
+    await editor.getByLabel('Why').fill('The supplier asked us for no more than twenty an hour.')
+    await page.locator('[data-testid="custom-tool-limits-confirm"]').click()
+    const budgetSaved = await page
+      .waitForFunction(
+        () => /set by/i.test(document.querySelector('[data-testid="custom-tool-budget"]')?.textContent ?? ''),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('Lowering it saves without a password, and names who decided', budgetSaved)
+  } else {
+    ok('A tool says how often it may be called, and how often it has been',
+      /No custom tools yet/i.test(await page.locator('main').innerText()),
+      'this organization has defined none, and the screen says so rather than showing an empty table')
+  }
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/custom-tools.png`, fullPage: true })
 
   // Reviewing a host is irreversible enough to need fresh proof of identity (§4.1). The

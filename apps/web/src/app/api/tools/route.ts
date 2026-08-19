@@ -8,6 +8,7 @@ import {
   reviewHost,
   revokeHost,
   saveCustomTool,
+  setCustomToolLimits,
   setCustomToolStatus,
 } from '@superwork/core'
 import { errorResponse } from '@/lib/errors'
@@ -39,6 +40,14 @@ const Body = z.discriminatedUnion('action', [
     redactions: z.array(z.string().max(40)).max(20).optional(),
   }),
   z.object({ action: z.literal('activate'), id: z.string().uuid() }),
+  // The budgets (ADR 0050). Bounds are the repository's to state; this checks the shape.
+  z.object({
+    action: z.literal('limits'),
+    id: z.string().uuid(),
+    perRunLimit: z.number().int(),
+    perHourLimit: z.number().int(),
+    reason: z.string().min(4).max(500),
+  }),
   z.object({ action: z.literal('disable'), id: z.string().uuid() }),
   z.object({ action: z.literal('review_host'), host: z.string().min(3).max(253), reason: z.string().min(3).max(300) }),
   z.object({ action: z.literal('revoke_host'), host: z.string().min(3).max(253) }),
@@ -80,6 +89,8 @@ export async function POST(request: Request) {
           return { tool: await saveCustomTool(ctx, actor, parsed.data) }
         case 'activate':
           return { tool: await activateCustomTool(ctx, actor, parsed.data.id) }
+        case 'limits':
+          return { tool: await setCustomToolLimits(ctx, actor, parsed.data) }
         case 'disable':
           return { tool: await setCustomToolStatus(ctx, actor, parsed.data.id, 'disabled') }
         case 'review_host':

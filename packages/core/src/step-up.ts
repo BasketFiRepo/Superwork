@@ -42,6 +42,9 @@ export const STEP_UP_ACTIONS = {
   // Raising a workflow's throttle widens what runs with nobody watching — more work queued at
   // once, or more actions in a day. Lowering never asks (ADR 0046).
   'workflow.throttle': 'letting an automation do more without a person watching',
+  // Raising a tool's budget lets it reach a system outside this company more often, with
+  // nobody watching. Lowering one never asks (ADR 0050).
+  'custom_tool.limits': 'letting a tool call an outside system more often',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

@@ -42,6 +42,12 @@ export interface CustomToolView {
   timeoutMs: number
   perRunLimit: number
   perHourLimit: number
+  /** Who chose the two budgets, when and why. Null while it is still on the defaults. */
+  limitsSetByName: string | null
+  limitsSetAt: Date | null
+  limitsReason: string | null
+  /** Calls in the last rolling hour, counted from `tool_calls` (ADR 0050). */
+  usedThisHour: number
   redactions: string[]
   status: CustomToolStatus
   approvedByName: string | null
@@ -85,6 +91,13 @@ const SELECT_TOOL = (ctx: TenantContext) => ctx.sql`
          t.parameters, t.headers, t.risk_tier AS "riskTier",
          t.required_permissions AS "requiredPermissions", t.timeout_ms AS "timeoutMs",
          t.per_run_limit AS "perRunLimit", t.per_hour_limit AS "perHourLimit",
+         (SELECT name FROM users WHERE id = t.limits_set_by) AS "limitsSetByName",
+         t.limits_set_at AS "limitsSetAt", t.limits_reason AS "limitsReason",
+         -- What it has actually done in the last rolling hour: the number the budget is
+         -- measured against, so the screen and the gate cannot disagree (ADR 0050).
+         (SELECT count(*)::int FROM tool_calls tc
+           WHERE tc.organization_id = t.organization_id AND tc.tool_name = t.name
+             AND tc.deleted_at IS NULL AND tc.created_at >= now() - interval '1 hour') AS "usedThisHour",
          t.redactions, t.status, u.name AS "approvedByName", t.approved_at AS "approvedAt",
          (h.id IS NOT NULL AND h.reviewed_at IS NOT NULL) AS "hostReviewed",
          t.last_called_at AS "lastCalledAt"
@@ -291,6 +304,84 @@ export async function saveCustomTool(
 }
 
 /** Activation. Needs a reviewed host and a named approver; the schema enforces the second. */
+/** The bounds a person may choose between, stated once and enforced twice (ADR 0050). */
+export const CUSTOM_TOOL_LIMITS = {
+  perRunLimit: { min: 1, max: 100 },
+  perHourLimit: { min: 1, max: 5_000 },
+} as const
+
+/**
+ * Sets how often a tool may be called (§5.6, ADR 0050).
+ *
+ * Its own control rather than part of `saveCustomTool`, because editing a tool's *definition*
+ * drops it back to draft and needs re-approval — and a budget is not a change to what the tool
+ * does. Lowering one while it is live is exactly the thing somebody wants to do in a hurry.
+ *
+ * Raising either number lets it reach an outside system more often with nobody watching, so it
+ * asks for a fresh proof. Lowering never does — the same direction rule as a workflow throttle
+ * (ADR 0046) and a document's classification (ADR 0044).
+ */
+export async function setCustomToolLimits(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { id: string; perRunLimit: number; perHourLimit: number; reason: string },
+): Promise<CustomToolView> {
+  admin(ctx, actor, 'integration:update')
+  const before = await getCustomTool(ctx, actor, input.id)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why. A budget nobody explained is one nobody can review.')
+  }
+
+  for (const [field, value, label] of [
+    ['perRunLimit', input.perRunLimit, 'calls in one run'],
+    ['perHourLimit', input.perHourLimit, 'calls an hour'],
+  ] as const) {
+    const bound = CUSTOM_TOOL_LIMITS[field]
+    if (!Number.isInteger(value) || value < bound.min || value > bound.max) {
+      throw new ValidationError(
+        `${label} has to be a whole number between ${bound.min} and ${bound.max}. There is no ` +
+          '"unlimited": a tool that reaches somebody else\'s system has a ceiling by design.',
+      )
+    }
+  }
+  if (input.perHourLimit < input.perRunLimit) {
+    throw new ValidationError(
+      `An hourly budget of ${input.perHourLimit} is below the ${input.perRunLimit} one run may ` +
+        'use, so a single run could never finish. Raise the hour, or lower the run.',
+    )
+  }
+
+  if (input.perRunLimit > before.perRunLimit || input.perHourLimit > before.perHourLimit) {
+    assertSteppedUp(actor, 'custom_tool.limits')
+  }
+
+  await ctx.sql`
+    UPDATE custom_tools
+    SET per_run_limit = ${input.perRunLimit}, per_hour_limit = ${input.perHourLimit},
+        limits_set_by = ${actor.userId}, limits_set_at = now(), limits_reason = ${reason},
+        updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.id}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'custom_tool.limits_set',
+    entityType: 'integration',
+    entityId: input.id,
+    before: { perRunLimit: before.perRunLimit, perHourLimit: before.perHourLimit },
+    after: {
+      perRunLimit: input.perRunLimit,
+      perHourLimit: input.perHourLimit,
+      reason,
+      wasDefault: before.limitsSetByName === null,
+    },
+  })
+
+  return getCustomTool(ctx, actor, input.id)
+}
+
 export async function activateCustomTool(ctx: TenantContext, actor: Actor, id: string): Promise<CustomToolView> {
   admin(ctx, actor, 'integration:update')
   // From here the tool can reach a system Superwork knows nothing about, and Superwork

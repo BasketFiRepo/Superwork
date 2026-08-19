@@ -46,7 +46,9 @@ import {
   setNotificationPreferences,
   checkCapacity,
   setWorkflowLimits,
+  getCustomTool,
   listCustomTools,
+  setCustomToolLimits,
   listWorkflowRuns,
   reviewHost,
   saveCompiled,
@@ -176,7 +178,9 @@ import {
   setMonitoringPolicy,
 } from '@superwork/core'
 import { strictestProfile, type JurisdictionProfile } from '@superwork/core'
-import { customToolsFor } from '@superwork/tools'
+import {
+  checkRateLimit,
+  getTool, customToolsFor } from '@superwork/tools'
 import {
   continueWorkflowAfterApproval,
   runDueWatchers,
@@ -630,6 +634,93 @@ try {
   ok('Defining, reviewing and activating are all in the audit trail',
     audited.includes('custom_tool.activated') && audited.includes('custom_tool_host.reviewed'),
     audited.join(', '))
+
+
+  // ---- The budget every tool declared and nothing enforced -----------------
+  console.log('\nHow often a tool may be called…\n')
+
+  const budgets = await (async () => {
+    const [tool] = await adminSql()<{ id: string; perRunLimit: number; perHourLimit: number }[]>`
+      SELECT id, per_run_limit AS "perRunLimit", per_hour_limit AS "perHourLimit"
+      FROM custom_tools
+      WHERE organization_id = ${session.organizationId} AND name = 'lookup_order@v1'
+        AND deleted_at IS NULL
+      ORDER BY created_at DESC LIMIT 1`
+
+    const before = await withTenant(session, async (ctx) =>
+      getCustomTool(ctx, await loadActor(ctx), tool!.id))
+
+    const tightened = await withTenant(session, async (ctx) =>
+      setCustomToolLimits(ctx, await loadActor(ctx), {
+        id: tool!.id,
+        perRunLimit: 2,
+        perHourLimit: 20,
+        reason: 'The supplier asked us for no more than twenty an hour.',
+      }))
+
+    const raising = await withTenant(session, async (ctx) =>
+      setCustomToolLimits(ctx, await loadActor(ctx), {
+        id: tool!.id,
+        perRunLimit: 2,
+        perHourLimit: 40,
+        reason: 'Trying to widen it without proving who I am.',
+      }).then(() => 'allowed', (error: Error) => error.constructor.name))
+
+    const unlimited = await withTenant({ ...session, steppedUpAt: new Date() }, async (ctx) =>
+      setCustomToolLimits(ctx, await loadActor(ctx), {
+        id: tool!.id,
+        perRunLimit: 2,
+        perHourLimit: 999_999,
+        reason: 'Taking the ceiling off altogether.',
+      }).then(() => 'allowed', (error: Error) => error.message))
+
+    const incoherent = await withTenant(session, async (ctx) =>
+      setCustomToolLimits(ctx, await loadActor(ctx), {
+        id: tool!.id,
+        perRunLimit: 10,
+        perHourLimit: 4,
+        reason: 'An hour smaller than a run.',
+      }).then(() => 'allowed', (error: Error) => error.message))
+
+    // The gate, measured against what this loop has already done: the workflow beat above
+    // drafted five emails, so `draft_email@v1` has real calls in the last hour.
+    const draft = getTool('draft_email@v1')!
+    const { withinItsOwn, withATightOne } = await withTenant(session, async (ctx) => ({
+      withinItsOwn: await checkRateLimit(ctx, draft, null),
+      withATightOne: await checkRateLimit(
+        ctx,
+        { name: 'draft_email@v1', rateLimit: { perRun: 1, perOrgPerHour: 1 } },
+        null,
+      ),
+    }))
+
+    // Put the demo back on the defaults nobody chose.
+    await adminSql()`
+      UPDATE custom_tools SET per_run_limit = 5, per_hour_limit = 200, limits_set_by = NULL,
+        limits_set_at = NULL, limits_reason = NULL
+      WHERE organization_id = ${session.organizationId} AND id = ${tool!.id}`
+
+    return { before, tightened, raising, unlimited, incoherent, withinItsOwn, withATightOne }
+  })()
+
+  ok('A tool that reaches an outside system started on budgets nobody chose',
+    budgets.before.limitsSetByName === null,
+    `${budgets.before.perRunLimit} per run, ${budgets.before.perHourLimit} an hour`)
+  ok('Lowering one records who decided and why',
+    budgets.tightened.perHourLimit === 20 && !!budgets.tightened.limitsSetByName,
+    budgets.tightened.limitsSetByName ?? 'nobody')
+  ok('Raising one asks for a fresh proof, because it reaches further out',
+    budgets.raising === 'StepUpRequiredError', budgets.raising)
+  ok('“Unlimited” cannot be spelled', /between 1 and 5000/.test(budgets.unlimited),
+    budgets.unlimited.slice(0, 60))
+  ok('And an hour smaller than a run is refused as incoherent',
+    /below the 10 one run may use/i.test(budgets.incoherent), budgets.incoherent.slice(0, 60))
+  ok('A tool inside its own declared budget is let through',
+    budgets.withinItsOwn.allow,
+    `${budgets.withinItsOwn.usedThisHour} calls this hour against ${budgets.withinItsOwn.perHour}`)
+  ok('And the same counter stops it once the budget is smaller than the hour',
+    !budgets.withATightOne.allow && /in the last hour/i.test(budgets.withATightOne.reason),
+    budgets.withATightOne.reason.slice(0, 70))
 
   // ---- 6. What is kept, and what can be removed ----------------------------
   console.log('\nRetention and erasure…\n')
@@ -3333,7 +3424,9 @@ try {
         'work it is waiting on is filed against it, it says what is late and what lands after \n' +
         'the date itself, and it cannot be called reached while that work is still open; and \n' +
         'a company can start a project of its own at last, and close it again, instead of \n' +
-        'working on whatever a demo fixture invented.\n',
+        'working on whatever a demo fixture invented; and the budget every tool has declared \n' +
+        'since the first phase now stops something, counted from the calls that really \n' +
+        'happened, with the numbers a person can set.\n',
   )
 } catch (error) {
   console.error(error)
