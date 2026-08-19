@@ -18,6 +18,7 @@
  *
  * Run with:  pnpm loop:phase5
  */
+import { randomUUID } from 'node:crypto'
 import { adminSql, closePools, withTenant, type TenantContext } from '@superwork/db'
 import {
   beginMfaEnrolment,
@@ -165,6 +166,9 @@ import {
   organizationProfile,
   updateOrganizationProfile,
   organizationCurrency,
+  listOutgoing,
+  recallSend,
+  claimSendForDispatch,
   setGlossaryTerm,
   removeGlossaryTerm,
   formatCents,
@@ -430,6 +434,87 @@ try {
       drafts.some((draft) => draft.body_text.includes('Hope the rollout went well')))
     ok('Nothing was sent', drafts.every((draft) => draft.status === 'draft'))
   }
+
+  // ---- A send that can be stopped (ADR 0054) --------------------------------
+  // `send_email` has returned a `recallWindowSeconds` since Phase 2 and nothing could recall
+  // anything: the window was a delay with no button behind it. Through the real tool, the real
+  // claim the dispatcher takes, and the real recall.
+  const undoSend = await withTenant(session, async (ctx) => {
+    const actor = await loadActor(ctx)
+    const [draft] = await ctx.sql<{ id: string; subject: string }[]>`
+      INSERT INTO email_drafts (
+        organization_id, to_addresses, subject, body_text, status, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ARRAY['ops@meridian.example'], 'loop undo-send — reefer handover',
+        'The trailer is pre-cooled and ready.', 'approved', true, ${actor.userId}
+      ) RETURNING id, subject`
+
+    const send = getTool('send_email@v1')!
+    const toolCtx = {
+      organizationId: ctx.organizationId,
+      principalUserId: actor.userId,
+      agentRunId: randomUUID(),
+      stepId: randomUUID(),
+      idempotencyKey: `loop-undo-${draft!.id}`,
+      traceId: randomUUID(),
+      tenantDb: ctx,
+      policy: actor,
+      dryRun: false,
+    }
+    const result = (await send.execute({ draftId: draft!.id }, toolCtx)) as {
+      ok: boolean
+      value?: { id: string; recallWindowSeconds: number }
+    }
+    const sendId = result.value!.id
+
+    const waiting = await listOutgoing(ctx, actor)
+    const mine = waiting.find((row) => row.id === sendId)
+
+    // Stopped in time, and then the dispatcher cannot take it.
+    await recallSend(ctx, actor, { sendId, reason: 'The loop changed its mind.' })
+    const claimAfterRecall = await claimSendForDispatch(ctx, sendId, { now: new Date(Date.now() + 86_400_000) })
+    const [row] = await ctx.sql<{ recalledBy: string | null; reason: string | null; draftStatus: string }[]>`
+      SELECT s.recalled_by AS "recalledBy", s.recall_reason AS reason, d.status AS "draftStatus"
+      FROM email_sends s JOIN email_drafts d ON d.id = s.draft_id
+      WHERE s.organization_id = ${ctx.organizationId} AND s.id = ${sendId}`
+
+    // And the other way round: one the dispatcher has claimed cannot be stopped.
+    const [second] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO email_sends (organization_id, draft_id, provider, send_after, idempotency_key, is_demo, created_by)
+      VALUES (${ctx.organizationId}, ${draft!.id}, 'mock', now(), ${`loop-undo-2-${draft!.id}`}, true, ${actor.userId})
+      RETURNING id`
+    const claimed = await claimSendForDispatch(ctx, second!.id)
+    const tooLate = await recallSend(ctx, actor, { sendId: second!.id, reason: 'Too late to stop.' })
+      .then(() => null, (error: Error) => error.message)
+
+    // Put the demo back.
+    await ctx.sql`DELETE FROM email_sends WHERE organization_id = ${ctx.organizationId} AND id IN (${sendId}, ${second!.id})`
+    await ctx.sql`DELETE FROM outbox WHERE organization_id = ${ctx.organizationId} AND payload->>'sendId' = ${sendId}`
+    await ctx.sql`DELETE FROM email_drafts WHERE organization_id = ${ctx.organizationId} AND id = ${draft!.id}`
+
+    return {
+      window: result.value!.recallWindowSeconds,
+      mine,
+      claimAfterRecall,
+      row: row!,
+      claimed,
+      tooLate,
+    }
+  })
+
+  ok('An approved email waits in a window a person can see',
+    undoSend.mine !== undefined && undoSend.mine.secondsLeft > 0 && undoSend.mine.dispatching === false,
+    `${undoSend.mine?.secondsLeft ?? 0}s of ${undoSend.window}s left`)
+  ok('A person can stop it, and the row says who and why',
+    undoSend.row.recalledBy !== null && (undoSend.row.reason ?? '').includes('changed its mind'),
+    undoSend.row.reason ?? 'nothing')
+  ok('The draft goes back to needing approval, because what was approved is not wanted',
+    undoSend.row.draftStatus === 'draft', undoSend.row.draftStatus)
+  ok('And the dispatcher will not send one that was stopped, whenever it looks',
+    undoSend.claimAfterRecall === null)
+  ok('The other way round too: one already going out cannot be called back',
+    undoSend.claimed !== null && /already going out|too late/i.test(undoSend.tooLate ?? ''),
+    undoSend.tooLate ?? 'it was allowed')
 
   // ---- 4b. The clock -------------------------------------------------------
   console.log('\nPutting it on the clock…\n')
@@ -3660,7 +3745,9 @@ try {
         'own words mean — including the two of those that were read by nothing at all until \n' +
         'something was given to read them; and a workflow step that stopped a run says which \n' +
         'step it was and why, in a row of its own, instead of leaving the list to end at the \n' +
-        'last thing that worked.\n',
+        'last thing that worked; and the recall window an email has always waited out finally has \n' +
+        'a button behind it, with the row itself deciding between the person who changed their \n' +
+        'mind and the dispatcher that was about to send it.\n',
   )
 } catch (error) {
   console.error(error)

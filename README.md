@@ -1316,6 +1316,32 @@ succeeded, a run marked failed, and nothing saying which step was the one.
 
 **Workflows → any automation.** See ADR 0053.
 
+## A send that can be stopped
+
+`send_email` declares `recallWindowSeconds` in its **own output schema**, dates the row a minute
+ahead, and the worker reads `recalled_at` before handing anything to the provider — the comment
+there has always said "a user who changes their mind inside it wins". **Nothing ever wrote
+`recalled_at`.** The window was a delay with no button behind it, and the tool had been telling
+every caller about a recall the product did not have.
+
+- **The row arbitrates the race, not the order the code checks things in.** Reading `recalled_at`
+  and then calling the provider leaves a gap where a recall would mark a message recalled that the
+  recipient already had. Dispatch claims the row conditionally; a recall succeeds only if the claim
+  is untaken. Whichever statement finds no row is the one that lost.
+- **Stopping your own outgoing message needs no permission.** A member has no send permission at
+  all, and requiring one to *stop* a send would mean watching your own mistake leave.
+- **A stopped draft goes back to `draft`.** Sending it again needs approving again: what was
+  approved is the thing you no longer want sent.
+- **Waiting is not failing.** A dispatch whose send is not due is deferred with its attempt
+  returned, so a lengthened recall window cannot exhaust the retry budget of the send it protects.
+- **The attribution check is `NOT VALID`, deliberately** — rolling back drops the columns, and
+  re-applying would refuse over the product's own data. Found by the ordering check, not by
+  reading. Inventing a name for a recall that predates the column would be worse.
+- **Not built:** recalling after it has gone. There is no such thing, and the refusal says the
+  honest next step instead.
+
+**Approvals.** See ADR 0054.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the

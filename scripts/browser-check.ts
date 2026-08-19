@@ -485,6 +485,31 @@ try {
     (await page.locator('[data-testid="run-step-error"]').count()) === 0)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-steps.png`, fullPage: true })
 
+  // ---- What is on its way out, and the button that stops it (ADR 0054) -----
+  // `send_email` has returned a `recallWindowSeconds` since Phase 2 and nothing could recall
+  // anything: the window was a delay with no button behind it. The demo has one approved email
+  // waiting out its real window, and this stops it.
+  await page.goto(`${BASE}/approvals`)
+  await page.waitForSelector('[data-testid="outgoing-mail"]', { timeout: 20_000 })
+  const outgoingText = await page.locator('[data-testid="outgoing-explainer"]').innerText()
+  ok('The screen says what the wait is for, and what stopping one does',
+    /change of mind still counts/i.test(outgoingText) && /needs approving again/i.test(outgoingText))
+  const countdown = await page.locator('[data-testid="outgoing-countdown"]').first().innerText()
+  ok('An approved email is waiting, with the time left on it',
+    /\d+s left|window closed/i.test(countdown), countdown)
+
+  await page.locator('[data-testid="outgoing-stop"]').first().click()
+  await page.waitForSelector('[data-testid="outgoing-stop-editor"]', { timeout: 15_000 })
+  const confirmStop = page.locator('[data-testid="outgoing-stop-confirm"]')
+  ok('Stopping one will not go through without a reason', await confirmStop.isDisabled())
+  await page.locator('[data-testid="outgoing-reason"]').fill('The handover time is wrong.')
+  await confirmStop.click()
+  const stopped = await page
+    .locator('[data-testid="outgoing-mail"]')
+    .waitFor({ state: 'detached', timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And it is stopped, so nothing is on its way out any more', stopped)
+
   // ---- Approve with edits -------------------------------------------------
   await page.goto(`${BASE}/approvals`)
   const editButton = page.locator('[data-testid="approve-with-edits"]').first()
