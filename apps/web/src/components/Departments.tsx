@@ -24,6 +24,14 @@ export interface DepartmentRow {
   holidayCalendar: string | null
   effectiveHolidayCalendar: string | null
   holidayCalendarFrom: string | null
+  closures: {
+    id: string
+    date: string
+    label: string
+    from: string
+    own: boolean
+    setBy: string | null
+  }[]
   counts: { people: number; children: number; tasks: number; projects: number }
 }
 
@@ -48,6 +56,12 @@ export function Departments({
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const [parentId, setParentId] = useState('')
+  // Which department is having a closed day added, and which closure is being taken back off.
+  const [closing, setClosing] = useState<string | null>(null)
+  const [closeDate, setCloseDate] = useState('')
+  const [closeLabel, setCloseLabel] = useState('')
+  const [reopening, setReopening] = useState<string | null>(null)
+  const [reopenReason, setReopenReason] = useState('')
 
   async function post(body: Record<string, unknown>) {
     setBusy(true)
@@ -66,6 +80,11 @@ export function Departments({
     setAdding(false)
     setName('')
     setParentId('')
+    setClosing(null)
+    setCloseDate('')
+    setCloseLabel('')
+    setReopening(null)
+    setReopenReason('')
     router.refresh()
   }
 
@@ -97,12 +116,21 @@ export function Departments({
           harder, or on a day it otherwise would not.
         </p>
 
+        <p className="prose small secondary" style={{ margin: 0 }} data-testid="closure-explainer">
+          A closed day is one this department does not work that no calendar knows about: the
+          week between Christmas and New Year, the day the depot moves, a public holiday
+          somewhere none of the calendars above cover. Unlike the calendar, closed days add up
+          rather than replace each other — a day set higher in the tree also closes everything
+          underneath it, and is taken back off where it was set.
+        </p>
+
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
                 <th>Department</th>
                 <th style={{ width: 220 }}>Working calendar</th>
+                <th style={{ width: 260 }}>Closed days ahead</th>
                 <th style={{ width: 90 }}>People</th>
                 <th style={{ width: 90 }}>Tasks</th>
                 <th style={{ width: 100 }}>Projects</th>
@@ -153,6 +181,140 @@ export function Departments({
                       <div className="small muted">
                         {calendars.find((c) => c.id === department.effectiveHolidayCalendar)?.label}
                       </div>
+                    ) : null}
+                  </td>
+                  <td className="small secondary" data-testid="department-closures">
+                    {department.closures.length === 0 ? (
+                      <span className="muted">None — only its calendar</span>
+                    ) : (
+                      <ul className="stack stack-2" style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+                        {department.closures.map((closure) => (
+                          <li key={closure.id} data-testid="department-closure">
+                            <span className="mono">{closure.date}</span> {closure.label}
+                            <div className="micro muted">
+                              {closure.own
+                                ? closure.setBy
+                                  ? `Set by ${closure.setBy}`
+                                  : 'Set here'
+                                : `Inherited from ${closure.from}`}
+                            </div>
+                            {canEdit && closure.own ? (
+                              reopening === closure.id ? (
+                                <div className="stack stack-2" data-testid="department-reopen-editor">
+                                  <input
+                                    className="input"
+                                    aria-label={`Why ${closure.label} is being worked after all`}
+                                    data-testid="department-reopen-reason"
+                                    value={reopenReason}
+                                    onChange={(event) => setReopenReason(event.target.value)}
+                                    placeholder="The stocktake moved"
+                                  />
+                                  <div className="row">
+                                    <button
+                                      className="btn btn-ghost small"
+                                      data-testid="department-reopen-confirm"
+                                      disabled={busy || reopenReason.trim().length < 4}
+                                      onClick={() =>
+                                        post({
+                                          action: 'reopen',
+                                          closureId: closure.id,
+                                          reason: reopenReason.trim(),
+                                        })
+                                      }
+                                    >
+                                      {busy ? 'Working…' : 'Reopen it'}
+                                    </button>
+                                    <button
+                                      className="btn btn-ghost small"
+                                      disabled={busy}
+                                      onClick={() => {
+                                        setReopening(null)
+                                        setReopenReason('')
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <button
+                                  className="btn btn-ghost small"
+                                  data-testid="department-reopen"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    setReopening(closure.id)
+                                    setReopenReason('')
+                                  }}
+                                >
+                                  Reopen
+                                </button>
+                              )
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {canEdit ? (
+                      closing === department.id ? (
+                        <div className="stack stack-2" data-testid="department-closure-editor">
+                          <label className="stack stack-2">
+                            <span className="micro">Day</span>
+                            <input
+                              type="date"
+                              className="input"
+                              aria-label={`Day ${department.name} is closed`}
+                              data-testid="department-closure-date"
+                              value={closeDate}
+                              onChange={(event) => setCloseDate(event.target.value)}
+                            />
+                          </label>
+                          <label className="stack stack-2">
+                            <span className="micro">What the day is</span>
+                            <input
+                              className="input"
+                              aria-label={`What ${department.name} is closed for`}
+                              data-testid="department-closure-label"
+                              value={closeLabel}
+                              onChange={(event) => setCloseLabel(event.target.value)}
+                              placeholder="Stocktake shutdown"
+                            />
+                          </label>
+                          <div className="row">
+                            <button
+                              className="btn btn-primary small"
+                              data-testid="department-closure-confirm"
+                              disabled={busy || closeLabel.trim().length < 3 || closeDate.length !== 10}
+                              onClick={() =>
+                                post({
+                                  action: 'close',
+                                  id: department.id,
+                                  date: closeDate,
+                                  label: closeLabel.trim(),
+                                })
+                              }
+                            >
+                              {busy ? 'Working…' : 'Close that day'}
+                            </button>
+                            <button className="btn btn-ghost small" disabled={busy} onClick={() => setClosing(null)}>
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          className="btn btn-ghost small"
+                          data-testid="department-close-day"
+                          disabled={busy}
+                          onClick={() => {
+                            setClosing(department.id)
+                            setCloseDate('')
+                            setCloseLabel('')
+                          }}
+                        >
+                          Add a closed day
+                        </button>
+                      )
                     ) : null}
                   </td>
                   <td className="num">{department.counts.people}</td>

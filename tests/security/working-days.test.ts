@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { adminSql, closePools, withTenant } from '@superwork/db'
 import { loadActor } from '@superwork/auth'
 import {
+  addCalendarDays,
+  closeDepartmentDay,
   createDepartment,
   deliverDueNudges,
   easterSunday,
@@ -10,6 +12,11 @@ import {
   listDepartments,
   nextWorkingDay,
   nonWorkingReason,
+  NotFoundError,
+  PermissionError,
+  reopenDepartmentDay,
+  restDaysAhead,
+  restReason,
   scheduleLadder,
   updateDepartment,
   ValidationError,
@@ -253,5 +260,278 @@ describe('nobody is chased on a day they do not work', () => {
     )
     expect(outcome.delivered).toBe(1)
     expect(outcome.heldByCalendar).toBe(0)
+  })
+})
+
+/**
+ * Days a department names for itself (ADR 0051).
+ *
+ * The four calendars above are national ones. They know Christmas Day and they cannot know
+ * the week between Christmas and New Year, the Monday the depot moves, or the public holidays
+ * of anywhere outside England, Wales and the United States. Every date here is worked out
+ * relative to today rather than written down: a closure is refused once it is in the past, so
+ * a hardcoded one would pass this year and fail next.
+ */
+describe('a department can name a day of its own', () => {
+  /** A date roughly `days` ahead that the UK calendar already treats as a working day. */
+  function workingDayAhead(days: number): string {
+    let date = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10)
+    while (!isWorkingDay('uk-england-wales', date)) date = addCalendarDays(date, 1)
+    return date
+  }
+
+  const STOCKTAKE = workingDayAhead(60)
+  const DEPOT_MOVE = workingDayAhead(75)
+  const MOVED_AGAIN = workingDayAhead(90)
+
+  it('adds a non-working day, and never takes one away', () => {
+    const closed = new Map([[STOCKTAKE, 'Stocktake shutdown'], [SATURDAY, 'Stocktake shutdown']])
+
+    expect(nonWorkingReason('uk-england-wales', STOCKTAKE, closed)).toBe('Stocktake shutdown')
+    expect(isWorkingDay('uk-england-wales', STOCKTAKE, closed)).toBe(false)
+    // A closure on a Saturday describes a day that was already not worked, so the calendar
+    // still answers. There is no direction in which one of these makes a day workable.
+    expect(nonWorkingReason('uk-england-wales', SATURDAY, closed)).toBe('a Saturday')
+    expect(isWorkingDay('uk-england-wales', CHRISTMAS, closed)).toBe(false)
+    // And it counts with no calendar at all, which is the case a French department is in.
+    expect(isWorkingDay(null, STOCKTAKE, closed)).toBe(false)
+    expect(nonWorkingReason(null, ORDINARY, closed)).toBeNull()
+
+    expect(nextWorkingDay('uk-england-wales', STOCKTAKE, closed)).toBe(addCalendarDays(STOCKTAKE, 1))
+  })
+
+  it('refuses a day that is not a day, a name that says nothing, and a day gone by', async () => {
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: STOCKTAKE, label: 'x' }),
+      ).rejects.toThrow(ValidationError)
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: '2027-02-30', label: 'Stocktake' }),
+      ).rejects.toThrow(/not a day on the calendar/i)
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: 'next Tuesday', label: 'Stocktake' }),
+      ).rejects.toThrow(ValidationError)
+      // Closing a day that has gone would change nothing: a reminder is only ever held on the
+      // day it would have arrived.
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: '2026-01-05', label: 'Stocktake' }),
+      ).rejects.toThrow(/already gone/i)
+    })
+  })
+
+  it('is org structure, so somebody who cannot change the tree cannot close a day', async () => {
+    await withTenant({ ...session, userId: org.memberId }, async (ctx) => {
+      const actor = await loadActor(ctx)
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: STOCKTAKE, label: 'Stocktake shutdown' }),
+      ).rejects.toThrow(PermissionError)
+    })
+  })
+
+  it('records who closed it and refuses a second one on the same day', async () => {
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const after = await closeDepartmentDay(ctx, actor, {
+        departmentId,
+        date: STOCKTAKE,
+        label: 'Stocktake shutdown',
+      })
+      const operations = after.find((row) => row.id === departmentId)!
+      const closure = operations.closures.find((row) => row.date === STOCKTAKE)!
+      expect(closure.label).toBe('Stocktake shutdown')
+      expect(closure.own).toBe(true)
+      expect(closure.setBy).not.toBeNull()
+
+      await expect(
+        closeDepartmentDay(ctx, actor, { departmentId, date: STOCKTAKE, label: 'Something else' }),
+      ).rejects.toThrow(/already closed/i)
+    })
+
+    const [audit] = await adminSql()<{ action: string }[]>`
+      SELECT action FROM audit_logs
+      WHERE organization_id = ${org.organizationId} AND action = 'department.closed'
+      ORDER BY occurred_at DESC LIMIT 1`
+    expect(audit!.action).toBe('department.closed')
+  })
+
+  it('accumulates down the tree rather than overriding, unlike the calendar above it', async () => {
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const child = (await listDepartments(ctx, actor)).find((row) => row.name === 'Customs')!
+      await closeDepartmentDay(ctx, actor, {
+        departmentId: child.id,
+        date: DEPOT_MOVE,
+        label: 'Depot move',
+      })
+
+      const after = await listDepartments(ctx, actor)
+      const customs = after.find((row) => row.id === child.id)!
+      // Both are true at once: the shutdown it inherited and the day it named itself. A
+      // calendar is a single answer; closures are a set.
+      expect(customs.closures.map((row) => row.date).sort()).toEqual([STOCKTAKE, DEPOT_MOVE].sort())
+      expect(customs.closures.find((row) => row.date === STOCKTAKE)!.own).toBe(false)
+      expect(customs.closures.find((row) => row.date === STOCKTAKE)!.from).toBe('Operations')
+      expect(customs.closures.find((row) => row.date === DEPOT_MOVE)!.own).toBe(true)
+
+      // And it does not travel upwards: Operations knows nothing about the depot move.
+      const operations = after.find((row) => row.id === departmentId)!
+      expect(operations.closures.map((row) => row.date)).toEqual([STOCKTAKE])
+    })
+  })
+
+  it('governs the people who sit in the department, and the ones underneath it', async () => {
+    await withTenant(session, async (ctx) => {
+      const calendar = await workingCalendarFor(ctx, org.memberId)
+      expect(calendar.closed.get(STOCKTAKE)).toBe('Stocktake shutdown')
+      expect(worksOn(calendar, new Date(`${STOCKTAKE}T10:00:00Z`))).toBe(false)
+      expect(restReason(calendar, new Date(`${STOCKTAKE}T10:00:00Z`))).toBe('Stocktake shutdown')
+      // An ordinary working day is still one.
+      expect(worksOn(calendar, new Date(`${addCalendarDays(STOCKTAKE, 1)}T10:00:00Z`))).toBe(true)
+      // What the person is shown on their own reminders screen.
+      expect(restDaysAhead(calendar, new Date(`${addCalendarDays(STOCKTAKE, -3)}T10:00:00Z`))
+        .some((day) => day.date === STOCKTAKE && day.name === 'Stocktake shutdown')).toBe(true)
+    })
+  })
+
+  it('holds a reminder on a closed day and says which day it was', async () => {
+    const [task] = await adminSql()<{ id: string }[]>`
+      INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+      VALUES (${org.organizationId}, 'Count the reefers', 'todo', 'medium', ${org.memberId},
+              ${new Date(`${STOCKTAKE}T09:00:00Z`)}, true, ${org.ownerId})
+      RETURNING id`
+    await adminSql()`
+      INSERT INTO nudges (
+        organization_id, recipient_user_id, subject_type, subject_id, stage, channel, message,
+        actions, scheduled_for, is_demo, created_by
+      ) VALUES (
+        ${org.organizationId}, ${org.memberId}, 'task', ${task!.id}, 2, 'in_app',
+        'Count the reefers — still open.', '["done"]'::jsonb,
+        ${new Date(`${STOCKTAKE}T09:00:00Z`)}, true, ${org.ownerId}
+      )`
+
+    const held = await withTenant(session, async (ctx) =>
+      deliverDueNudges(ctx, { now: new Date(`${STOCKTAKE}T10:00:00Z`), subjectId: task!.id }),
+    )
+    expect(held.delivered).toBe(0)
+    expect(held.heldByCalendar).toBe(1)
+
+    const [row] = await adminSql()<{ heldReason: string | null }[]>`
+      SELECT held_reason AS "heldReason" FROM nudges
+      WHERE organization_id = ${org.organizationId} AND subject_id = ${task!.id}`
+    expect(row!.heldReason).toContain('Stocktake shutdown')
+
+    // And it arrives the next working day rather than being lost, which is the guarantee the
+    // ladder has always made.
+    const sent = await withTenant(session, async (ctx) =>
+      deliverDueNudges(ctx, {
+        now: new Date(`${addCalendarDays(STOCKTAKE, 1)}T10:00:00Z`),
+        subjectId: task!.id,
+      }),
+    )
+    expect(sent.delivered).toBe(1)
+  })
+
+  it('counts for a department that has set no calendar at all', async () => {
+    // A department with no calendar and no ancestor that has one — the case a company outside
+    // England, Wales and the United States is in. It moves the viewer, so it comes last.
+    let warehouseId = ''
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const created = await createDepartment(ctx, actor, { name: 'Warehouse', timezone: 'Europe/London' })
+      warehouseId = created.find((row) => row.name === 'Warehouse')!.id
+      await ctx.sql`
+        UPDATE memberships SET department_id = ${warehouseId}
+        WHERE organization_id = ${org.organizationId} AND user_id = ${org.viewerId}`
+      await closeDepartmentDay(ctx, actor, {
+        departmentId: warehouseId,
+        date: MOVED_AGAIN,
+        label: 'Bastille Day',
+      })
+    })
+
+    await withTenant(session, async (ctx) => {
+      const calendar = await workingCalendarFor(ctx, org.viewerId)
+      expect(calendar.calendarId).toBeNull()
+      expect(worksOn(calendar, new Date(`${MOVED_AGAIN}T10:00:00Z`))).toBe(false)
+      // Still chased on every other day, because a closure only ever adds one.
+      expect(worksOn(calendar, new Date(`${SATURDAY}T10:00:00Z`))).toBe(true)
+    })
+  })
+
+  it('keeps the row when a day is reopened, saying who did it and why', async () => {
+    let closureId = ''
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const operations = (await listDepartments(ctx, actor)).find((row) => row.id === departmentId)!
+      closureId = operations.closures.find((row) => row.date === STOCKTAKE)!.id
+
+      await expect(
+        reopenDepartmentDay(ctx, actor, { closureId, reason: 'no' }),
+      ).rejects.toThrow(ValidationError)
+
+      const after = await reopenDepartmentDay(ctx, actor, {
+        closureId,
+        reason: 'The stocktake moved to the following week.',
+      })
+      expect(after.find((row) => row.id === departmentId)!.closures).toEqual([])
+    })
+
+    // The row stays. Taking a closure away is the widening direction — people are chased on a
+    // day the company had said it was shut — so it says who and why rather than disappearing.
+    const [row] = await adminSql()<
+      { deletedAt: Date | null; reopenedBy: string | null; reopenReason: string | null }[]
+    >`
+      SELECT deleted_at AS "deletedAt", reopened_by AS "reopenedBy", reopen_reason AS "reopenReason"
+      FROM department_closures
+      WHERE organization_id = ${org.organizationId} AND id = ${closureId}`
+    expect(row!.deletedAt).not.toBeNull()
+    expect(row!.reopenedBy).toBe(org.ownerId)
+    expect(row!.reopenReason).toContain('following week')
+
+    // And the day is worked again, for the people it was closed for.
+    await withTenant(session, async (ctx) => {
+      const calendar = await workingCalendarFor(ctx, org.memberId)
+      expect(worksOn(calendar, new Date(`${STOCKTAKE}T10:00:00Z`))).toBe(true)
+    })
+
+    // The same day can be closed again afterwards: the unique index only holds for live rows.
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      const after = await closeDepartmentDay(ctx, actor, {
+        departmentId,
+        date: STOCKTAKE,
+        label: 'Stocktake shutdown, again',
+      })
+      expect(after.find((row) => row.id === departmentId)!.closures).toHaveLength(1)
+    })
+  })
+
+  it('is another tenant’s 404, never their 403', async () => {
+    const other = await createTenant('working-days-other')
+    try {
+      const [theirs] = await adminSql()<{ id: string }[]>`
+        INSERT INTO department_closures (organization_id, department_id, closed_on, label, set_by, created_by)
+        SELECT ${other.organizationId}, d.id, current_date + 30, 'Their shutdown', ${other.ownerId}, ${other.ownerId}
+        FROM departments d WHERE d.organization_id = ${other.organizationId} LIMIT 1
+        RETURNING id`
+
+      if (theirs) {
+        await withTenant(session, async (ctx) => {
+          const actor = await loadActor(ctx)
+          await expect(
+            reopenDepartmentDay(ctx, actor, { closureId: theirs.id, reason: 'Not mine to reopen.' }),
+          ).rejects.toThrow(NotFoundError)
+        })
+      }
+
+      // And it governs nobody here.
+      await withTenant(session, async (ctx) => {
+        const calendar = await workingCalendarFor(ctx, org.memberId)
+        expect([...calendar.closed.values()]).not.toContain('Their shutdown')
+      })
+    } finally {
+      await destroyTenant('working-days-other')
+    }
   })
 })

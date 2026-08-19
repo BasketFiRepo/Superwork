@@ -1457,7 +1457,39 @@ try {
     /only ever quieten|never|not make the product chase anybody\s+harder/i.test(calendarText))
   const chosen = await page.locator('[data-testid="department-calendar"]').first().inputValue()
   ok('A department carries the calendar it is set to', chosen === 'uk-england-wales', chosen || 'unset')
+
+  // ---- And the days it names for itself (ADR 0051) -------------------------
+  // The four calendars are national ones: none of them knows the week between Christmas and
+  // New Year, or the day the depot moves.
+  const closureText = await page.locator('[data-testid="closure-explainer"]').innerText()
+  ok('The screen says what a closed day is for, and that they add up rather than replace',
+    /no calendar knows about/i.test(closureText) && /add up/i.test(closureText))
+  const operationsRow = page.locator('[data-testid="department-row"]').filter({ hasText: 'Operations' }).first()
+  const seededClosure = await operationsRow.locator('[data-testid="department-closures"]').innerText()
+  ok('A department shows the days ahead that it is closed', /Immingham depot stocktake/i.test(seededClosure))
+
+  // Close a day for real, on a department that has none, and then take it back off.
+  const qualityRow = page.locator('[data-testid="department-row"]').filter({ hasText: 'Quality' }).first()
+  const closingDay = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)
+  await qualityRow.locator('[data-testid="department-close-day"]').click()
+  await qualityRow.locator('[data-testid="department-closure-date"]').fill(closingDay)
+  await qualityRow.locator('[data-testid="department-closure-label"]').fill('Browser check shutdown')
+  await qualityRow.locator('[data-testid="department-closure-confirm"]').click()
+  const closed = await qualityRow
+    .locator('[data-testid="department-closure"]', { hasText: 'Browser check shutdown' })
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false)
+  ok('A day can be closed from the screen, and it says who set it', closed)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/working-days.png`, fullPage: true })
+
+  await qualityRow.locator('[data-testid="department-reopen"]').first().click()
+  await qualityRow.locator('[data-testid="department-reopen-reason"]').fill('The browser check is finished with it.')
+  await qualityRow.locator('[data-testid="department-reopen-confirm"]').click()
+  const dayReopened = await qualityRow
+    .locator('[data-testid="department-closures"]', { hasText: 'None — only its calendar' })
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false)
+  ok('And taking it back off asks why, and puts the day back to being worked', dayReopened)
 
   // The other end of the same fact: the person is told which days they are safe on.
   await page.goto(`${BASE}/reminders`)

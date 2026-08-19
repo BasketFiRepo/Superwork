@@ -5,6 +5,7 @@ import {
   nextWorkingDay,
   nonWorkingReason,
   upcomingNonWorkingDays,
+  type ClosedDays,
   type Holiday,
 } from './holidays.js'
 import { calendarDate } from './time.js'
@@ -21,6 +22,11 @@ import { calendarDate } from './time.js'
  * them, is governed by nothing and is chased exactly as before. That is deliberate: this
  * feature may only ever *reduce* chasing, so its absence has to mean the old behaviour rather
  * than a new default somebody did not choose.
+ *
+ * On top of the calendar sit the days a department names for itself (ADR 0051) — the
+ * shutdown week, the day the depot moves, the national holiday of a country none of the four
+ * built-in calendars covers. They accumulate down the tree instead of overriding it, and they
+ * can only add a day nobody works, never take one away.
  */
 
 export interface WorkingCalendar {
@@ -29,6 +35,11 @@ export interface WorkingCalendar {
   label: string | null
   timezone: string
   departmentName: string | null
+  /**
+   * The days this person's own department — or any department above it — has said it is
+   * shut, as date → what the day is (ADR 0051). Empty when none, which is the ordinary case.
+   */
+  closed: ClosedDays
 }
 
 export async function workingCalendarFor(
@@ -36,7 +47,12 @@ export async function workingCalendarFor(
   userId: string,
 ): Promise<WorkingCalendar> {
   const [row] = await ctx.sql<
-    { calendarId: string | null; timezone: string | null; departmentName: string | null }[]
+    {
+      calendarId: string | null
+      timezone: string | null
+      departmentName: string | null
+      closed: Record<string, string>
+    }[]
   >`
     SELECT
       coalesce(d.holiday_calendar, (
@@ -47,7 +63,20 @@ export async function workingCalendarFor(
         ORDER BY a.depth DESC LIMIT 1
       )) AS "calendarId",
       coalesce(d.timezone, o.timezone) AS timezone,
-      d.name AS "departmentName"
+      d.name AS "departmentName",
+      -- Closures accumulate rather than overriding, which is why this is every ancestor and
+      -- not the nearest one: a company shutdown and a depot's own closed day are both true.
+      -- Bounded to the last year because the only question anyone asks of a closure is
+      -- whether to hold something *today* or schedule something ahead; a shutdown in 2021
+      -- has no bearing on either and would otherwise be carried in memory for ever.
+      coalesce((
+        SELECT jsonb_object_agg(c.closed_on::text, c.label)
+        FROM department_closures c
+        JOIN departments a ON a.id = c.department_id AND a.deleted_at IS NULL
+        WHERE c.organization_id = d.organization_id AND c.deleted_at IS NULL
+          AND c.closed_on >= current_date - interval '1 year'
+          AND (a.id = d.id OR d.path LIKE a.path || ' / %')
+      ), '{}'::jsonb) AS closed
     FROM memberships m
     JOIN organizations o ON o.id = m.organization_id
     LEFT JOIN departments d ON d.id = m.department_id AND d.deleted_at IS NULL
@@ -59,6 +88,7 @@ export async function workingCalendarFor(
   return {
     calendarId,
     label: calendarInfo(calendarId)?.label ?? null,
+    closed: new Map(Object.entries(row?.closed ?? {})),
     // The department's timezone, then the organization's. A public holiday is a date in a
     // place; asking whether "now" falls on it in the wrong place gets the wrong answer at
     // both ends of the day (§26.5).
@@ -69,14 +99,18 @@ export async function workingCalendarFor(
 
 /** Whether this person is at work on the day `instant` falls on, where they are. */
 export function worksOn(calendar: WorkingCalendar, instant: Date): boolean {
-  if (!calendar.calendarId) return true
-  return isWorkingDay(calendar.calendarId, calendarDate(calendar.timezone, instant))
+  if (!calendar.calendarId && calendar.closed.size === 0) return true
+  return isWorkingDay(calendar.calendarId, calendarDate(calendar.timezone, instant), calendar.closed)
 }
 
 /** Why they are not, in words a reminder's `held_reason` can carry. */
 export function restReason(calendar: WorkingCalendar, instant: Date): string | null {
-  if (!calendar.calendarId) return null
-  return nonWorkingReason(calendar.calendarId, calendarDate(calendar.timezone, instant))
+  if (!calendar.calendarId && calendar.closed.size === 0) return null
+  return nonWorkingReason(
+    calendar.calendarId,
+    calendarDate(calendar.timezone, instant),
+    calendar.closed,
+  )
 }
 
 /**
@@ -86,9 +120,9 @@ export function restReason(calendar: WorkingCalendar, instant: Date): string | n
  * works is one that will sit undeliverable until somebody notices.
  */
 export function shiftToWorkingDay(calendar: WorkingCalendar, instant: Date): Date {
-  if (!calendar.calendarId) return instant
+  if (!calendar.calendarId && calendar.closed.size === 0) return instant
   const date = calendarDate(calendar.timezone, instant)
-  const moved = nextWorkingDay(calendar.calendarId, date)
+  const moved = nextWorkingDay(calendar.calendarId, date, calendar.closed)
   if (moved === date) return instant
   const days = Math.round(
     (Date.parse(`${moved}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86_400_000,
@@ -98,5 +132,11 @@ export function shiftToWorkingDay(calendar: WorkingCalendar, instant: Date): Dat
 
 /** The named days ahead, for the screen that tells somebody when they will not be chased. */
 export function restDaysAhead(calendar: WorkingCalendar, from: Date = new Date()): Holiday[] {
-  return upcomingNonWorkingDays(calendar.calendarId, calendarDate(calendar.timezone, from))
+  return upcomingNonWorkingDays(
+    calendar.calendarId,
+    calendarDate(calendar.timezone, from),
+    5,
+    120,
+    calendar.closed,
+  )
 }

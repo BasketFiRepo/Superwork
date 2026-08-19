@@ -158,6 +158,10 @@ import {
   workingCalendarFor,
   restDaysAhead,
   nextWorkingDay,
+  isWorkingDay,
+  addCalendarDays,
+  closeDepartmentDay,
+  reopenDepartmentDay,
   calendarDate,
   ingestionBacklog,
   requestReindex,
@@ -2717,6 +2721,68 @@ try {
       subjectId: task!.id,
     })
 
+    // ---- A day this department names for itself (ADR 0051) -------------------
+    // The four calendars are national ones. This is the shutdown week, the day the depot
+    // moves, the holiday of a country none of them covers. Worked out from today rather than
+    // written down, because closing a day that has gone is refused.
+    let closedDay = new Date(Date.now() + 50 * 86_400_000).toISOString().slice(0, 10)
+    while (!isWorkingDay(person.calendarId, closedDay)) closedDay = addCalendarDays(closedDay, 1)
+
+    const [mine] = await ctx.sql<{ departmentId: string | null }[]>`
+      SELECT department_id AS "departmentId" FROM memberships
+      WHERE organization_id = ${ctx.organizationId} AND user_id = ${actor.userId}
+        AND deleted_at IS NULL AND status = 'active' LIMIT 1`
+
+    const closedList = await closeDepartmentDay(ctx, actor, {
+      departmentId: mine!.departmentId!,
+      date: closedDay,
+      label: 'loop stocktake shutdown',
+    })
+    const closure = closedList
+      .find((row) => row.id === mine!.departmentId)!
+      .closures.find((row) => row.date === closedDay)
+    const whileClosed = await workingCalendarFor(ctx, actor.userId)
+
+    const [stocktakeTask] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO tasks (organization_id, title, status, priority, assignee_id, due_at, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'loop closed day — count the reefers', 'todo', 'medium',
+              ${actor.userId}, ${new Date(`${closedDay}T09:00:00Z`)}, true, ${ctx.userId})
+      RETURNING id`
+    await ctx.sql`
+      INSERT INTO nudges (
+        organization_id, recipient_user_id, subject_type, subject_id, stage, channel, message,
+        actions, scheduled_for, is_demo, created_by
+      ) VALUES (
+        ${ctx.organizationId}, ${actor.userId}, 'task', ${stocktakeTask!.id}, 2, 'in_app',
+        'loop closed day — count the reefers — still open.', '["done"]'::jsonb,
+        ${new Date(`${closedDay}T09:00:00Z`)}, true, ${ctx.userId}
+      )`
+
+    const onTheClosedDay = await deliverDueNudges(ctx, {
+      now: new Date(`${closedDay}T10:00:00Z`),
+      subjectId: stocktakeTask!.id,
+    })
+    const [closedHeld] = await ctx.sql<{ heldReason: string | null; deliveredAt: Date | null }[]>`
+      SELECT held_reason AS "heldReason", delivered_at AS "deliveredAt" FROM nudges
+      WHERE organization_id = ${ctx.organizationId} AND subject_id = ${stocktakeTask!.id}`
+
+    // Reopening is the widening direction: people are chased on a day the company had said it
+    // was shut. The row stays, saying who did it and why.
+    await reopenDepartmentDay(ctx, actor, {
+      closureId: closure!.id,
+      reason: 'The loop is finished with it.',
+    })
+    const afterReopening = await workingCalendarFor(ctx, actor.userId)
+    const onceOpenAgain = await deliverDueNudges(ctx, {
+      now: new Date(`${closedDay}T11:00:00Z`),
+      subjectId: stocktakeTask!.id,
+    })
+
+    await ctx.sql`DELETE FROM notifications WHERE organization_id = ${ctx.organizationId} AND entity_id IN (
+      SELECT id FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${stocktakeTask!.id})`
+    await ctx.sql`DELETE FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${stocktakeTask!.id}`
+    await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${stocktakeTask!.id}`
+
     // Put the demo back.
     await ctx.sql`DELETE FROM notifications WHERE organization_id = ${ctx.organizationId} AND entity_id IN (
       SELECT id FROM nudges WHERE organization_id = ${ctx.organizationId} AND subject_id = ${task!.id})`
@@ -2724,7 +2790,20 @@ try {
     await ctx.sql`DELETE FROM tasks WHERE organization_id = ${ctx.organizationId} AND id = ${task!.id}`
     await archiveDepartment(ctx, actor, { id: child.id, reason: 'The loop is finished with it.' })
 
-    return { child, person, onTheDay, heldRow: heldRow!, afterwards }
+    return {
+      child,
+      person,
+      onTheDay,
+      heldRow: heldRow!,
+      afterwards,
+      closedDay,
+      closure,
+      whileClosed,
+      onTheClosedDay,
+      closedHeld: closedHeld!,
+      afterReopening,
+      onceOpenAgain,
+    }
   })
 
   ok('A company says where it is once, and everything underneath inherits it',
@@ -2742,6 +2821,19 @@ try {
     workingDays.heldRow.heldReason ?? '')
   ok('And it arrives on the next working day rather than being lost',
     workingDays.afterwards.delivered === 1)
+  ok('A department can name a day of its own that no calendar knows about',
+    workingDays.closure?.label === 'loop stocktake shutdown' &&
+      workingDays.closure.own === true &&
+      workingDays.whileClosed.closed.get(workingDays.closedDay) === 'loop stocktake shutdown',
+    `${workingDays.closedDay} — ${workingDays.closure?.label ?? 'nothing'}`)
+  ok('A reminder due on that day is held, and says which day it was',
+    workingDays.onTheClosedDay.heldByCalendar === 1 &&
+      workingDays.closedHeld.deliveredAt === null &&
+      (workingDays.closedHeld.heldReason ?? '').includes('loop stocktake shutdown'),
+    workingDays.closedHeld.heldReason ?? '')
+  ok('Reopening the day puts it back to being worked, and the reminder goes out',
+    workingDays.afterReopening.closed.has(workingDays.closedDay) === false &&
+      workingDays.onceOpenAgain.delivered === 1)
 
 
   // ---- What the model was asked, and what it cost -------------------------

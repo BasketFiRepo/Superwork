@@ -397,6 +397,15 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
       VALUES (${organizationId}, ${userIds.get(person)!}, ${userIds.get(manager)!}, ${type}, true)`
   }
 
+  // A day Northwind does not work that no national calendar knows about (ADR 0051). Six weeks
+  // out, which is well past any reminder ladder's reach — this is here so the screen shows a
+  // real closure and the reminders page can tell somebody about it, not to change what the
+  // demo's own reminders do.
+  await sql`
+    INSERT INTO department_closures (organization_id, department_id, closed_on, label, set_by, is_demo, created_by)
+    VALUES (${organizationId}, ${departmentIds.get('Operations')!}, current_date + 45,
+            'Immingham depot stocktake', ${ownerUserId}, true, ${ownerUserId})`
+
   const counts: Record<string, number> = { people: PEOPLE.length, departments: departmentIds.size }
 
   // Everything below runs through the tenant path, so the seed exercises RLS.

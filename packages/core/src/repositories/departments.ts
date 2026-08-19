@@ -37,9 +37,26 @@ export interface DepartmentView {
   /** The department the effective calendar came from, when it was not this one. */
   holidayCalendarFrom: string | null
   legalEntityId: string | null
+  /**
+   * Days ahead that this department does not work and no calendar knows about — its own and
+   * every ancestor's, because closures accumulate rather than override (ADR 0051).
+   */
+  closures: DepartmentClosure[]
   /** What would be orphaned by archiving it, so the refusal can say what it is protecting. */
   counts: { people: number; children: number; tasks: number; projects: number }
   createdAt: Date
+}
+
+export interface DepartmentClosure {
+  id: string
+  /** `YYYY-MM-DD`. A closed day is a date in a place, never an instant (§26.5). */
+  date: string
+  label: string
+  /** The department it was declared on, which is this one when `own`. */
+  from: string
+  /** False when it was inherited from somewhere above, so the screen can say where. */
+  own: boolean
+  setBy: string | null
 }
 
 /** Org structure, so it sits with the people who own that — the same gate teams use. */
@@ -77,6 +94,23 @@ export async function listDepartments(ctx: TenantContext, actor: Actor): Promise
              ORDER BY a.depth DESC LIMIT 1
            ) END) AS "holidayCalendarFrom",
            d.legal_entity_id AS "legalEntityId", d.created_at AS "createdAt",
+           -- The days this department does not work that no calendar knows about (ADR 0051).
+           -- Its own and every ancestor's, because closures accumulate rather than override,
+           -- and only the ones still ahead: a shutdown that has been and gone is not
+           -- something anybody needs to read on this screen.
+           coalesce((
+             SELECT jsonb_agg(jsonb_build_object(
+                      'id', c.id, 'date', c.closed_on::text, 'label', c.label,
+                      'from', a.name, 'own', a.id = d.id,
+                      'setBy', u.name
+                    ) ORDER BY c.closed_on)
+             FROM department_closures c
+             JOIN departments a ON a.id = c.department_id AND a.deleted_at IS NULL
+             LEFT JOIN users u ON u.id = c.set_by
+             WHERE c.organization_id = d.organization_id AND c.deleted_at IS NULL
+               AND c.closed_on >= current_date
+               AND (a.id = d.id OR d.path LIKE a.path || ' / %')
+           ), '[]'::jsonb) AS closures,
            json_build_object(
              'people', (SELECT count(*)::int FROM memberships m
                          WHERE m.department_id = d.id AND m.deleted_at IS NULL AND m.status = 'active'),
@@ -251,6 +285,168 @@ export async function archiveDepartment(
     entityId: input.id,
     entityLabel: department.name,
     summary: `${department.name} was archived. ${input.reason.trim()}`,
+  })
+
+  return listDepartments(ctx, actor)
+}
+
+/**
+ * A day this department does not work that no calendar knows about (ADR 0051).
+ *
+ * The four built-in calendars are national ones: they know Christmas Day and Thanksgiving,
+ * and they cannot know the week between Christmas and New Year that most of the country
+ * takes, the Monday the depot moves, or the public holidays of any country outside England,
+ * Wales, and the United States. Without this the only honest answer for a French department
+ * was `weekends`, and it was then chased through the fourteenth of July.
+ *
+ * It only ever *adds* a day nobody works. There is deliberately no way to say "we do work
+ * that bank holiday": the promise this whole area makes is that it may only quieten the
+ * product, and something that could switch a rest day back on would take that promise away.
+ */
+export async function closeDepartmentDay(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { departmentId: string; date: string; label: string },
+): Promise<DepartmentView[]> {
+  guardWrite(ctx, actor)
+
+  const label = input.label.trim()
+  if (label.length < 3) {
+    throw new ValidationError(
+      'Say what the day is. It is shown to the people not working it, and it is the reason a ' +
+        'held reminder gives for waiting.',
+    )
+  }
+  if (label.length > 80) throw new ValidationError('That is longer than a day’s name needs to be.')
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
+    throw new ValidationError('A closed day is a date, as YYYY-MM-DD.')
+  }
+  // The thirtieth of February parses and is not a day. This is checked here rather than by
+  // letting the `date` column reject it, because the column raises a database error — the
+  // person typing gets a sentence, not `date/time field value out of range`.
+  const [year, month, dayOfMonth] = input.date.split('-').map(Number)
+  const probe = new Date(Date.UTC(year!, month! - 1, dayOfMonth!))
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month! - 1 ||
+    probe.getUTCDate() !== dayOfMonth
+  ) {
+    throw new ValidationError('That is not a day on the calendar.')
+  }
+
+  const [day] = await ctx.sql<{ past: boolean }[]>`
+    -- "Today" is worked out where the person is, never in the server's local time (§26.5).
+    -- Today itself is allowed: it has hours left in which to hold something.
+    SELECT (${input.date} < (now() AT TIME ZONE ${ctx.timezone})::date::text) AS past`
+  if (day?.past) {
+    throw new ValidationError(
+      'That day has already gone. Closing it now would change nothing: a reminder is only ever ' +
+        'held on the day it would have arrived.',
+    )
+  }
+
+  const [department] = await ctx.sql<{ name: string }[]>`
+    SELECT name FROM departments
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.departmentId} AND deleted_at IS NULL`
+  if (!department) throw new NotFoundError()
+
+  const [clash] = await ctx.sql<{ label: string }[]>`
+    SELECT label FROM department_closures
+    WHERE organization_id = ${ctx.organizationId} AND department_id = ${input.departmentId}
+      AND closed_on = ${input.date}::date AND deleted_at IS NULL`
+  if (clash) {
+    throw new ValidationError(
+      `${department.name} is already closed on ${input.date} for “${clash.label}”. ` +
+        'Reopen that one first if it is wrong.',
+    )
+  }
+
+  const [row] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO department_closures (organization_id, department_id, closed_on, label, set_by, created_by)
+    VALUES (${ctx.organizationId}, ${input.departmentId}, ${input.date}::date, ${label},
+            ${actor.userId}, ${actor.userId})
+    RETURNING id`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'department.closed',
+    entityType: 'department',
+    entityId: input.departmentId,
+    before: null,
+    after: { closureId: row!.id, date: input.date, label, department: department.name },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'closed',
+    entityType: 'department',
+    entityId: input.departmentId,
+    entityLabel: department.name,
+    summary: `${department.name} is closed on ${input.date}: ${label}. Nobody there will be chased that day.`,
+  })
+
+  return listDepartments(ctx, actor)
+}
+
+/**
+ * Takes one back off.
+ *
+ * This is the widening direction — people are chased on a day the company had said it was
+ * shut — so the row stays, saying who reopened it and why, rather than disappearing. It does
+ * not ask for a password the way raising a limit does (ADRs 0044, 0046, 0050): what it
+ * restores is the product's ordinary behaviour rather than a new reach, it is visible on the
+ * same screen it was set on, and a closure entered on the wrong date is a mistake somebody
+ * should be able to correct without being made to prove themselves.
+ */
+export async function reopenDepartmentDay(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { closureId: string; reason: string },
+): Promise<DepartmentView[]> {
+  guardWrite(ctx, actor)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why the day is being worked after all.')
+  }
+
+  const [closure] = await ctx.sql<
+    { departmentId: string; date: string; label: string; department: string }[]
+  >`
+    SELECT c.department_id AS "departmentId", c.closed_on::text AS date, c.label, d.name AS department
+    FROM department_closures c
+    JOIN departments d ON d.id = c.department_id
+    WHERE c.organization_id = ${ctx.organizationId} AND c.id = ${input.closureId}
+      AND c.deleted_at IS NULL`
+  if (!closure) throw new NotFoundError()
+
+  await ctx.sql`
+    UPDATE department_closures
+    SET deleted_at = now(), reopened_by = ${actor.userId}, reopened_at = now(),
+        reopen_reason = ${reason}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.closureId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'department.reopened',
+    entityType: 'department',
+    entityId: closure.departmentId,
+    before: { closureId: input.closureId, date: closure.date, label: closure.label },
+    after: { reason },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'reopened',
+    entityType: 'department',
+    entityId: closure.departmentId,
+    entityLabel: closure.department,
+    summary: `${closure.department} is open again on ${closure.date}, which had been ${closure.label}. ${reason}`,
   })
 
   return listDepartments(ctx, actor)
