@@ -166,6 +166,8 @@ import {
   organizationProfile,
   updateOrganizationProfile,
   organizationCurrency,
+  grantPermission,
+  revokePermissionGrant,
   listOutgoing,
   recallSend,
   claimSendForDispatch,
@@ -515,6 +517,78 @@ try {
   ok('The other way round too: one already going out cannot be called back',
     undoSend.claimed !== null && /already going out|too late/i.test(undoSend.tooLate ?? ''),
     undoSend.tooLate ?? 'it was allowed')
+
+  // ---- One capability, for one person (ADR 0055) ----------------------------
+  // `checkHumanPermissions` has always ended with the role's grants *plus this person's own*,
+  // and nothing could write the second half: the escape hatch was designed into the function
+  // that decides every `can()` call and had no door.
+  const exception = await (async () => {
+    const [member] = await withTenant(session, (ctx) => ctx.sql<{ id: string; name: string }[]>`
+      SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${ctx.organizationId} AND m.role = 'member'
+        AND m.deleted_at IS NULL AND m.status = 'active'
+      ORDER BY u.name LIMIT 1`)
+
+    const asThem = { organizationId: session.organizationId, userId: member!.id, timezone: session.timezone }
+    const target = { type: 'document' as const, organizationId: session.organizationId, createdBy: session.userId }
+    const before = await withTenant(asThem, async (ctx) =>
+      can(await loadActor(ctx), 'document:update', target))
+
+    const stepped = { ...session, steppedUpAt: new Date() }
+    const refusedWithoutProof = await withTenant(session, async (ctx) =>
+      grantPermission(ctx, await loadActor(ctx), {
+        userId: member!.id,
+        permission: 'document:update:org',
+        reason: 'Covering the Felixstowe desk while Omar is on leave.',
+      })).then(() => null, (error: Error) => error.constructor.name)
+
+    const wildcard = await withTenant(stepped, async (ctx) =>
+      grantPermission(ctx, await loadActor(ctx), {
+        userId: member!.id,
+        permission: '*:*:org',
+        reason: 'They need to get on with things quickly.',
+      })).then(() => null, (error: Error) => error.message)
+
+    const granted = await withTenant(stepped, async (ctx) =>
+      grantPermission(ctx, await loadActor(ctx), {
+        userId: member!.id,
+        permission: 'document:update:org',
+        reason: 'Covering the Felixstowe desk while Omar is on leave.',
+      }))
+    const grant = granted.find((row) => row.live && row.userId === member!.id)!
+    const after = await withTenant(asThem, async (ctx) =>
+      can(await loadActor(ctx), 'document:update', target))
+
+    // Taking it back does not ask for a password: removing a capability should be the easy one.
+    await withTenant(session, async (ctx) =>
+      revokePermissionGrant(ctx, await loadActor(ctx), { grantId: grant.id, reason: 'Omar is back.' }))
+    const afterRevoke = await withTenant(asThem, async (ctx) =>
+      can(await loadActor(ctx), 'document:update', target))
+
+    // Put the demo back.
+    await withTenant(session, (ctx) => ctx.sql`
+      DELETE FROM notifications WHERE organization_id = ${ctx.organizationId} AND entity_type = 'member'
+        AND entity_id = ${member!.id}`)
+    await withTenant(session, (ctx) => ctx.sql`
+      DELETE FROM permission_grants WHERE organization_id = ${ctx.organizationId} AND user_id = ${member!.id}`)
+
+    return { member: member!, before, refusedWithoutProof, wildcard, grant, after, afterRevoke }
+  })()
+
+  ok('A member cannot do what their role does not carry',
+    exception.before.allow === false, exception.before.reason.slice(0, 70))
+  ok('Granting one asks for a fresh proof of identity first',
+    exception.refusedWithoutProof === 'StepUpRequiredError', exception.refusedWithoutProof ?? 'it was allowed')
+  ok('A wildcard is refused: that is a role, not an exception',
+    /administrator without saying so/i.test(exception.wildcard ?? ''), (exception.wildcard ?? '').slice(0, 70))
+  ok('And the exception reaches the engine that decides every check',
+    exception.after.allow && /exception granted to you/i.test(exception.after.reason),
+    exception.after.reason.slice(0, 80))
+  ok('It says who gave it, why, and when it ends',
+    Boolean(exception.grant.grantedByName) && exception.grant.reason.length >= 12,
+    `${exception.grant.grantedByName} · ${exception.grant.expiresAt ? 'ends' : 'no end date'}`)
+  ok('Taking it back stops it, without asking for a password',
+    exception.afterRevoke.allow === false)
 
   // ---- 4b. The clock -------------------------------------------------------
   console.log('\nPutting it on the clock…\n')
@@ -3747,7 +3821,9 @@ try {
         'step it was and why, in a row of its own, instead of leaving the list to end at the \n' +
         'last thing that worked; and the recall window an email has always waited out finally has \n' +
         'a button behind it, with the row itself deciding between the person who changed their \n' +
-        'mind and the dispatcher that was about to send it.\n',
+        'mind and the dispatcher that was about to send it; and one person can be given one \n' +
+        'capability their role does not carry, with who gave it, why, and when it ends — so \n' +
+        'nobody has to be made an administrator to be trusted with one thing.\n',
   )
 } catch (error) {
   console.error(error)

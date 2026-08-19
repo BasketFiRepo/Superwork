@@ -1342,6 +1342,44 @@ every caller about a recall the product did not have.
 
 **Approvals.** See ADR 0054.
 
+## An exception somebody granted
+
+`checkHumanPermissions` decides every `can()` call, and it has always begun
+`[...ROLE_PERMISSIONS[actor.role], ...actor.extraPermissions]`. `loadActor` selected the second
+half on every request and **nothing ever wrote it**. The permission model had an escape hatch
+designed into the function that decides everything, and no door to it: an administrator who needed
+to give one person one extra capability had to change their role, which hands them everything else
+that role carries.
+
+- **The grant is a row, and the array is gone.** `loadActor` reads live grants directly, which is
+  what makes an expiry exact — a permission that lingers until a sweep runs is one that outlives
+  its reason. It costs nothing: the permission check stayed at 3.6ms p95 against its 10ms budget.
+- **You cannot give away what you do not have.** Otherwise the ability to open the door is a way
+  to mint capability out of nothing.
+- **Not a wildcard, not something the role already carries, not a string the engine would silently
+  skip**, and at most a year. No end date is allowed and is written out rather than left blank.
+- **Granting asks for a password; taking one back does not.** Removing a capability in a hurry is
+  the case that should be easy.
+- **The person it is about is told at the same time**, as a disclosure — the one kind of
+  notification that cannot be turned down.
+- **The decision says which of the two allowed it**, rather than crediting the role for an
+  exception somebody granted last week.
+
+§29.5's prohibited capabilities are not reachable through this door: they are columns on
+`monitoring_policies`, not permission strings. The coverage list still reports them as
+read-and-never-written, and that is the guarantee working.
+
+**Settings → Members.** See ADR 0055.
+
+## The clock that only sometimes matched
+
+Three browser-check runs went red on React error #418 before the pattern was clear, always on the
+pages that render a basis — "6 overdue (as of 09:41, your timezone)" — and never on any other.
+`asOfLabel` called `new Date()` inside a server component, so a render pass straddling a minute
+tick produced one string in the HTML and another in the flight payload. The instant is now taken
+once per request through React's `cache`, and the same three pages read it. A red check somebody
+re-runs by habit is worse than no check.
+
 ## Features, and the switch that changed nothing
 
 `feature_flag_overrides` was the last table nothing wrote to, and the odd one out: the

@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { requireSession, withActor } from '@/lib/session'
 import { runAggregate, asOfLabel, formatCents } from '@superwork/core'
+import { requestNow } from '@/lib/request-now'
 import { InsightCard } from '@/components/InsightCard'
 import { RunWatchersButton } from '@/components/RunWatchersButton'
 
@@ -49,7 +50,7 @@ export default async function TodayPage() {
 
   const actionable = data.stale.rows.filter((r) => r['ambiguous'] !== true)
   const spendTotal = data.spend.rows.reduce((sum, row) => sum + Number(row['cost_cents'] ?? 0), 0)
-  const basis = asOfLabel(session.timezone)
+  const basis = asOfLabel(session.timezone, requestNow())
 
   return (
     <div className="stack stack-8">
