@@ -1,20 +1,39 @@
 /**
  * Which columns does the product read and never write?
  *
- * The previous version of this question was asked with a regular expression that looked for
- * `column = $n` in a SET clause. It missed `holiday_calendar = ${cond ? sql`holiday_calendar`
- * : value}` — a conditional SQL fragment — and so reported a control that had been settable
- * since ADR 0039 as one nobody could set. This one takes the whole assignment list of every
- * INSERT and UPDATE against the table and asks whether the column's name appears in it, which
- * cannot miss a fragment.
+ * This is the instrument that chooses the work, so being wrong here is more expensive than
+ * being wrong anywhere else: it does not produce a bad answer, it produces a bad *question*,
+ * eleven increments in a row. Every sharpening below was learned by it being wrong.
  *
- * Two other sharpenings, both learned from being wrong:
+ * The first version asked with a regular expression that looked for `column = $n` in a SET
+ * clause. It missed `holiday_calendar = ${cond ? sql`holiday_calendar` : value}` — a
+ * conditional SQL fragment — and so reported a control that had been settable since ADR 0039
+ * as one nobody could set. This one takes the whole assignment list of every INSERT and UPDATE
+ * against the table and asks whether the column's name appears in it, which cannot miss a
+ * fragment.
  *
  *   - Write sites are grouped by *who* writes. A column written only by the seed is not a
  *     column the product can set: it is whatever the seed said, which is the exact failure
  *     this work keeps finding. Same for one written only by a test or by a loop script.
  *   - A column whose only value comes from its DEFAULT is reported as such, because "nobody
  *     chose this number" is the shape of ADRs 0044, 0046 and 0050.
+ *
+ * Two kinds of column are *supposed* to have no writer, and counting them as work is how a
+ * detector cries wolf on a fifth of its own output. Neither is a list kept here — both are
+ * read out of the database, because a hand-written exception list is the second place a fact
+ * lives, and the two places drift (ADR 0059):
+ *
+ *   - **Stamped by the database.** A default that calls the clock — `now()`, `current_date`,
+ *     `clock_timestamp()` — is a writer, and naming the column in application code would be
+ *     the bug rather than the fix. That is right when the moment being recorded *is* the
+ *     insert, and wrong when it is not, which is a judgement no detector can make; so they
+ *     are listed apart with that said, rather than counted or hidden.
+ *   - **Pinned by a constraint.** A CHECK that is nothing but `column = <literal>` conjunctions
+ *     means the column can never hold anything else. §29.5's prohibited monitoring settings are
+ *     five of these: covert monitoring, keystroke and screen capture, automated employment
+ *     decisions, reading private messages, and scoring individuals. Having no writer is the
+ *     guarantee working, not a feature waiting — so for these the detector inverts, and a
+ *     *product* write is the alarm. It exits non-zero if it finds one, and CI runs it.
  *
  * Known blind spots, stated so the output is not read as more than it is:
  *   - Reads are matched on the bare column name, so a name used by several tables reports as
@@ -25,6 +44,7 @@
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { adminSql, closePools } from '@superwork/db'
 
 const ROOT = '/home/user/Superwork'
@@ -42,6 +62,51 @@ const INFRASTRUCTURE = new Set([
   'is_demo',
   'deleted_at',
 ])
+
+/**
+ * A default that calls the clock. The database stamps the row and there is nothing for the
+ * product to name — `now()`, and the spellings Postgres will hand back for the same idea.
+ */
+const CLOCK_DEFAULT =
+  /^(now\(\)|current_timestamp|current_date|current_time|localtimestamp|localtime|clock_timestamp\(\)|statement_timestamp\(\)|transaction_timestamp\(\))/i
+
+export function stampedByTheDatabase(columnDefault: string | null): boolean {
+  return columnDefault !== null && CLOCK_DEFAULT.test(columnDefault.trim())
+}
+
+/**
+ * The columns a CHECK pins to one value.
+ *
+ * Only a constraint that is *nothing but* `column = <literal>` joined by AND counts. That is
+ * deliberately narrow: `CHECK ((status = 'failed') = (error IS NOT NULL))` also contains the
+ * text `status = 'failed'` and pins nothing at all, and a detector that mistook the second for
+ * the first would quietly stop asking about a column that is genuinely empty. Narrow and
+ * occasionally silent beats wide and occasionally wrong, for an instrument that chooses work.
+ */
+export function pinnedColumns(constraintDefinition: string): string[] {
+  const body = constraintDefinition.replace(/\s+NOT\s+VALID\s*$/i, '').trim()
+  const inner = /^CHECK\s*\((.*)\)$/is.exec(body)?.[1]
+  if (inner === undefined) return []
+  const terms = stripOuterParens(inner).split(/\s+AND\s+/i)
+  const pinned: string[] = []
+  for (const term of terms) {
+    const match = /^\(?\s*([a-z_][a-z0-9_]*)\s*=\s*(?:true|false|-?\d+(?:\.\d+)?|'[^']*'(?:::[\w ."]+)?)\s*\)?$/i.exec(
+      term.trim(),
+    )
+    if (!match) return []
+    pinned.push(match[1]!)
+  }
+  return pinned
+}
+
+/** `((a) AND (b))` → `(a) AND (b)`, one balanced layer at a time. */
+function stripOuterParens(text: string): string {
+  let value = text.trim()
+  while (value.startsWith('(') && matchingParen(value, 0) === value.length - 1) {
+    value = value.slice(1, -1).trim()
+  }
+  return value
+}
 
 type Group = 'product' | 'seed' | 'script' | 'test' | 'migration' | 'other'
 
@@ -159,15 +224,31 @@ function writeSegments(body: string, table: string): string[] {
 async function main(): Promise<void> {
   const sql = adminSql()
   const columns = await sql<
-    { table: string; column: string; nullable: string; hasDefault: boolean }[]
+    { table: string; column: string; nullable: string; columnDefault: string | null }[]
   >`
     SELECT c.table_name AS "table", c.column_name AS "column", c.is_nullable AS nullable,
-           (c.column_default IS NOT NULL) AS "hasDefault"
+           c.column_default AS "columnDefault"
     FROM information_schema.columns c
     JOIN pg_class pc ON pc.relname = c.table_name
     JOIN pg_namespace pn ON pn.oid = pc.relnamespace AND pn.nspname = 'public'
     WHERE c.table_schema = 'public' AND pc.relkind = 'r'
     ORDER BY c.table_name, c.ordinal_position`
+
+  // Which columns a CHECK pins to one value, and which constraint does the pinning — the name
+  // is what makes the report actionable rather than an assertion the reader has to trust.
+  const constraints = await sql<{ table: string; name: string; definition: string }[]>`
+    SELECT pc.relname AS "table", con.conname AS name, pg_get_constraintdef(con.oid) AS definition
+    FROM pg_constraint con
+    JOIN pg_class pc ON pc.oid = con.conrelid
+    JOIN pg_namespace pn ON pn.oid = pc.relnamespace AND pn.nspname = 'public'
+    WHERE con.contype = 'c'`
+
+  const pinnedBy = new Map<string, string>()
+  for (const constraint of constraints) {
+    for (const column of pinnedColumns(constraint.definition)) {
+      pinnedBy.set(`${constraint.table}.${column}`, constraint.name)
+    }
+  }
 
   const tables = [...new Set(columns.map((row) => row.table))]
 
@@ -215,33 +296,51 @@ async function main(): Promise<void> {
     .map((file) => file.body)
     .join('\n')
 
-  const findings: {
+  interface Finding {
     table: string
     column: string
     hasDefault: boolean
     writtenBy: Group[]
     readInProduct: boolean
-  }[] = []
+  }
+  const findings: Finding[] = []
+  const stamped: Finding[] = []
+  /** A pin a product write would defeat: reported whether or not anything writes it. */
+  const pins: { key: string; constraint: string; writtenBy: Group[] }[] = []
 
   for (const row of columns) {
-    if (INFRASTRUCTURE.has(row.column)) continue
     const perGroup = writesByTable.get(row.table) ?? new Map<Group, string>()
     const word = new RegExp(`\\b${row.column}\\b`)
     const writtenBy = [...perGroup.entries()]
       .filter(([, text]) => word.test(text))
       .map(([group]) => group)
 
+    const key = `${row.table}.${row.column}`
+    const constraint = pinnedBy.get(key)
+    if (constraint !== undefined) {
+      pins.push({ key, constraint, writtenBy })
+      continue
+    }
+
+    if (INFRASTRUCTURE.has(row.column)) continue
+
     // A column a trigger maintains *is* written, and deliberately so: when two places must
     // agree, the agreement is the database's (ADRs 0028, 0030, 0032, 0036, 0040, 0042, 0047).
     if (writtenBy.includes('product') || writtenBy.includes('migration')) continue
 
-    findings.push({
+    const finding: Finding = {
       table: row.table,
       column: row.column,
-      hasDefault: row.hasDefault,
+      hasDefault: row.columnDefault !== null,
       writtenBy,
       readInProduct: word.test(productCorpus),
-    })
+    }
+    // Only when *nothing* writes it. A clock default on a column the seed also fills is still
+    // a column whose value is whatever the seed said — `messages.sent_at` is when a message was
+    // sent, which is not when the row was inserted, and hiding it behind its default would lose
+    // exactly the signal this detector exists for.
+    if (writtenBy.length === 0 && stampedByTheDatabase(row.columnDefault)) stamped.push(finding)
+    else findings.push(finding)
   }
 
   const read = findings.filter((finding) => finding.readInProduct)
@@ -249,7 +348,10 @@ async function main(): Promise<void> {
 
   console.log(`${columns.length} columns across ${tables.length} tables.`)
   console.log(
-    `${findings.length} that no product write touches — ${read.length} of them read by the product.\n`,
+    `${findings.length} that no product write touches — ${read.length} of them read by the product.`,
+  )
+  console.log(
+    `${stamped.length} more are stamped by the database and ${pins.length} are pinned by a constraint; both are listed below and neither is counted above.\n`,
   )
 
   console.log('READ BY THE PRODUCT, WRITTEN BY NOTHING IN IT')
@@ -275,7 +377,47 @@ async function main(): Promise<void> {
     console.log(`    ${finding.column.padEnd(28)} ${finding.hasDefault ? '[has default] ' : ''}${by}`)
   }
 
+  console.log('\nSTAMPED BY THE DATABASE (the default calls the clock, so there is nothing to set)')
+  console.log('(right where the moment recorded is the insert; read one of these as work only')
+  console.log(' if the moment it names could ever be a different one)\n')
+  lastTable = ''
+  for (const finding of stamped) {
+    if (finding.table !== lastTable) {
+      console.log(`  ${finding.table}`)
+      lastTable = finding.table
+    }
+    console.log(`    ${finding.column.padEnd(28)} ${finding.readInProduct ? 'read by the product' : 'not read either'}`)
+  }
+
+  // The inversion. For these, a product write is the finding.
+  console.log('\nPINNED BY A CONSTRAINT (can hold one value, so having no writer is the guarantee)\n')
+  const defeated: string[] = []
+  for (const pin of pins) {
+    // A test may write a pinned column — that is how the refusal gets proved. Anything else
+    // means the product has grown a code path that sets it, which the CHECK will refuse today
+    // and which is a thing somebody built on purpose and should be asked about.
+    const offenders = pin.writtenBy.filter((group) => group !== 'test' && group !== 'migration')
+    if (offenders.length > 0) defeated.push(`${pin.key} — written by: ${offenders.join(', ')}`)
+    const proved = pin.writtenBy.includes('test')
+    console.log(
+      `  ${pin.key.padEnd(56)} ${pin.constraint}${proved ? '' : '  — no test tries to defeat it'}`,
+    )
+  }
+
+  if (defeated.length > 0) {
+    console.log('\nA PIN THE PRODUCT NOW WRITES\n')
+    for (const line of defeated) console.log(`  ${line}`)
+    console.log(
+      '\nThe constraint still refuses the value, so nothing is stored — but a code path that',
+    )
+    console.log('sets one of these was written on purpose and needs a person to look at it.')
+  }
+
   await closePools()
+  if (defeated.length > 0) process.exitCode = 1
 }
 
-await main()
+// Importable, so the two parsers can be tested without a database.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main()
+}

@@ -1452,6 +1452,34 @@ composition fails it and names every break by hand.
 from outside invited to one team, sideways from the ladder rather than beneath it, and a viewer
 deliberately cannot write the note a guest can. See ADR 0059.
 
+## The instrument that cried wolf
+
+The column detector asks *which columns does live code read and nothing ever write?*, and its
+answer has chosen every increment for eleven releases. It does not produce a bad answer when it is
+wrong — it produces a bad **question**, repeatedly, and the output still looks like work.
+
+It had been wrong three times before, always by under-reporting a write. Re-deriving the queue
+turned up the opposite: of 127 candidates, **twenty-one were not candidates**.
+
+- **Fifteen were timestamps whose default calls the clock.** The database writes them, correctly,
+  and application code naming them would be the bug rather than the fix.
+- **Six were columns a CHECK pins to a single value.** Five are §29.5's prohibited monitoring
+  settings — covert monitoring, keystroke and screen capture, automated employment decisions,
+  reading private messages, scoring individuals — held to `false` since migration 0001. The sixth
+  is `disclosures.visible_to_subject`, held to `true`, which is §29.3. For these, having no writer
+  **is the guarantee working**; the detector had them filed under "waiting for its feature".
+
+Both classes are now read out of the database rather than kept in a list, because a hand-written
+exception list is a second place a fact lives and two places drift — which is the finding directly
+above this one. And for pinned columns the detector **inverts**: a product write is the finding.
+The CHECK refuses the value; this refuses the code path, which is not the same statement, so
+`pnpm check:columns` exits non-zero on one and CI runs it.
+
+On its first run it found that **four of the five §29.5 pins had no test attempting them** — the
+test named "states the five things no setting can turn on" asserted the list had five entries and
+tried exactly one. All five are attempted now, by name, and so is the disclosure pin, on INSERT as
+well as UPDATE. The queue is 108, and every entry is a question worth asking. See ADR 0060.
+
 ## The one error the check names
 
 Browser-check runs kept going red on React error #418 — React finding that the DOM it had been

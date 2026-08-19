@@ -91,6 +91,13 @@ jobs:
 
       - run: pnpm test
 
+      # §29.5's prohibited monitoring settings, and §29.3's "the person has already seen it",
+      # are columns a CHECK pins to one value. The constraint refuses the value; this refuses
+      # the code path, so a product write that sets one is a red build rather than a silent
+      # UPDATE that happens to be rejected. It prints the rest of the queue on the way past.
+      - name: No product code writes a column a constraint pins
+        run: pnpm check:columns
+
       - name: Agent evals — the adversarial pack must pass at 100%
         run: |
           pnpm db:bootstrap
