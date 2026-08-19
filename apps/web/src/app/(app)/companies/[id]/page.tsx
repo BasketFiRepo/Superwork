@@ -11,7 +11,9 @@ import {
   relationship360,
   shareableRelations,
 } from '@superwork/core'
+import { can } from '@superwork/auth'
 import { AccountSummaryPanel } from '@/components/AccountSummaryPanel'
+import { LogInteraction } from '@/components/LogInteraction'
 import { ShareObject } from '@/components/ShareObject'
 
 export const dynamic = 'force-dynamic'
@@ -21,7 +23,7 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
   const { id } = await params
 
   try {
-    const { view, contacts, interactions, shares, relations, people, teams } = await withActor(
+    const { view, contacts, interactions, shares, relations, people, teams, canLog } = await withActor(
       session,
       async (ctx, actor) => ({
         view: await relationship360(ctx, actor, id),
@@ -30,6 +32,14 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
         shares: await listShares(ctx, actor, 'company', id),
         relations: shareableRelations(actor, 'company', id, ctx.organizationId),
         teams: await listTeams(ctx, actor).catch(() => []),
+        // The same gate `log_interaction@v1` declares, so the tool layer and this screen cannot
+        // disagree about who may write to the timeline (ADR 0057).
+        canLog: can(actor, 'note:create', {
+          type: 'note',
+          organizationId: ctx.organizationId,
+          ownerId: actor.userId,
+          riskTier: 'low',
+        }).allow,
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -201,6 +211,14 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
             <div className="panel-header">
               <h2>Recent interactions</h2>
             </div>
+            {/* Only an agent could add to this timeline until ADR 0057, so an account somebody
+                rang this morning could still be counted as quiet. */}
+            <LogInteraction
+              companyId={id}
+              companyName={view.company.name}
+              contacts={contacts.map((contact) => ({ id: contact.id, name: contact.name }))}
+              canLog={canLog}
+            />
             {interactions.length === 0 ? (
               <div className="empty small secondary">Nothing logged yet.</div>
             ) : (

@@ -1400,6 +1400,31 @@ fields it acts on could hold anything.
 
 **Companies.** See ADR 0056.
 
+## What was said, and when
+
+`interactions` is the relationship timeline: the company screen reads it, and
+`last_interaction_at` — what the quiet-account watcher acts on — is derived from it. `logInteraction`
+was reachable through `log_interaction@v1` **and from nowhere else**, so a person who rang a
+customer this morning could watch the product decide the account had gone quiet.
+
+- **It had no permission check at all** — survivable while its only caller was a tool with
+  `requiredPermissions` of its own, and not for a moment longer. The gate is now the same one the
+  tool declares, so the two layers cannot disagree.
+- **The vocabulary lived in one tool's input schema.** A `z.enum` is not a place a vocabulary can
+  be relied on from; the column had no CHECK at all.
+- **A row about nobody was writable**, and `listInteractions` selects by company — so it would have
+  been written and never read.
+- **A future date is refused in the repository, not by a CHECK.** A constraint cannot call `now()`,
+  and a row that was legitimate when written must not become invalid as the clock passes it.
+- **No audit record**: the interaction *is* the record. It goes on the activity feed instead,
+  because a colleague about to ring the same customer should know somebody already has.
+
+Noted and deliberately not changed: a **manager** cannot log one, because their `note:*:department`
+scope is not satisfied by a company — while a member's `note:create:org` is. That predates this
+change, it looks wrong, and it deserves a decision of its own rather than a quiet fix inside a form.
+
+**Companies → any company.** See ADR 0057.
+
 ## The clock that only sometimes matched
 
 Three browser-check runs went red on React error #418 before the pattern was clear, always on the

@@ -158,6 +158,31 @@ try {
   const cited = await page.locator('[data-testid="relationship-fact"] [data-testid="fact-source"]').count()
   ok('The 360° view renders facts', facts > 0, `${facts} facts`)
   ok('Every fact carries its source', cited === facts, `${cited}/${facts} cited`)
+
+  // ---- What was said, and when (ADR 0057) ----------------------------------
+  // The timeline has always been on this screen and only an agent could add to it, so an account
+  // somebody rang this morning could still be counted as quiet.
+  await page.waitForSelector('[data-testid="log-interaction"]', { timeout: 15_000 })
+  await page.locator('[data-testid="log-interaction-open"]').click()
+  await page.waitForSelector('[data-testid="log-interaction-editor"]', { timeout: 15_000 })
+  ok('Nothing is logged without saying what happened',
+    await page.locator('[data-testid="interaction-confirm"]').isDisabled())
+  await page.selectOption('#interaction-kind', 'call')
+  await page.fill('#interaction-summary', 'Browser check rang about the reefer handover.')
+  await page.locator('[data-testid="interaction-confirm"]').click()
+  const loggedIt = await page
+    .locator('[data-testid="log-interaction-editor"]')
+    .waitFor({ state: 'detached', timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('A person can log a call from the company screen', loggedIt)
+  // `router.refresh()` repaints the server component, so wait for the row rather than reading
+  // the panel the instant the editor closes.
+  const onTimeline = await page
+    .getByText('Browser check rang about the reefer handover.')
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And it is on the timeline, with what it was and who logged it', onTimeline)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company.png`, fullPage: true })
 
   // ---- A customer somebody added (ADR 0056) --------------------------------
