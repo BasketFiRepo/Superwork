@@ -2153,6 +2153,37 @@ try {
   ok('Content above their own ceiling is refused, and the refusal says what it read', refusedUpload)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-create.png`, fullPage: true })
 
+  // ---- A rung that only added (ADR 0059) -----------------------------------
+  // Sarah Lindqvist is an Account Manager. Until now she could not write down a call she had
+  // just made: her grant is `note:*:department`, a company belongs to no department, and the
+  // refusal told her she needed *Member* access — a lower rung than the one she is on.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'sarah@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  ok('A manager can sign in', !page.url().includes('/login'), page.url())
+
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('[data-testid="company-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="company-row"] a').first().click()
+  await page.waitForSelector('[data-testid="log-interaction"]', { timeout: 15_000 })
+  const managerPanel = await page.locator('[data-testid="log-interaction"]').innerText()
+  ok('And is not told to become a member to write down a call',
+    !/need Member access/i.test(managerPanel), managerPanel.split('\n')[0]?.slice(0, 60))
+  await page.locator('[data-testid="log-interaction-open"]').click()
+  await page.waitForSelector('[data-testid="log-interaction-editor"]', { timeout: 15_000 })
+  await page.selectOption('#interaction-kind', 'call')
+  await page.fill('#interaction-summary', 'The account manager rang about the Thursday collection.')
+  await page.locator('[data-testid="interaction-confirm"]').click()
+  const managerLogged = await page
+    .getByText('The account manager rang about the Thursday collection.')
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .then(() => true, () => false)
+  ok('And the call is on the timeline, logged by the manager who made it', managerLogged)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/manager-interaction.png`, fullPage: true })
+
   // Put the demo back, through the delete the owner has and the member does not.
   await page.goto(`${BASE}/login`)
   await page.fill('input[name="email"]', 'maya@northwind.example')
