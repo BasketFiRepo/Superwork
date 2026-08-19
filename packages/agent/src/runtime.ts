@@ -17,7 +17,7 @@ import {
   type MemoryCandidate,
   type PreviewLine,
 } from '@superwork/core'
-import { completeWithFallback, loadPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
+import { completeWithFallback, loadSystemPrompt, renderPrompt, assembleContext, type ContextBlock } from '@superwork/ai'
 import {
   checkRateLimit,
   customToolsFor,
@@ -224,8 +224,9 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     })
     const actor = await loadActor(ctx)
     const killSwitch = await killSwitchEngaged(ctx)
-    const [org] = await ctx.sql<{ name: string; industry: string | null }[]>`
-      SELECT name, industry FROM organizations WHERE id = ${ctx.organizationId}`
+    const [org] = await ctx.sql<{ name: string; industry: string | null; tone: string | null }[]>`
+      SELECT name, industry, profile->>'tone' AS tone
+      FROM organizations WHERE id = ${ctx.organizationId}`
     const persona = input.persona ?? (await resolvePersona(ctx, input.agentKey ?? 'orchestrator'))
     // This tenant's own tools, resolved once per run. They are ordinary tools from here on.
     const tenantTools = await customToolsFor(ctx)
@@ -236,6 +237,10 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
       tenantTools,
       orgName: org?.name ?? 'this organization',
       industry: org?.industry ?? 'operations',
+      // The organization's own note about tone, which nothing read before ADR 0052. Phrased
+      // here rather than in the prompt file so that an organization which has not said
+      // anything contributes nothing, instead of an empty instruction.
+      tone: org?.tone ? `This organization asks to be written to like this: ${org.tone}` : '',
     }
   })
 
@@ -322,7 +327,7 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
 
   // ---- Plan ----------------------------------------------------------------
   const promptVars = {
-    org: { name: intake.orgName, industry: intake.industry },
+    org: { name: intake.orgName, industry: intake.industry, tone: intake.tone },
     user: {
       name: intake.actor.displayName,
       role: intake.actor.role,
@@ -334,7 +339,7 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
     mode: input.mode,
     effective_capabilities: input.mode === 'ask' ? 'read only' : input.mode === 'assist' ? 'read and propose' : 'read, propose and reversible writes',
   }
-  const system = renderPrompt(loadPrompt('system', 1), promptVars)
+  const system = renderPrompt(loadSystemPrompt(), promptVars)
   const blocks = buildBlocks(grounded, agentActor, input, intake.tenantTools)
   const assembly = assembleContext(blocks)
 

@@ -68,7 +68,7 @@ export default async function TodayPage() {
         <Metric label="Due today (you)" value={data.dueToday.total} href="/tasks?filter=today" />
         <Metric label="Customers waiting" value={actionable.length} href="/insights" tone={actionable.length > 0 ? 'attention' : 'neutral'} />
         <Metric label="Approvals for you" value={data.approvals.total} href="/approvals" tone={data.approvals.total > 0 ? 'attention' : 'neutral'} />
-        <Metric label="AI spend this month" value={formatCents(spendTotal)} href="/settings/ai-governance" />
+        <Metric label="AI spend this month" value={formatCents(spendTotal, session.currency)} href="/settings/ai-governance" />
       </section>
 
       <section className="stack stack-5">

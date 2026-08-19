@@ -28,7 +28,8 @@
     "loop:phase4": "node --env-file=.env --import tsx scripts/phase4-loop.ts",
     "loop:phase5": "node --env-file=.env --import tsx scripts/phase5-loop.ts",
     "loadtest": "node --env-file=.env --import tsx scripts/loadtest.ts",
-    "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts"
+    "check:browser": "node --env-file=.env --import tsx scripts/browser-check.ts",
+    "check:columns": "node --env-file=.env --import tsx scripts/column-coverage.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

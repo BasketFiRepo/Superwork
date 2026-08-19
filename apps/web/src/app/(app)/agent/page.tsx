@@ -32,7 +32,7 @@ export default async function AgentPage() {
           <div className="panel-body stack stack-2">
             <span className="micro">Total cost</span>
             <span className="metric" style={{ fontSize: 28, fontWeight: 600 }}>
-              {formatCents(runs.reduce((sum, run) => sum + run.costCents, 0))}
+              {formatCents(runs.reduce((sum, run) => sum + run.costCents, 0), session.currency)}
             </span>
           </div>
         </div>
@@ -89,7 +89,7 @@ export default async function AgentPage() {
                       </span>
                     </td>
                     <td className="num">{run.stepsUsed}</td>
-                    <td className="num">{formatCents(run.costCents)}</td>
+                    <td className="num">{formatCents(run.costCents, session.currency)}</td>
                     <td>
                       <Link className="small" href={`/activity?run=${run.id}`}>
                         inspect
