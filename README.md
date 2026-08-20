@@ -1515,6 +1515,36 @@ composer. `notes`, `tasks` and `projects` are deliberately left — every one of
 `internal`, and enforcing that would put them all back above the guest ceiling, which is the
 regression the clearance change was written to undo. See ADR 0061.
 
+## A database that says where it is
+
+The hosted deployment answered every request with *"Application error: a server-side exception has
+occurred"* and a digest, for five hours. The application was correct. `permission_grants` —
+migration 0051 — had never been applied to that database, so `loadActor`, which runs on every
+authenticated request, threw `42P01`. Finding that out took the platform's log viewer, a search
+for the digest, and knowing that an `undefined_table` on a table added two releases ago means the
+schema is behind rather than the code broken. None of that is available to the person looking at
+the page.
+
+`layout.tsx` had made the same argument since Phase 0 about a different cause — *"a throw during a
+render reaches the browser as a digest and nothing else"* — and refuses to render on an incomplete
+environment, naming the missing variables. A database behind the application is that failure with
+a different cause, so it now gets the same answer: a page naming the migrations that have not been
+applied and the two ways to apply them.
+
+Three things make it trustworthy. It reads through the **application's own pool**, never the
+owner's, which needed a `SELECT`-only grant on the migration ledger (migration 0055) — a runtime
+that could write that table could tell itself the schema is newer than it is. **Once satisfied it
+never asks again**, so it costs one query per process; while it is failing it is asked every
+request, which is what lets a deployment recover the moment the migrations land, with no redeploy.
+And **a privilege error is an answer, not a shrug** — a database that is behind is also a database
+without the grant, so the check loses the ability to enumerate exactly when it is needed; that case
+says "behind, and unable to say by how much" rather than pretending to a list it does not have.
+
+That last one was invisible until the outage was rebuilt rather than reasoned about — rolling the
+database back five migrations and starting a fresh server, which turns `500` and a digest into
+`200` and a page. See ADR 0062.
+
+
 
 ## The one error the check names
 
