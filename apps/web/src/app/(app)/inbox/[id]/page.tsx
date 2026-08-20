@@ -2,6 +2,7 @@ import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import { getConversation, listCommitments, listFollowUps, listMessages, NotFoundError } from '@superwork/core'
+import { ConversationClassification } from '@/components/ConversationClassification'
 import { FollowUps } from '@/components/FollowUps'
 
 export const dynamic = 'force-dynamic'
@@ -69,6 +70,15 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
         ) : null}
+
+        <ConversationClassification
+          conversationId={conversation.id}
+          sensitivity={conversation.sensitivity}
+          source={conversation.sensitivitySource}
+          setByName={conversation.sensitivitySetByName}
+          setAt={conversation.sensitivitySetAt ? conversation.sensitivitySetAt.toISOString() : null}
+          reason={conversation.sensitivityReason}
+        />
 
         <FollowUps
           conversationId={conversation.id}

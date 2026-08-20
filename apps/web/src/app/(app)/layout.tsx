@@ -5,6 +5,7 @@ import { AgentRail } from '@/components/AgentRail'
 import { CommandBar } from '@/components/CommandBar'
 import { env } from '@superwork/config'
 import { reminderCount } from '@superwork/core'
+import { readCeiling } from '@superwork/auth'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await requireSession()
@@ -18,13 +19,17 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           WHERE organization_id = ${ctx.organizationId} AND status = 'pending' AND deleted_at IS NULL) AS approvals,
         (SELECT count(*)::int FROM insights
           WHERE organization_id = ${ctx.organizationId} AND status = 'new' AND deleted_at IS NULL) AS insights,
+        -- Both counts stop at the reader's clearance (ADR 0061). A badge that counts a thread
+        -- somebody cannot open is the same disclosure as listing its subject.
         (SELECT count(*)::int FROM conversations
           WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND archived_at IS NULL
+            AND sensitivity <= ${readCeiling(actor)}::sw_sensitivity
             AND (snoozed_until IS NULL OR snoozed_until <= now())) AS inbox,
         (SELECT count(*)::int FROM conversations conv
           LEFT JOIN companies c ON c.id = conv.company_id
           WHERE conv.organization_id = ${ctx.organizationId} AND conv.deleted_at IS NULL
             AND conv.archived_at IS NULL AND conv.last_direction = 'inbound'
+            AND conv.sensitivity <= ${readCeiling(actor)}::sw_sensitivity
             AND conv.last_message_at < now() - make_interval(days => coalesce(c.reply_sla_days, 4))) AS "pastSla",
         (SELECT count(*)::int FROM commitments
           WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND status = 'proposed') AS commitments`

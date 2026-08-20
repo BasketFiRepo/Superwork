@@ -1,5 +1,5 @@
 import type { TenantContext } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { can, readCeiling, type Actor } from '@superwork/auth'
 import { PermissionError, ValidationError } from '../errors.js'
 import { asOfLabel, startOfDay, endOfDay } from '../time.js'
 
@@ -132,6 +132,9 @@ export async function runAggregate(
         ) m ON true
         WHERE conv.organization_id = ${org} AND conv.deleted_at IS NULL
           AND conv.status = 'open'
+          -- The excerpt below is the last message's body. A watcher that surfaces it to somebody
+          -- who could not open the thread would be a way round the classification (ADR 0061).
+          AND conv.sensitivity <= ${readCeiling(actor)}::sw_sensitivity
           AND c.deleted_at IS NULL
           AND c.type IN ('customer', 'prospect')
           AND conv.last_message_at < now() - make_interval(days => ${args.slaDaysOverride ?? 0}::int

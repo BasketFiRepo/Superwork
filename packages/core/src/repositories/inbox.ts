@@ -1,7 +1,9 @@
 import type { Priority, TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
-import { can, type Actor } from '@superwork/auth'
+import { can, readCeiling, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
+import type { Sensitivity } from '@superwork/db'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
+import { assertSteppedUp } from '../step-up.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { detectInjection } from '../retrieval/classify.js'
 import { sanitizeMessage, type SanitizedContent } from '../sanitize.js'
@@ -40,6 +42,12 @@ export interface ConversationView {
   hasFlaggedContent: boolean
   slaDays: number
   pastSla: boolean
+  /** §4.3. `unset` means the default, not a decision — see `classifyConversation`. */
+  sensitivity: Sensitivity
+  sensitivitySource: 'unset' | 'human'
+  sensitivitySetByName: string | null
+  sensitivitySetAt: Date | null
+  sensitivityReason: string | null
 }
 
 const SELECT_CONVERSATION = (ctx: TenantContext) => ctx.sql`
@@ -56,6 +64,10 @@ const SELECT_CONVERSATION = (ctx: TenantContext) => ctx.sql`
          conv.triaged_by_agent_run_id AS "triagedByAgentRunId",
          EXISTS (SELECT 1 FROM messages m
                   WHERE m.conversation_id = conv.id AND m.injection_flagged) AS "hasFlaggedContent",
+         conv.sensitivity, conv.sensitivity_source AS "sensitivitySource",
+         (SELECT name FROM users WHERE id = conv.sensitivity_set_by) AS "sensitivitySetByName",
+         conv.sensitivity_set_at AS "sensitivitySetAt",
+         conv.sensitivity_reason AS "sensitivityReason",
          coalesce(c.reply_sla_days, 4) AS "slaDays",
          (conv.last_direction = 'inbound'
            AND conv.last_message_at < now() - make_interval(days => coalesce(c.reply_sla_days, 4))) AS "pastSla"
@@ -88,6 +100,10 @@ export async function listConversations(
   return sql<ConversationView[]>`
     ${SELECT_CONVERSATION(ctx)}
     WHERE conv.organization_id = ${ctx.organizationId} AND conv.deleted_at IS NULL
+      -- A subject is content. A thread somebody classified above this reader is not listed at
+      -- all, rather than listed and refused on open: the same argument the relationship view
+      -- makes about a restricted contract's title.
+      AND conv.sensitivity <= ${readCeiling(actor)}::sw_sensitivity
       ${view === 'archived' ? sql`AND conv.archived_at IS NOT NULL` : sql`AND conv.archived_at IS NULL`}
       ${
         view === 'queue'
@@ -116,13 +132,21 @@ export async function getConversation(ctx: TenantContext, actor: Actor, id: stri
     WHERE conv.organization_id = ${ctx.organizationId} AND conv.id = ${id} AND conv.deleted_at IS NULL`
   if (!row) throw new NotFoundError()
 
+  // The classification goes into the resource, which is the only reason `checkClearance` ever
+  // sees it. It had never been passed, so the column on this table decided nothing at all.
   const decision = can(actor, 'conversation:read', {
     type: 'conversation',
     id: row.id,
     organizationId: ctx.organizationId,
     ownerId: row.ownerId,
+    sensitivity: row.sensitivity,
   })
-  if (!decision.allow) throw new PermissionError(decision.reason)
+  // A thread above the reader's clearance is not theirs to know about, so it answers the way a
+  // thread in another organization does (§3.2).
+  if (!decision.allow) {
+    if (SENSITIVITY_RANK[row.sensitivity] > SENSITIVITY_RANK[readCeiling(actor)]) throw new NotFoundError()
+    throw new PermissionError(decision.reason)
+  }
   return row
 }
 
@@ -253,6 +277,84 @@ export async function applyTriage(ctx: TenantContext, actor: Actor, input: Triag
   return getConversation(ctx, actor, input.conversationId)
 }
 
+export const SENSITIVITIES: Sensitivity[] = ['public', 'internal', 'confidential', 'restricted']
+
+/**
+ * Saying how far a thread may travel (ADR 0061).
+ *
+ * `conversations.sensitivity` has carried `internal` since Phase 0, written by nothing and — more
+ * to the point — read by nothing: no repository put it in the `Resource` it checked, so
+ * `checkClearance` never saw it. Every member holds `conversation:read:org`, so every member read
+ * every thread in the organization, and there was no way to say otherwise.
+ *
+ * Three things this deliberately does:
+ *
+ * **The new level is checked, not the old one.** `can()` is asked about the row as it *will be*,
+ * so the clearance test refuses a classification the person could not then read, in the policy
+ * engine's own words rather than in a second copy of the rule here (ADR 0045, ADR 0056).
+ *
+ * **Lowering asks for the password again; raising never does.** Raising narrows who can read the
+ * thread, and a narrowing has never needed a fresh proof here. Lowering widens it, and cascades
+ * to every message already in the thread (ADRs 0044, 0046, 0050, 0054, 0055).
+ *
+ * **The reason is required by the database, not by this function.** The CHECK is what makes it
+ * true of every writer.
+ */
+export async function classifyConversation(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { conversationId: string; sensitivity: Sensitivity; reason: string },
+): Promise<ConversationView> {
+  const before = await getConversation(ctx, actor, input.conversationId)
+
+  if (!SENSITIVITIES.includes(input.sensitivity)) {
+    throw new ValidationError(`“${String(input.sensitivity)}” is not a classification.`)
+  }
+
+  const decision = can(actor, 'conversation:update', {
+    type: 'conversation',
+    id: before.id,
+    organizationId: ctx.organizationId,
+    ownerId: before.ownerId,
+    riskTier: 'low',
+    // The row as it will be. Filing a thread above your own clearance would be filing it out of
+    // your own reach, and the policy engine says that better than a second check here would.
+    sensitivity: input.sensitivity,
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const reason = input.reason.trim()
+  if (reason.length < 4) {
+    throw new ValidationError('Say why. A classification nobody explained is one nobody can check.')
+  }
+
+  if (SENSITIVITY_RANK[input.sensitivity] < SENSITIVITY_RANK[before.sensitivity]) {
+    assertSteppedUp(actor, 'conversation.declassify')
+  }
+
+  await ctx.sql`
+    UPDATE conversations
+    SET sensitivity = ${input.sensitivity}::sw_sensitivity, sensitivity_source = 'human',
+        sensitivity_set_by = ${actor.userId}, sensitivity_set_at = now(),
+        sensitivity_reason = ${reason}, updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.conversationId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'conversation.classified',
+    entityType: 'conversation',
+    entityId: input.conversationId,
+    before: { sensitivity: before.sensitivity, source: before.sensitivitySource },
+    after: { sensitivity: input.sensitivity, source: 'human', reason },
+  })
+
+  // Deliberately not on the activity feed. Who can read a thread is not news to the people who
+  // can no longer read it, and the feed is a place they would still see the subject (§29.3 is
+  // about the other direction, and the same care applies here).
+  return getConversation(ctx, actor, input.conversationId)
+}
+
 export async function archiveConversation(
   ctx: TenantContext,
   actor: Actor,
@@ -374,7 +476,11 @@ export interface InboxCounts {
   untriaged: number
 }
 
-export async function inboxCounts(ctx: TenantContext): Promise<InboxCounts> {
+/**
+ * The numbers on the navigation. They take an actor for the same reason the list does: a badge
+ * that counts a thread somebody cannot open tells them it is there.
+ */
+export async function inboxCounts(ctx: TenantContext, actor: Actor): Promise<InboxCounts> {
   const [row] = await ctx.sql<InboxCounts[]>`
     SELECT
       count(*) FILTER (WHERE archived_at IS NULL
@@ -387,6 +493,7 @@ export async function inboxCounts(ctx: TenantContext): Promise<InboxCounts> {
       count(*) FILTER (WHERE archived_at IS NULL AND triaged_at IS NULL)::int AS untriaged
     FROM conversations conv
     LEFT JOIN companies c ON c.id = conv.company_id
-    WHERE conv.organization_id = ${ctx.organizationId} AND conv.deleted_at IS NULL`
+    WHERE conv.organization_id = ${ctx.organizationId} AND conv.deleted_at IS NULL
+      AND conv.sensitivity <= ${readCeiling(actor)}::sw_sensitivity`
   return row ?? { queue: 0, pastSla: 0, needsReply: 0, waiting: 0, snoozed: 0, untriaged: 0 }
 }
