@@ -1,7 +1,14 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { pinnedColumns, ROOT, stampedByTheDatabase, triggerAssignments } from '../../scripts/column-coverage.js'
+import {
+  ANY_TABLE,
+  pinnedColumns,
+  readSites,
+  ROOT,
+  stampedByTheDatabase,
+  triggerAssignments,
+} from '../../scripts/column-coverage.js'
 
 /**
  * The detector's two classifiers (ADR 0060).
@@ -148,5 +155,83 @@ describe('what a trigger body actually writes', () => {
     expect(assigned.has('tsv')).toBe(true)
     // And a column only ever named in a condition is not among them.
     expect(assigned.has('parent_id')).toBe(false)
+  })
+})
+
+describe('which table a read belongs to', () => {
+  /**
+   * The fifth way this detector was wrong, and the one that cost the most: the read test was a
+   * bare-name search over the whole product corpus. Twelve of seventy-three entries on the
+   * queue were columns nothing reads — `citations.score`, `notifications.delivered_at`, and the
+   * seven columns of `events`, a table the product never touches at all (ADR 0069).
+   */
+  const read = (body: string, table: string, column: string): boolean =>
+    (readSites(body).get(table)?.has(column) ?? false) ||
+    (readSites(body).get(ANY_TABLE)?.has(column) ?? false)
+
+  it('follows the alias to the table it was declared for', () => {
+    const body = 'const q = sql`SELECT n.delivered_at FROM nudges n WHERE n.id = ${id}`'
+    expect(read(body, 'nudges', 'delivered_at')).toBe(true)
+    expect(read(body, 'notifications', 'delivered_at')).toBe(false)
+  })
+
+  it('keeps a subquery’s reads inside the subquery', () => {
+    // The shape in `reminderCount`: two counts added, one per table, in one statement.
+    const body = [
+      'const q = sql`SELECT (',
+      "  (SELECT count(*) FROM nudges WHERE delivered_at IS NOT NULL)",
+      '  +',
+      "  (SELECT count(*) FROM notifications WHERE read_at IS NULL)",
+      ')::int AS count`',
+    ].join('\n')
+    expect(read(body, 'nudges', 'delivered_at')).toBe(true)
+    expect(read(body, 'notifications', 'delivered_at')).toBe(false)
+    expect(read(body, 'notifications', 'read_at')).toBe(true)
+  })
+
+  it('does not lend one statement’s columns to another in the same file', () => {
+    // The bug the first version of this fix reintroduced one level up, by analysing the file's
+    // statements joined together rather than one at a time.
+    const body = [
+      'const a = sql`SELECT starts_on FROM projects`',
+      'const b = sql`SELECT title FROM tasks`',
+    ].join('\n')
+    expect(read(body, 'projects', 'starts_on')).toBe(true)
+    expect(read(body, 'tasks', 'starts_on')).toBe(false)
+  })
+
+  it('resolves a fragment written apart from the FROM it is spliced into', () => {
+    const body = [
+      'const SELECT_CONV = (ctx) => ctx.sql`SELECT conv.id FROM conversations conv`',
+      'const list = sql`${SELECT_CONV(ctx)} AND conv.snoozed_until IS NULL`',
+    ].join('\n')
+    expect(read(body, 'conversations', 'snoozed_until')).toBe(true)
+    expect(read(body, 'insights', 'snoozed_until')).toBe(false)
+  })
+
+  it('falls back to every table when the text cannot say, which is the old behaviour', () => {
+    // A fragment with no FROM and no alias. Over-reporting here costs a candidate somebody
+    // drops; guessing the other way costs work nobody ever sees again.
+    const body = 'const frag = sql`WHERE snoozed_until IS NULL`'
+    expect(readSites(body).get(ANY_TABLE)?.has('snoozed_until')).toBe(true)
+    expect(read(body, 'insights', 'snoozed_until')).toBe(true)
+  })
+
+  it('does not read a property access in a component as a column', () => {
+    const body = 'export function Row({ contact }) { return <span>{contact.name}</span> }'
+    expect(readSites(body).size).toBe(0)
+  })
+
+  it('and on the real thing, nothing reads the events table', () => {
+    // `events` was designed in migration 0005 and wired to nothing; `activities` and
+    // `audit_logs` do its job. Seven of its columns sat on the queue because their names are
+    // `name`, `payload`, `entity_id`.
+    const files = [
+      join(ROOT, 'packages', 'core', 'src', 'reminders.ts'),
+      join(ROOT, 'packages', 'core', 'src', 'audit.ts'),
+    ]
+    for (const file of files) {
+      expect(readSites(readFileSync(file, 'utf8')).has('events')).toBe(false)
+    }
   })
 })

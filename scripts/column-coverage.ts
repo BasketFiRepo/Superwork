@@ -36,8 +36,9 @@
  *     *product* write is the alarm. It exits non-zero if it finds one, and CI runs it.
  *
  * Known blind spots, stated so the output is not read as more than it is:
- *   - Reads are matched on the bare column name, so a name used by several tables reports as
- *     read wherever any of them is read. Reads are the insensitive direction here.
+ *   - Reads are attributed to the table the statement is about, and fall back to every table
+ *     when the text cannot say (ADR 0069). What the fallback covers is a query assembled from
+ *     strings rather than written out — rare here, and the fallback is the safe direction.
  *   - A write built entirely out of interpolated identifiers would be missed.
  *   - Everything it reports is a *candidate*. It is evidence to go and read the code with.
  */
@@ -195,6 +196,163 @@ function matchingParen(text: string, open: number): number {
 }
 
 /**
+ * Which table each column *read* belongs to.
+ *
+ * The read test used to be a bare-name search over the whole product corpus: `score` anywhere
+ * marked `citations.score` as read, `delivered_at` in a query about nudges marked
+ * `notifications.delivered_at` as read, and `events` — a table nothing in the product touches
+ * at all — had seven columns reported as read because their names are `name`, `payload`,
+ * `entity_id`. Twelve of seventy-three entries on the queue were columns nothing reads.
+ *
+ * That was the *safe* direction when it was written: over-reporting a read produces a
+ * candidate somebody investigates and drops, while under-reporting hides work. But a queue
+ * where one entry in six is imaginary is a queue that gets skimmed, and the same blind spot on
+ * the write side hid two real columns until it was fixed (ADR 0066). So this narrows reads the
+ * way `writeSegments` narrows writes — by asking which table the statement is about — and keeps
+ * the old behaviour exactly where the text cannot say.
+ *
+ * **Scopes.** A read belongs to the innermost bracketed span around it that names a table, so
+ * `(SELECT count(*) FROM nudges WHERE ... delivered_at ...)` sitting inside a statement that
+ * also queries `notifications` is attributed to nudges alone.
+ *
+ * **Aliases.** `n.delivered_at` resolves through the `FROM nudges n` in its own scope, and
+ * failing that through every alias the file declares — a `WHERE conv.snoozed_until IS NULL`
+ * fragment written apart from the `FROM conversations conv` it is spliced into still lands on
+ * conversations.
+ *
+ * **The fallback is the old behaviour, and it is deliberate.** A column named in a span that
+ * mentions no table and carries no alias is attributed to every table, under `ANY_TABLE`. The
+ * cost of that is a candidate somebody drops; the cost of guessing wrong the other way is work
+ * nobody ever sees again.
+ */
+export const ANY_TABLE = '*'
+
+const TABLE_AFTER = /\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:public\.)?([a-z_][a-z0-9_]*)(?:\s+(?:AS\s+)?([a-z][a-z0-9_]*))?/gi
+
+/** Reserved words that follow FROM/JOIN in real SQL and are not tables. */
+const NOT_A_TABLE = new Set(['select', 'lateral', 'set', 'values', 'on', 'where', 'as'])
+
+interface Scope {
+  from: number
+  to: number
+  tables: Set<string>
+  aliases: Map<string, string>
+}
+
+/** Every bracketed span, plus the whole body, with the tables each one names. */
+function scopesOf(body: string): Scope[] {
+  const scopes: Scope[] = []
+  const spans: [number, number][] = [[0, body.length]]
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '(') continue
+    const close = matchingParen(body, i)
+    if (close > i) spans.push([i, close])
+  }
+  for (const [from, to] of spans) {
+    const text = body.slice(from, to)
+    const tables = new Set<string>()
+    const aliases = new Map<string, string>()
+    TABLE_AFTER.lastIndex = 0
+    for (const match of text.matchAll(TABLE_AFTER)) {
+      const table = match[1]!.toLowerCase()
+      if (NOT_A_TABLE.has(table)) continue
+      tables.add(table)
+      const alias = match[2]?.toLowerCase()
+      if (alias && !NOT_A_TABLE.has(alias)) aliases.set(alias, table)
+    }
+    scopes.push({ from, to, tables, aliases })
+  }
+  // Innermost first, so the first scope containing an offset is the tightest one.
+  return scopes.sort((a, b) => b.from - a.from || a.to - b.to)
+}
+
+/**
+ * `table -> columns read`, plus `ANY_TABLE` for the reads no scope could place.
+ *
+ * Text only. It cannot see through a helper that builds a query from strings, and it does not
+ * try to — everything this reports is a candidate to go and read the code with.
+ */
+export function readSites(body: string): Map<string, Set<string>> {
+  const sites = new Map<string, Set<string>>()
+  const add = (table: string, column: string) => {
+    const set = sites.get(table) ?? new Set<string>()
+    set.add(column)
+    sites.set(table, set)
+  }
+
+  // Only the SQL. Scanning whole files would read `contact.name` in a React component as a
+  // column read of `name` on every table — the same over-reporting from a different direction,
+  // and worse because it looks like precision.
+  const spans = sqlSpans(body)
+
+  // Aliases are gathered across the file and used everywhere, because a fragment is routinely
+  // written apart from the `FROM` it is spliced into: `AND conv.archived_at IS NULL` in one
+  // statement, `FROM conversations conv` in the constant above it.
+  const fileAliases = new Map<string, string>()
+  for (const span of spans) {
+    for (const scope of scopesOf(span)) {
+      for (const [alias, table] of scope.aliases) fileAliases.set(alias, table)
+    }
+  }
+
+  // One statement at a time. Joining them first gave every statement a fallback scope holding
+  // every table the *file* mentions, so `SELECT delivered_at … FROM nudges` in a file that also
+  // queries `notifications` credited both — which is the bug this whole change is about,
+  // reintroduced one level up.
+  for (const span of spans) {
+    const scopes = scopesOf(span)
+    for (const match of span.matchAll(/(?:\b([a-z][a-z0-9_]*)\.)?\b([a-z_][a-z0-9_]*)\b/gi)) {
+      const qualifier = match[1]?.toLowerCase()
+      const column = match[2]!
+      const at = match.index
+
+      // `n.delivered_at` and `conversations.snoozed_until` both name their table outright.
+      if (qualifier) {
+        add(fileAliases.get(qualifier) ?? qualifier, column)
+        continue
+      }
+
+      const scope = scopes.find(
+        (candidate) => candidate.from <= at && at < candidate.to && candidate.tables.size > 0,
+      )
+      if (scope) for (const table of scope.tables) add(table, column)
+      else add(ANY_TABLE, column)
+    }
+  }
+  return sites
+}
+
+/**
+ * The template literals in `body` that look like SQL.
+ *
+ * `statementEnd` steps over `${…}`, so a literal that splices a fragment carries the fragment's
+ * text with it — which is what makes `${SELECT_CONVERSATION(ctx)} WHERE conv.archived_at IS NULL`
+ * resolvable at all.
+ *
+ * The keyword test is **case-sensitive**, and that is the whole reason it can afford to accept
+ * `AND` and `OR`: SQL here is written in upper case and prose is not, so a refusal message
+ * containing the word "or" is not mistaken for a query. A fragment like `AND conv.archived_at
+ * IS NULL` has no `SELECT` in it and would otherwise be dropped — along with the only mention
+ * of the column it filters on.
+ */
+const SQL_SHAPED =
+  /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN|WHERE|SET|AND|OR|ORDER\s+BY|GROUP\s+BY|LIMIT|VALUES|RETURNING|IS\s+NULL)\b/
+
+function sqlSpans(body: string): string[] {
+  const spans: string[] = []
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '`') continue
+    const end = statementEnd(body, i + 1)
+    const text = body.slice(i + 1, end)
+    if (SQL_SHAPED.test(text)) spans.push(text)
+    i = end
+  }
+  // A `.sql` file is all statements and has no backticks around them.
+  if (spans.length === 0 && /\b(SELECT|INSERT\s+INTO|UPDATE|CREATE\s+TABLE)\b/i.test(body)) spans.push(body)
+  return spans
+}
+
+/**
  * The columns a trigger body assigns: `NEW.column := …`, and nothing else.
  *
  * `:=` is plpgsql's assignment and `=` is its equality, so `IF NEW.parent_id = NEW.id` and
@@ -322,10 +480,21 @@ async function main(): Promise<void> {
     writesByTable.set(table, perGroup)
   }
 
-  const productCorpus = files
-    .filter((file) => file.group === 'product')
-    .map((file) => file.body)
-    .join('\n')
+  // Which table each read belongs to, rather than which names appear somewhere in the product.
+  const productReads = new Map<string, Set<string>>()
+  for (const file of files) {
+    if (file.group !== 'product') continue
+    for (const [table, columns] of readSites(file.body)) {
+      const set = productReads.get(table) ?? new Set<string>()
+      for (const column of columns) set.add(column)
+      productReads.set(table, set)
+    }
+  }
+  const readsColumn = (table: string, column: string): boolean =>
+    (productReads.get(table)?.has(column) ?? false) || (productReads.get(ANY_TABLE)?.has(column) ?? false)
+  /** Placed by the fallback rather than by a statement — the part of the count that is a guess. */
+  const readsOnlyByFallback = (table: string, column: string): boolean =>
+    !(productReads.get(table)?.has(column) ?? false) && (productReads.get(ANY_TABLE)?.has(column) ?? false)
 
   interface Finding {
     table: string
@@ -364,7 +533,7 @@ async function main(): Promise<void> {
       column: row.column,
       hasDefault: row.columnDefault !== null,
       writtenBy,
-      readInProduct: word.test(productCorpus),
+      readInProduct: readsColumn(row.table, row.column),
     }
     // Only when *nothing* writes it. A clock default on a column the seed also fills is still
     // a column whose value is whatever the seed said — `messages.sent_at` is when a message was
@@ -378,8 +547,12 @@ async function main(): Promise<void> {
   const unread = findings.filter((finding) => !finding.readInProduct)
 
   console.log(`${columns.length} columns across ${tables.length} tables.`)
+  const guessed = read.filter((finding) => readsOnlyByFallback(finding.table, finding.column)).length
   console.log(
-    `${findings.length} that no product write touches — ${read.length} of them read by the product.`,
+    `${findings.length} that no product write touches — ${read.length} of them read by the product` +
+      (guessed > 0
+        ? `, ${guessed} of those placed by the fallback rather than by a statement.`
+        : ', every one of them by a statement that names the table.'),
   )
   console.log(
     `${stamped.length} more are stamped by the database and ${pins.length} are pinned by a constraint; both are listed below and neither is counted above.\n`,
