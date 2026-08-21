@@ -74,6 +74,8 @@ export const MIGRATIONS: readonly string[] = [
   '0060_an_agent_somebody_still_stands_behind',
   '0061_a_report_somebody_actually_read',
   '0062_a_next_step_that_is_already_true',
+  '0063_a_default_is_not_a_control',
+  '0064_what_a_workflow_run_costs',
 ]
 
 /** The id half of a migration's name: `0054_correspondence…` → `0054`. */

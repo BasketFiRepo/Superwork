@@ -1,6 +1,6 @@
 import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
-import { checkCapacity, describeCron, getWorkflow, listWorkflowRuns } from '@superwork/core'
+import { checkCapacity, describeCron, formatCents, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { can } from '@superwork/auth'
 import { formatDuration } from '@/lib/format'
 import { requireSession, withActor } from '@/lib/session'
@@ -146,6 +146,13 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
           <h2>Runs</h2>
           <span className="small muted">Dry runs and real ones, in order</span>
         </div>
+        {/* Said once, so a run reading "no model spend" is not mistaken for a number nobody
+            measured. A compiled graph is why a workflow is cheap and predictable, and the
+            figure comes from the agent runs it hangs off rather than from this page. */}
+        <p className="small muted" style={{ margin: 0, padding: '0 var(--s-5)' }} data-testid="run-cost-explainer">
+          A workflow is a graph somebody read back and activated, so it asks a model nothing. A run
+          that shows spend has a step that called one.
+        </p>
         {runs.length === 0 ? (
           <div className="empty stack stack-2">
             <p className="secondary">It has never run.</p>
@@ -162,6 +169,14 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
                   <span className="small">{run.status.replace(/_/g, ' ')}</span>
                   <span className="small muted">
                     version {run.versionOrdinal} · {run.startedAt ? run.startedAt.toISOString().slice(0, 16).replace('T', ' ') : '—'}
+                  </span>
+                  {/* Fetched into every run view since 0007 and shown nowhere. Zero is the right
+                      answer here rather than a stale one — a workflow is a compiled graph and
+                      asks a model nothing — so the run says which of the two it is, and the
+                      database keeps the number in step with the agent runs it hangs off
+                      (ADR 0073). */}
+                  <span className="small mono muted" data-testid="run-cost">
+                    {run.costCents === 0 ? 'no model spend' : formatCents(run.costCents, session.currency)}
                   </span>
                 </div>
                 {run.error ? <p className="small" style={{ margin: 0 }}>{run.error}</p> : null}
