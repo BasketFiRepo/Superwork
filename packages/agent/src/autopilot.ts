@@ -1,5 +1,5 @@
 import type { TenantContext } from '@superwork/db'
-import { recordDisclosure, writeActivity } from '@superwork/core'
+import { notify, recordDisclosure, writeActivity } from '@superwork/core'
 import { startOfDay, startOfWeek } from '@superwork/core'
 
 /**
@@ -308,7 +308,70 @@ export async function saveDigest(
     })
   }
 
+  // And tell them. The digest's own header says an agent that acts unattended "has to report,
+  // in one place, everything it did" — and until now it reported by writing a row on a settings
+  // page three clicks deep. An agent reporting into a void is not reporting (ADR 0070).
+  //
+  // Routed as a digest rather than an interruption, which is what it is: a weekly summary
+  // belongs in the briefing that gathers such things, not in a notification that stops
+  // somebody. Muteable, too — an owner who reads these on the agent page is entitled to say so,
+  // and the *receipt* is what governance reads, not the notification.
+  await notify(ctx, {
+    userId: input.recipientUserId,
+    type: 'agent_digest',
+    title: `${input.facts.agentName} reported on its week`,
+    body: input.narrative.slice(0, 240),
+    entityType: 'agent',
+    entityId: input.agentId,
+    url: `/settings/agents/${input.agentId}`,
+  })
+
   return row.id
+}
+
+/**
+ * The accountable human says they have read it (ADR 0070).
+ *
+ * Only the recipient. Somebody else marking it read would forge the one fact the governance
+ * screen reads to decide whether an agent is overseen at all — and `sw_digest_read_by_recipient`
+ * makes the weaker half of that true of every writer.
+ *
+ * Idempotent by design: the first read is the one recorded, so a second visit does not move the
+ * date and "how long that report sat unread" stays answerable.
+ */
+export async function markDigestRead(
+  ctx: TenantContext,
+  actor: { userId: string },
+  digestId: string,
+): Promise<DigestView | null> {
+  await ctx.sql`
+    UPDATE agent_digests SET read_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${digestId}
+      AND recipient_user_id = ${actor.userId} AND read_at IS NULL AND deleted_at IS NULL`
+  const [row] = await ctx.sql<DigestView[]>`
+    SELECT d.id, d.agent_id AS "agentId", a.name AS "agentName",
+           d.recipient_user_id AS "recipientUserId", d.period_from AS "periodFrom",
+           d.period_to AS "periodTo", d.facts, d.narrative, d.cost_cents::float8 AS "costCents",
+           d.read_at AS "readAt", d.created_at AS "createdAt"
+    FROM agent_digests d
+    JOIN agents a ON a.id = d.agent_id
+    WHERE d.organization_id = ${ctx.organizationId} AND d.id = ${digestId} AND d.deleted_at IS NULL`
+  return row ?? null
+}
+
+/**
+ * How many reports this agent's owner has not read, newest first.
+ *
+ * Per agent and never per person. "Which agents are overseen" is a fact about the agents; the
+ * same rows grouped by who failed to read them would be an individual performance measure, and
+ * §29.5 forbids those by construction rather than by policy.
+ */
+export async function unreadDigests(ctx: TenantContext, agentId: string): Promise<number> {
+  const [row] = await ctx.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM agent_digests
+    WHERE organization_id = ${ctx.organizationId} AND agent_id = ${agentId}
+      AND deleted_at IS NULL AND read_at IS NULL`
+  return row?.count ?? 0
 }
 
 export async function listDigests(ctx: TenantContext, agentId: string, limit = 8): Promise<DigestView[]> {

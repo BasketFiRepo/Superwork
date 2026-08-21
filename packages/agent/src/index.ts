@@ -30,6 +30,8 @@ export {
   digestFacts,
   digestNarrative,
   listDigests,
+  markDigestRead,
+  unreadDigests,
   pauseForCap,
   saveDigest,
   type CapVerdict,

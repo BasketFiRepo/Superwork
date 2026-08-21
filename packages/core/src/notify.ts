@@ -63,6 +63,7 @@ export const NOTIFICATION_TYPES: { type: string; label: string }[] = [
   { type: 'workflow', label: 'An automation of mine has prepared something' },
   { type: 'agent_needs_input', label: 'The assistant has stopped and needs a decision' },
   { type: 'disclosure', label: 'Something about me reached somebody else' },
+  { type: 'agent_digest', label: 'An agent I am accountable for reports on its week' },
 ]
 
 export interface QuietHours {

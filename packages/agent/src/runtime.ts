@@ -1288,6 +1288,13 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
       },
       persona.recertificationDays,
     )
+    // Two reports in a row that nobody opened. One missed week is a person on holiday; two is
+    // an agent running unattended in both directions — nobody watching it, and nobody reading
+    // what it did. One is forgiven on purpose (ADR 0070).
+    const unread =
+      persona.unreadDigests >= 2
+        ? `${persona.name} has written ${persona.unreadDigests} reports its owner has not read.`
+        : null
     return {
       agentId: persona.agentId,
       key: persona.key,
@@ -1299,7 +1306,7 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
       maxSensitivity: persona.maxSensitivity,
       autopilotDailyActionCap: persona.autopilotDailyActionCap,
       autopilotWeeklyCostCapCents: persona.autopilotWeeklyCostCapCents,
-      autopilotWithheldReason: certification.stale ? certification.summary : null,
+      autopilotWithheldReason: certification.stale ? certification.summary : unread,
     }
   }
   // No row: the ad-hoc assistant, which is what a person gets when they type into the
