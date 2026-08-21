@@ -184,20 +184,44 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
                   <thead>
                     <tr>
                       <th>Name</th>
-                      <th>Email</th>
                       <th style={{ width: 110 }}>Last touch</th>
+                      {/* The forward-looking half. The screen answered "when did we last speak
+                          to this person" and dropped "what happens next with them" on the floor
+                          for eleven increments (ADR 0071). */}
+                      <th>Next</th>
                     </tr>
                   </thead>
                   <tbody>
                     {contacts.map((c) => (
-                      <tr key={c.id}>
+                      <tr key={c.id} data-testid="company-contact">
                         <td className="small">
                           {c.name}
                           {c.title ? <span className="small muted"> · {c.title}</span> : null}
+                          <span className="small mono muted stack">{c.emails[0] ?? '—'}</span>
                         </td>
-                        <td className="small mono">{c.emails[0] ?? '—'}</td>
                         <td className="small muted">
                           {c.lastInteractionAt ? c.lastInteractionAt.toISOString().slice(0, 10) : '—'}
+                        </td>
+                        <td className="small" data-testid="contact-next-step">
+                          {c.nextStep ? (
+                            <span className="stack stack-2">
+                              <span>
+                                <span className="mono">{c.nextStep.at.toISOString().slice(0, 10)}</span>{' '}
+                                <span className="chip">
+                                  {c.nextStep.source === 'meeting'
+                                    ? 'meeting'
+                                    : c.nextStep.direction === 'they_owe'
+                                      ? 'they owe'
+                                      : 'we owe'}
+                                </span>
+                              </span>
+                              <span className="muted">{c.nextStep.what}</span>
+                            </span>
+                          ) : (
+                            /* Not "—". Nothing scheduled with a customer is a fact worth
+                               reading, and a dash reads like a column that failed to load. */
+                            <span className="muted">Nothing scheduled.</span>
+                          )}
                         </td>
                       </tr>
                     ))}

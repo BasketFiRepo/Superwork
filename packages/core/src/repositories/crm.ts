@@ -87,6 +87,24 @@ export async function getCompany(ctx: TenantContext, actor: Actor, id: string): 
   return row
 }
 
+/**
+ * What happens next with this person (ADR 0071).
+ *
+ * Derived, never stored. `contacts.next_step` and `contacts.next_step_at` existed from 0010 and
+ * nothing ever wrote them; making them writable would have been a fourth place meaning "something
+ * is owed", beside commitments, follow-ups and tasks, and reconciled with none of them. The
+ * product already knows the answer — this is the query nobody had written.
+ */
+export interface ContactNextStep {
+  /** Which already-true thing this is: a promise on the ledger, or a meeting in the diary. */
+  source: 'commitment' | 'meeting'
+  id: string
+  what: string
+  at: Date
+  /** Who owes it, for a commitment. Null for a meeting, which nobody owes anybody. */
+  direction: 'we_owe' | 'they_owe' | null
+}
+
 export interface ContactView {
   id: string
   name: string
@@ -101,22 +119,81 @@ export interface ContactView {
   preferredChannel: string | null
   timezone: string | null
   lastInteractionAt: Date | null
-  nextStep: string | null
-  nextStepAt: Date | null
+  nextStep: ContactNextStep | null
   mergedIntoContactId: string | null
 }
 
+/** The flat shape the query returns; `withNextStep` folds the five columns into one field. */
+interface ContactRow extends Omit<ContactView, 'nextStep'> {
+  nextSource: ContactNextStep['source'] | null
+  nextId: string | null
+  nextWhat: string | null
+  nextAt: Date | null
+  nextDirection: ContactNextStep['direction']
+}
+
+function withNextStep(row: ContactRow): ContactView {
+  const { nextSource, nextId, nextWhat, nextAt, nextDirection, ...rest } = row
+  return {
+    ...rest,
+    nextStep:
+      nextSource && nextId && nextWhat && nextAt
+        ? { source: nextSource, id: nextId, what: nextWhat, at: nextAt, direction: nextDirection }
+        : null,
+  }
+}
+
+/**
+ * The soonest of the two things that are already true about this person.
+ *
+ * An **outstanding promise** they are the counterparty to — `confirmed` is what this codebase
+ * means by outstanding everywhere else (`commitmentHealth` counts exactly these), so a proposal
+ * nobody has accepted is not a next step, and a kept or cancelled one is not next.
+ *
+ * A **meeting they are coming to**, which has to be in the future to be a next step at all.
+ *
+ * A commitment does not: a date that has passed on a promise is still what is next with the
+ * person — it is what is next *and late* — whereas a meeting that has happened is history.
+ * That asymmetry is the point, so the overdue promise sorts first.
+ */
 const SELECT_CONTACT = (ctx: TenantContext) => ctx.sql`
   SELECT ct.id, ct.name, ct.emails, ct.phones, ct.title, ct.seniority,
          ct.company_id AS "companyId", co.name AS "companyName",
          ct.owner_id AS "ownerId", u.name AS "ownerName",
          ct.preferred_channel AS "preferredChannel", ct.timezone,
          ct.last_interaction_at AS "lastInteractionAt",
-         ct.next_step AS "nextStep", ct.next_step_at AS "nextStepAt",
+         ns.next_source AS "nextSource", ns.next_id AS "nextId", ns.next_what AS "nextWhat",
+         ns.next_at AS "nextAt", ns.next_direction AS "nextDirection",
          ct.merged_into_contact_id AS "mergedIntoContactId"
   FROM contacts ct
   LEFT JOIN companies co ON co.id = ct.company_id
-  LEFT JOIN users u ON u.id = ct.owner_id`
+  LEFT JOIN users u ON u.id = ct.owner_id
+  LEFT JOIN LATERAL (
+    SELECT step.next_source, step.next_id, step.next_what, step.next_at, step.next_direction
+    FROM (
+      SELECT 'commitment'::text AS next_source, cm.id AS next_id, cm.obligation AS next_what,
+             cm.due_at AS next_at, cm.direction::text AS next_direction
+        FROM commitments cm
+       WHERE cm.organization_id = ct.organization_id
+         AND cm.counterparty_contact_id = ct.id
+         AND cm.deleted_at IS NULL
+         AND cm.status = 'confirmed'
+         AND cm.due_at IS NOT NULL
+      UNION ALL
+      SELECT 'meeting'::text AS next_source, m.id AS next_id, m.title AS next_what,
+             m.starts_at AS next_at, NULL::text AS next_direction
+        FROM meeting_participants mp
+        JOIN meetings m ON m.id = mp.meeting_id AND m.organization_id = mp.organization_id
+       WHERE mp.organization_id = ct.organization_id
+         AND mp.contact_id = ct.id
+         AND mp.deleted_at IS NULL
+         AND m.deleted_at IS NULL
+         AND m.status = 'scheduled'
+         AND m.starts_at >= now()
+    ) step
+    ORDER BY step.next_at
+    LIMIT 1
+  ) ns ON true`
 
 export async function listContacts(
   ctx: TenantContext,
@@ -127,7 +204,7 @@ export async function listContacts(
   if (!decision.allow) throw new PermissionError(decision.reason)
 
   const sql = ctx.sql
-  return sql<ContactView[]>`
+  const rows = await sql<ContactRow[]>`
     ${SELECT_CONTACT(ctx)}
     WHERE ct.organization_id = ${ctx.organizationId} AND ct.deleted_at IS NULL
       ${filter.includeMerged ? sql`` : sql`AND ct.merged_into_contact_id IS NULL`}
@@ -135,10 +212,11 @@ export async function listContacts(
       ${filter.search ? sql`AND ct.name ILIKE ${'%' + filter.search + '%'}` : sql``}
     ORDER BY ct.name
     LIMIT ${Math.min(filter.limit ?? 100, 200)}`
+  return rows.map(withNextStep)
 }
 
 export async function getContact(ctx: TenantContext, actor: Actor, id: string): Promise<ContactView> {
-  const [row] = await ctx.sql<ContactView[]>`
+  const [row] = await ctx.sql<ContactRow[]>`
     ${SELECT_CONTACT(ctx)}
     WHERE ct.organization_id = ${ctx.organizationId} AND ct.id = ${id} AND ct.deleted_at IS NULL`
   if (!row) throw new NotFoundError()
@@ -149,7 +227,7 @@ export async function getContact(ctx: TenantContext, actor: Actor, id: string): 
     ownerId: row.ownerId,
   })
   if (!decision.allow) throw new PermissionError(decision.reason)
-  return row
+  return withNextStep(row)
 }
 
 /** Inbound mail associates to a company by domain — a deterministic lookup, not a guess. */
