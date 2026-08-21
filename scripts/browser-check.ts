@@ -1051,6 +1051,74 @@ try {
   ok('A changed window is stored with the reason and who set it',
     /365 days/.test(changedText) && /DPIA/.test(changedText) && /Set by/.test(changedText))
 
+  // ---- Somewhere the data may not go (ADR 0074) ---------------------------
+  // `allowed_regions` was read by four things, enforced by two of them and written by nothing,
+  // so every organization sat at the column's default: the panel offered three regions,
+  // permanently refused two, and the refusal named a provisioning act nobody could perform.
+  await page.goto(`${BASE}/settings/identity`)
+  await page.waitForSelector('[data-testid="residency"]', { timeout: 15_000 })
+  ok('Residency says where the data is and where it may go',
+    /where you have said it/i.test(await page.locator('[data-testid="residency-explainer"]').innerText()))
+  ok('A region nobody provisioned says what would actually work, rather than a bare refusal',
+    /ask us to provision it/i.test(
+      await page.locator('[data-testid="region-unprovisioned"]').first().innerText(),
+    ))
+
+  // The demo is provisioned for the EU and the UK and has allowed only the EU, so the UK is the
+  // one region that is a click and a password away. Widened first, then ruled out again, which
+  // puts the demo back and leaves the walk safe to repeat.
+  const allowUk = page.locator('[data-testid="region-allow"]').first()
+  if ((await allowUk.count()) > 0) {
+    await allowUk.click()
+    await page.waitForSelector('[data-testid="region-editor"]', { timeout: 15_000 })
+    ok('A region is not allowed without a reason',
+      await page.locator('[data-testid="region-confirm"]').isDisabled())
+    await page.fill('#region-reason', 'Opening a Manchester office; our UK entity signs its own contracts.')
+    expectingRefusal = true
+    await page.locator('[data-testid="region-confirm"]').click()
+    // Tolerant of an already-confirmed password, the way the beats above are: a confirmation
+    // lasts five minutes. That widening *needs* one is asserted in
+    // tests/security/data-residency.test.ts, where the clock is ours.
+    const regionStepUp = page.locator('[data-testid="step-up"]')
+    if (await regionStepUp.waitFor({ timeout: 5_000 }).then(() => true, () => false)) {
+      await page.fill('#step-up-password', 'superwork')
+      await page.locator('[data-testid="step-up-confirm"]').click()
+    }
+    expectingRefusal = false
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="region-restrict"]').length >= 2,
+      undefined,
+      { timeout: 20_000 },
+    )
+    ok('Allowing a provisioned region records who widened it and why',
+      /Manchester office/.test(await page.locator('[data-testid="residency-attribution"]').innerText()))
+  }
+
+  // And back, which is the direction that asks for nothing but a reason.
+  const ruleOut = page.locator('[data-testid="region-restrict"]:not([disabled])').first()
+  await ruleOut.click()
+  await page.waitForSelector('[data-testid="region-editor"]', { timeout: 15_000 })
+  await page.fill('#region-reason', 'Customer contracts commit us to EU-only processing.')
+  await page.locator('[data-testid="region-confirm"]').click()
+  await page.waitForFunction(
+    () => /EU-only processing/.test(document.querySelector('[data-testid="residency-attribution"]')?.textContent ?? ''),
+    undefined,
+    { timeout: 20_000 },
+  )
+  const residencyText = await page.locator('[data-testid="residency"]').innerText()
+  ok('Ruling one out asks for a reason and no password, because it narrows',
+    /EU-only processing/.test(residencyText))
+  ok('And the panel says who made the promise, which nothing recorded before',
+    /Set by/.test(await page.locator('[data-testid="residency-attribution"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/residency.png`, fullPage: true })
+
+  // Back to the screen the erasure beats below are standing on. This section is wedged into the
+  // middle of a page-scoped sequence because it has to run *after* a password has been confirmed
+  // — the retention beat above is the nearest one that does — and a walk that changes the page
+  // owes the next beat the page it was left on.
+  await page.goto(`${BASE}/settings/retention`)
+  await page.waitForSelector('[data-testid="retention"]', { timeout: 15_000 })
+
   // Preview only. Erasure has no undo, so the check reads the list and stops — proving the
   // list is real is the whole point, and carrying it out would prove nothing extra.
   await page.locator('[data-testid="erasure-preview"]').click()

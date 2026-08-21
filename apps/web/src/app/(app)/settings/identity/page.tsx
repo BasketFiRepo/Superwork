@@ -8,7 +8,10 @@ export const dynamic = 'force-dynamic'
 export default async function IdentityPage() {
   const session = await requireSession()
 
-  let data: { settings: Awaited<ReturnType<typeof identitySettings>>; region: { region: string; allowed: string[] } } | null = null
+  let data: {
+    settings: Awaited<ReturnType<typeof identitySettings>>
+    region: Awaited<ReturnType<typeof residency>>
+  } | null = null
   let denied: string | null = null
   try {
     data = await withActor(session, async (ctx, actor) => ({
@@ -48,7 +51,7 @@ export default async function IdentityPage() {
             lastSyncAt: data.settings.lastSyncAt ? data.settings.lastSyncAt.toISOString() : null,
             lastSyncSummary: data.settings.lastSyncSummary,
           }}
-          region={data.region}
+          region={{ ...data.region, setAt: data.region.setAt ? data.region.setAt.toISOString() : null }}
           regions={REGIONS.map((entry) => ({ id: entry.id, label: entry.label, note: entry.note }))}
         />
       ) : null}
