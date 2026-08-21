@@ -314,15 +314,27 @@ export const listMeetingsTool = register({
 
 export const listDecisionsTool = register({
   name: 'list_decisions@v1',
-  description: 'Read the decision log: what was decided, deferred or reversed, and where it was said.',
+  description:
+    'Read the decision log: what was decided, deferred or reversed, and where it was said. ' +
+    'Every entry was read out of a meeting transcript by an assistant. `confirmed` says whether ' +
+    'a person who was there has since agreed it was read correctly — quote an unconfirmed one as ' +
+    'something the transcript appears to say, never as something the company decided.',
   inputSchema: z.object({
     projectId: z.string().uuid().optional(),
     meetingId: z.string().uuid().optional(),
+    unconfirmedOnly: z.boolean().default(false),
     limit: z.number().int().min(1).max(50).default(20),
   }),
   outputSchema: z.object({
     decisions: z.array(
-      z.object({ id: z.string(), summary: z.string(), status: z.string(), meetingTitle: z.string().nullable() }),
+      z.object({
+        id: z.string(),
+        summary: z.string(),
+        status: z.string(),
+        meetingTitle: z.string().nullable(),
+        confirmed: z.boolean(),
+        confirmedBy: z.string().nullable(),
+      }),
     ),
   }),
   riskTier: 'read' as const,
@@ -333,9 +345,10 @@ export const listDecisionsTool = register({
   idempotent: true,
   redactions: [],
   async execute(input, ctx: ToolContext) {
-    const decisions = await listDecisions(ctx.tenantDb, {
+    const decisions = await listDecisions(ctx.tenantDb, ctx.policy, {
       ...(input.projectId ? { projectId: input.projectId } : {}),
       ...(input.meetingId ? { meetingId: input.meetingId } : {}),
+      ...(input.unconfirmedOnly ? { unconfirmedOnly: true } : {}),
       limit: input.limit,
     })
     return {
@@ -346,6 +359,12 @@ export const listDecisionsTool = register({
           summary: d.summary,
           status: d.status,
           meetingTitle: d.meetingTitle,
+          // Whether anybody has stood behind it. Every decision in this log was read out of a
+          // transcript by an assistant; one nobody has confirmed is an extraction, not a
+          // settled fact, and the model has to be able to tell the difference before it
+          // quotes one back (ADR 0065).
+          confirmed: d.confirmedAt !== null,
+          confirmedBy: d.confirmedByName,
         })),
       },
     }

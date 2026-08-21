@@ -2,6 +2,7 @@ import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import {
+  confirmability,
   consentState,
   getMeeting,
   listCommitments,
@@ -12,6 +13,7 @@ import {
   seriesContext,
 } from '@superwork/core'
 import { MeetingSummaryPanel } from '@/components/MeetingSummaryPanel'
+import { MeetingDecisions } from '@/components/MeetingDecisions'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,11 +24,15 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
   try {
     const data = await withActor(session, async (ctx, actor) => {
       const meeting = await getMeeting(ctx, actor, id)
+      const decisions = await listDecisions(ctx, actor, { meetingId: id })
       return {
         meeting,
         participants: await listParticipants(ctx, id),
         segments: await listSegments(ctx, id),
-        decisions: await listDecisions(ctx, { meetingId: id }),
+        decisions,
+        // The same question the repository asks, so the panel offers what it will accept —
+        // and names what would work when it will not (ADR 0065).
+        confirmable: await confirmability(ctx, actor, decisions),
         commitments: await listCommitments(ctx, actor, { limit: 100 }),
         series: meeting.seriesId ? await seriesContext(ctx, meeting.seriesId) : null,
       }
@@ -113,36 +119,19 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
         />
 
         {data.decisions.length > 0 ? (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Decisions</h2>
-              <span className="small muted">Recorded from the transcript — confirm anything that reads wrong</span>
-            </div>
-            <div className="panel-body-flush table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Decision</th>
-                    <th style={{ width: 110 }}>Status</th>
-                    <th style={{ width: 110 }}>Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.decisions.map((d) => (
-                    <tr key={d.id}>
-                      <td className="small">{d.summary}</td>
-                      <td>
-                        <span className={d.status === 'deferred' ? 'chip chip-attention' : 'chip chip-positive'}>
-                          {d.status}
-                        </span>
-                      </td>
-                      <td className="num small">{d.confidence ? `${(Number(d.confidence) * 100).toFixed(0)}%` : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+          <MeetingDecisions
+            decisions={data.decisions.map((d) => ({
+              id: d.id,
+              summary: d.summary,
+              status: d.status,
+              confidence: d.confidence,
+              confirmedAt: d.confirmedAt ? d.confirmedAt.toISOString() : null,
+              confirmedByName: d.confirmedByName,
+              fromAgentRun: d.fromAgentRun,
+              canConfirm: data.confirmable[d.id]?.allow ?? false,
+              refusal: data.confirmable[d.id]?.reason ?? null,
+            }))}
+          />
         ) : null}
 
         {meetingCommitments.length > 0 ? (

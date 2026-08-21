@@ -9,7 +9,7 @@ export default async function MeetingsPage() {
   const session = await requireSession()
   const { meetings, decisions } = await withActor(session, async (ctx, actor) => ({
     meetings: await listMeetings(ctx, actor, { limit: 50 }),
-    decisions: await listDecisions(ctx, { limit: 20 }),
+    decisions: await listDecisions(ctx, actor, { limit: 20 }),
   }))
 
   const upcoming = meetings.filter((m) => m.startsAt.getTime() > Date.now())
@@ -113,7 +113,11 @@ export default async function MeetingsPage() {
       <section className="panel">
         <div className="panel-header">
           <h2>Decision log</h2>
-          <span className="small muted">The most valuable and most neglected artifact in project work</span>
+          <span className="small muted" data-testid="decision-log-state">
+            {decisions.filter((d) => !d.confirmedAt).length === 0
+              ? 'Every one stood behind by somebody who was there'
+              : `${decisions.filter((d) => !d.confirmedAt).length} of ${decisions.length} still an assistant’s reading of a transcript`}
+          </span>
         </div>
         {decisions.length === 0 ? (
           <div className="empty small secondary">
@@ -127,7 +131,7 @@ export default async function MeetingsPage() {
                   <th>Decision</th>
                   <th style={{ width: 110 }}>Status</th>
                   <th style={{ width: 170 }}>From</th>
-                  <th style={{ width: 120 }}>Confirmed</th>
+                  <th style={{ width: 180 }}>Stood behind by</th>
                 </tr>
               </thead>
               <tbody>
@@ -142,7 +146,15 @@ export default async function MeetingsPage() {
                     <td className="small secondary">
                       {d.meetingId ? <Link href={`/meetings/${d.meetingId}`}>{d.meetingTitle}</Link> : '—'}
                     </td>
-                    <td className="small muted">{d.confirmedAt ? 'yes' : 'not yet'}</td>
+                    <td className="small" data-testid="decision-confirmation">
+                      {d.confirmedByName ? (
+                        <strong>{d.confirmedByName}</strong>
+                      ) : (
+                        <span className="muted">
+                          {d.fromAgentRun ? 'nobody — read from a transcript' : 'nobody yet'}
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
