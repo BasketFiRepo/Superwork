@@ -1,7 +1,16 @@
 import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
-import { getConversation, listCommitments, listFollowUps, listMessages, NotFoundError } from '@superwork/core'
+import {
+  assignableTo,
+  getConversation,
+  listCommitments,
+  listFollowUps,
+  listMessages,
+  NotFoundError,
+} from '@superwork/core'
+import { can } from '@superwork/auth'
+import { ConversationAssignment } from '@/components/ConversationAssignment'
 import { ConversationClassification } from '@/components/ConversationClassification'
 import { FollowUps } from '@/components/FollowUps'
 
@@ -16,14 +25,34 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
   const { id } = await params
 
   try {
-    const { conversation, messages, commitments, followUps } = await withActor(session, async (ctx, actor) => ({
-      conversation: await getConversation(ctx, actor, id),
-      messages: await listMessages(ctx, actor, id),
-      commitments: await listCommitments(ctx, actor, { limit: 50 }),
-      // Every follow-up on this thread, closed ones included: how one ended — dealt with,
-      // called off, or closed itself because they wrote back — is the useful part.
-      followUps: await listFollowUps(ctx, actor, { conversationId: id, openOnly: false }),
-    }))
+    const { conversation, messages, commitments, followUps, people, canAssign } = await withActor(
+      session,
+      async (ctx, actor) => {
+        const conversation = await getConversation(ctx, actor, id)
+        return {
+          conversation,
+          messages: await listMessages(ctx, actor, id),
+          commitments: await listCommitments(ctx, actor, { limit: 50 }),
+          // Every follow-up on this thread, closed ones included: how one ended — dealt with,
+          // called off, or closed itself because they wrote back — is the useful part.
+          followUps: await listFollowUps(ctx, actor, { conversationId: id, openOnly: false }),
+          // Filtered by clearance, so the picker cannot offer somebody the hand-over would be
+          // refused for (ADR 0063).
+          people: await assignableTo(ctx, actor, id),
+          // The same gate the repository applies, asked here so the control is absent rather
+          // than present and refusing.
+          canAssign: can(actor, 'conversation:update', {
+            type: 'conversation',
+            id: conversation.id,
+            organizationId: ctx.organizationId,
+            ownerId: conversation.ownerId,
+            assigneeId: conversation.assignedToId,
+            sensitivity: conversation.sensitivity,
+            riskTier: 'low',
+          }).allow,
+        }
+      },
+    )
 
     const threadCommitments = commitments.filter((c) =>
       messages.some((m) => m.id === c.sourceMessageId),
@@ -70,6 +99,16 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
         ) : null}
+
+        <ConversationAssignment
+          conversationId={conversation.id}
+          assignedToId={conversation.assignedToId}
+          assignedToName={conversation.assignedToName}
+          assignedByName={conversation.assignedByName}
+          assignedAt={conversation.assignedAt ? conversation.assignedAt.toISOString() : null}
+          people={people}
+          canAssign={canAssign}
+        />
 
         <ConversationClassification
           conversationId={conversation.id}

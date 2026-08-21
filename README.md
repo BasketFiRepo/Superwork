@@ -1544,6 +1544,32 @@ That last one was invisible until the outage was rebuilt rather than reasoned ab
 database back five migrations and starting a fresh server, which turns `500` and a digest into
 `200` and a page. See ADR 0062.
 
+## A thread somebody is answering
+
+`conversations.assigned_to` has existed since migration 0010 and nothing has ever written it,
+while three things read it: the inbox's **My work** view (`owner_id = me OR assigned_to = me` — a
+filter on the busiest screen here, half of which could never match anything), the personal
+record's count of conversations held about you, and `scopeSatisfied('own')`, which accepts an
+assignee. A column, a filter and a policy branch with no way to put a value in.
+
+A thread can now be handed over and taken back. The person must be a member of this organization,
+and a trigger makes that true of every writer — a foreign key to `users` says the person exists and
+nothing about which organization they are in, and a thread assigned across tenants would sit in a
+"My work" view nobody can open. Who handed it over and when are required by a CHECK; a **reason is
+not**, because an assignment is routine and a sentence per hand-over is friction on the wrong
+control — contrast the classification one screen away, where the reason is the whole point.
+
+Where it meets that classification: a thread filed above the assignee's clearance is refused, and
+the refusal names the classification rather than the person, because the classification is what
+would have to change if it was really meant. The picker only offers people whose clearance reaches
+the thread, and the repository refuses anyway — a list is a convenience and never a control.
+
+One claim deliberately **not** made: no role reads conversations at `own` scope, so passing the
+assignee into the resource changes no answer a role decides. It stops the resource lying about the
+row, and it is what an exception granted to one person reads — which is provable, so a test proves
+it instead of a comment asserting it. See ADR 0063.
+
+
 
 
 ## The one error the check names
