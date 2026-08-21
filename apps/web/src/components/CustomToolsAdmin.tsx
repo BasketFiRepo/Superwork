@@ -427,6 +427,15 @@ export function CustomToolsAdmin({ tools, hosts }: { tools: ToolRow[]; hosts: Ho
             credential in the database, the audit log and somebody’s screenshot — so it is refused.
           </p>
 
+          {/* The schema pins `reversible` to false rather than defaulting it there (ADR 0072),
+              and a rule the product enforces should be a rule the product states. */}
+          <p className="small muted" style={{ margin: 0 }} data-testid="tool-irreversible">
+            Nothing here can be undone. Superwork can reverse its own writes because it knows their
+            inverse; a call into your system has none it can construct, so every custom tool is
+            irreversible and there is no setting for it. That is why an agent may only make one of
+            these calls with a person’s approval.
+          </p>
+
           <div className="row">
             <button
               className="btn btn-primary"

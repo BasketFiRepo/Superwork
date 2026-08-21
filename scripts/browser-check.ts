@@ -758,6 +758,17 @@ try {
     /\d+(\.\d+)?(ms|s)\b/i.test(stepText), stepText.split('\n')[0])
   ok('A run that worked shows no reason against any step',
     (await page.locator('[data-testid="run-step-error"]').count()) === 0)
+
+  // `workflow_runs.cost_cents` was fetched into every run view and shown nowhere, and nothing
+  // had ever written it. Zero turns out to be the right answer — a compiled graph asks a model
+  // nothing — so the screen says which of the two it is (ADR 0073).
+  const runCostText = await page.locator('[data-testid="run-cost"]').first().innerText()
+  ok('A run says what it cost, which was fetched and dropped before',
+    /no model spend|[£$€]/i.test(runCostText), runCostText)
+  ok('And the screen says why that is zero rather than leaving it to be guessed at',
+    /asks a model nothing/i.test(
+      await page.locator('[data-testid="run-cost-explainer"]').innerText(),
+    ))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/workflow-steps.png`, fullPage: true })
 
   // ---- What is on its way out, and the button that stops it (ADR 0054) -----
@@ -814,6 +825,17 @@ try {
   const toolsText = await page.locator('main').innerText()
   ok('Custom tools explains the rule it enforces', /same permission check/i.test(toolsText))
   ok('It says outbound HTTP is simulated here', /simulated/i.test(toolsText))
+
+  // `custom_tools.reversible` defended "never reversible" with a DEFAULT, which decides what
+  // happens when nobody says otherwise and nothing about what happens when somebody does. It is
+  // pinned by a CHECK now, and a rule the product enforces should be one the product states
+  // (ADR 0072).
+  const irreversibleText = await page.locator('[data-testid="tool-irreversible"]').innerText()
+  ok('And says plainly that a call into your system cannot be undone',
+    /nothing here can be undone/i.test(irreversibleText) &&
+      /irreversible and there is no setting for it/i.test(irreversibleText),
+    irreversibleText.replace(/\s+/g, ' ').slice(0, 80))
+  ok('Which is why an agent needs a person for one', /approval/i.test(irreversibleText))
 
   // The budgets every tool declared and nothing enforced until ADR 0050. The demo seeds no
   // custom tools — the loop makes one and puts it back — so the panel is exercised only when
