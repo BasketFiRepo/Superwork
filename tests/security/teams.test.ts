@@ -14,6 +14,7 @@ import {
   listTasks,
   listTeams,
   removeTeamMember,
+  setTeamScope,
   ValidationError,
 } from '@superwork/core'
 import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixtures.js'
@@ -66,15 +67,26 @@ beforeAll(async () => {
     const unscoped = await createTask(ctx, actor, { title: 'Something else entirely' })
     teamTaskId = scoped.id
     otherTaskId = unscoped.id
-    await ctx.sql`
-      UPDATE tasks SET team_id = ${teamId}
-      WHERE organization_id = ${ctx.organizationId} AND id = ${teamTaskId}`
+    // Through the product, which is what ADR 0064 built. This used to be raw SQL here
+    // because there was no other way to put a value in the column.
+    await setTeamScope(ctx, actor, {
+      entity: 'task',
+      id: teamTaskId,
+      teamId,
+      reason: 'The renewal terms are the team’s work.',
+    })
 
     const [doc] = await ctx.sql<{ id: string }[]>`
-      INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, team_id, is_demo, created_by)
-      VALUES (${ctx.organizationId}, 'Renewal briefing', 'policy', 'public', 'pending', ${teamId}, true, ${org.ownerId})
+      INSERT INTO documents (organization_id, title, doc_type, sensitivity, index_status, is_demo, created_by)
+      VALUES (${ctx.organizationId}, 'Renewal briefing', 'policy', 'public', 'pending', true, ${org.ownerId})
       RETURNING id`
     teamDocId = doc!.id
+    await setTeamScope(ctx, actor, {
+      entity: 'document',
+      id: teamDocId,
+      teamId,
+      reason: 'The briefing is for the renewal team.',
+    })
     await ingestDocument(ctx, {
       documentId: teamDocId,
       title: 'Renewal briefing',
@@ -171,7 +183,14 @@ describe('the role that could do nothing', () => {
 
     // Take the document out of the team: search must stop returning it at the same moment
     // `getDocument` starts refusing it, or the two are telling different stories.
-    await adminSql()`UPDATE documents SET team_id = NULL WHERE id = ${teamDocId}`
+    await withTenant(session, async (ctx) =>
+      setTeamScope(ctx, await loadActor(ctx), {
+        entity: 'document',
+        id: teamDocId,
+        teamId: null,
+        reason: 'Checking that retrieval and the page agree.',
+      }),
+    )
     const afterward = await withTenant(guestSession, async (ctx) => {
       const result = await hybridSearch(ctx, await loadActor(ctx), 'quinoxaline renewal window')
       return {
@@ -181,7 +200,14 @@ describe('the role that could do nothing', () => {
     })
     expect(afterward.search).not.toContain(teamDocId)
     expect(afterward.list).not.toContain(teamDocId)
-    await adminSql()`UPDATE documents SET team_id = ${teamId} WHERE id = ${teamDocId}`
+    await withTenant(session, async (ctx) =>
+      setTeamScope(ctx, await loadActor(ctx), {
+        entity: 'document',
+        id: teamDocId,
+        teamId,
+        reason: 'Putting it back where it was.',
+      }),
+    )
   })
 
   it('loses it again when it leaves', async () => {
@@ -247,8 +273,21 @@ describe('managing them', () => {
 
     // Move the work, then it disbands — and everybody who reached that work through the
     // team keeps a visible reason for losing it.
-    await adminSql()`UPDATE tasks SET team_id = NULL WHERE team_id = ${teamId}`
-    await adminSql()`UPDATE documents SET team_id = NULL WHERE team_id = ${teamId}`
+    await withTenant(session, async (ctx) => {
+      const actor = await loadActor(ctx)
+      await setTeamScope(ctx, actor, {
+        entity: 'task',
+        id: teamTaskId,
+        teamId: null,
+        reason: 'The renewal is finished.',
+      })
+      await setTeamScope(ctx, actor, {
+        entity: 'document',
+        id: teamDocId,
+        teamId: null,
+        reason: 'The renewal is finished.',
+      })
+    })
     await withTenant(session, async (ctx) =>
       archiveTeam(ctx, await loadActor(ctx), { teamId, reason: 'Renewal done, work reassigned.' }),
     )

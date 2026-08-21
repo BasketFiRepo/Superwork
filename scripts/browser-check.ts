@@ -957,7 +957,12 @@ try {
   ok('Teams explains what the scope reaches', /every permission it holds is\s+team-scoped|team-scoped/i.test(teamsText))
   const teamRows = await page.locator('[data-testid="team-row"]').count()
   ok('The seeded team is there with its work counted', teamRows > 0, `${teamRows} teams`)
-  ok('It says how much is scoped to it', /tasks · \d+ projects · \d+ documents scoped to it/i.test(teamsText))
+  // A non-zero project count, deliberately. `projects.team_id` was written by nothing in the
+  // product until ADR 0064, so this number could only ever have been zero — a screen counting
+  // something the product could not produce.
+  ok('It says how much is scoped to it, projects included',
+    /\d+ tasks · [1-9]\d* projects · \d+ documents scoped to it/i.test(teamsText),
+    (teamsText.match(/\d+ tasks · \d+ projects · \d+ documents scoped to it/i) ?? ['not found'])[0])
 
   // Departments: read everywhere, written by the seed alone until now.
   const departmentText = await page.locator('[data-testid="departments"]').innerText()
@@ -1340,6 +1345,54 @@ try {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/task-milestone.png`, fullPage: true })
   await page.goto(projectUrl)
   await page.waitForSelector('[data-testid="milestones"]', { timeout: 15_000 })
+
+  // Whose work it is (ADR 0064). `projects.team_id` had been read by the scope filter since
+  // migration 0022 and written by nothing in the product, so `project:read:team` — half of
+  // what a guest holds — matched no row anybody could produce.
+  await page.waitForSelector('[data-testid="team-scope"]', { timeout: 15_000 })
+  const scopePanel = page.locator('[data-testid="team-scope"]')
+  ok('A project says which team it belongs to, or that it belongs to none',
+    /Not scoped to a team/i.test(await scopePanel.innerText()))
+  ok('And nothing is moved without a reason',
+    await page.locator('[data-testid="team-scope-save"]').isDisabled())
+
+  const teamOption = page.locator('#team-scope-team option').nth(1)
+  const teamValue = (await teamOption.getAttribute('value')) ?? ''
+  const teamLabel = (await teamOption.innerText()).trim()
+  await page.selectOption('#team-scope-team', teamValue)
+  ok('Choosing a team says who it would reach before it reaches them',
+    /will be able to reach this|has nobody on it/i.test(
+      await page.locator('[data-testid="team-scope-effect"]').innerText(),
+    ),
+    teamLabel)
+
+  await page.fill('[data-testid="team-scope-reason"]', 'The refit is the renewal team’s work.')
+  await page.locator('[data-testid="team-scope-save"]').click()
+  const scoped = await page
+    .waitForFunction(
+      () => /Scoped to /i.test(document.querySelector('[data-testid="team-scope-state"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A project can be put in a team at last', scoped)
+
+  // Out again, through the same control, which is what puts the demo back.
+  await page.selectOption('#team-scope-team', '')
+  await page.fill('[data-testid="team-scope-reason"]', 'Finished with, and the demo goes back.')
+  await page.locator('[data-testid="team-scope-save"]').click()
+  const unscoped = await page
+    .waitForFunction(
+      () =>
+        /Not scoped to a team/i.test(
+          document.querySelector('[data-testid="team-scope-state"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And taken back out of it', unscoped)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/team-scope.png`, fullPage: true })
 
   const projectShareText = await page.locator('[data-testid="share-object"]').innerText()
   ok('Sharing a project says it reaches the work inside it',

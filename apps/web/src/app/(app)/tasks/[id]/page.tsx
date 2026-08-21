@@ -14,10 +14,11 @@ import {
   taskDependencies,
   taskRecurrence,
   taskWatchers,
+  teamScope,
 } from '@superwork/core'
 import { TaskComments } from '@/components/TaskComments'
 import { TaskDependencies } from '@/components/TaskDependencies'
-import { TaskTeam } from '@/components/TaskTeam'
+import { TeamScope } from '@/components/TeamScope'
 import { TaskMilestone } from '@/components/TaskMilestone'
 import { TaskWatchers } from '@/components/TaskWatchers'
 import { TaskRecurrence } from '@/components/TaskRecurrence'
@@ -34,7 +35,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, teams, shares, people, relations, comments, watchers, recurrence, milestones } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, scope, teams, shares, people, relations, comments, watchers, recurrence, milestones } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -42,7 +43,8 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         limit: 100,
       })
       const already = new Set(deps.blockedBy.map((edge) => edge.taskId))
-      // Teams are admin-visible only; a member simply sees no selector rather than an error.
+      // Sharing a task with a whole team needs the roster, which is admin-visible; a member
+      // simply gets no team option in the share control rather than an error.
       const visibleTeams = await listTeams(ctx, actor).catch(() => [])
       return {
         task: loaded,
@@ -60,11 +62,10 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
             AND m.user_id <> ${actor.userId}
           ORDER BY u.name`,
-        teams: visibleTeams.map((team) => ({
-          id: team.id,
-          name: team.name,
-          memberCount: team.members.length,
-        })),
+        // Where it sits, where it could go, and whether this person may move it — the last
+        // decided by the same `can()` the write goes through (ADR 0064).
+        scope: await teamScope(ctx, actor, 'task', id),
+        teams: visibleTeams.map((team) => ({ id: team.id, name: team.name })),
         // Anything already a prerequisite, and the task itself, would only be refused.
         candidates: open.tasks
           .filter((candidate) => candidate.id !== id && !already.has(candidate.id))
@@ -119,7 +120,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             canRevoke: entry.canRevoke,
           }))}
           people={people}
-          teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+          teams={teams}
         />
 
         <TaskMilestone
@@ -137,7 +138,16 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             }))}
         />
 
-        {teams.length > 0 ? <TaskTeam taskId={task.id} teamId={task.teamId} teams={teams} /> : null}
+        <TeamScope
+          entity="task"
+          id={task.id}
+          sensitivity={scope.sensitivity}
+          teamId={scope.teamId}
+          teamName={scope.teamName}
+          options={scope.options}
+          canScope={scope.canScope}
+          refusal={scope.refusal}
+        />
 
         <TaskDependencies taskId={task.id} dependencies={dependencies} candidates={candidates} />
 

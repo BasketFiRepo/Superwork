@@ -10,6 +10,7 @@ import {
   NotFoundError,
   PermissionError,
   shareableRelations,
+  teamScope,
 } from '@superwork/core'
 import { DeleteDocument } from '@/components/DeleteDocument'
 import { DocumentAudience } from '@/components/DocumentAudience'
@@ -17,6 +18,7 @@ import { DocumentIndexing } from '@/components/DocumentIndexing'
 import { DocumentTerm } from '@/components/DocumentTerm'
 import { DocumentClassification } from '@/components/DocumentClassification'
 import { ShareObject } from '@/components/ShareObject'
+import { TeamScope } from '@/components/TeamScope'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,7 +27,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body, audience, people, departments, shares, teams, relations, indexing } = await withActor(session, async (ctx, actor) => {
+    const { document, body, audience, people, departments, shares, teams, relations, scope, indexing } = await withActor(session, async (ctx, actor) => {
       const loaded = await getDocumentBody(ctx, actor, id)
       return {
         ...loaded,
@@ -34,6 +36,9 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
         shares: await listShares(ctx, actor, 'document', id),
         relations: shareableRelations(actor, 'document', id, ctx.organizationId),
         teams: await listTeams(ctx, actor).catch(() => []),
+        // Retrieval filters passages by `d.team_id`, and nothing in the product could set it
+        // until now — so a guest's assistant found nothing either (ADR 0064).
+        scope: await teamScope(ctx, actor, 'document', id),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -87,6 +92,17 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }}
           people={people}
           departments={departments}
+        />
+
+        <TeamScope
+          entity="document"
+          id={document.id}
+          sensitivity={scope.sensitivity}
+          teamId={scope.teamId}
+          teamName={scope.teamName}
+          options={scope.options}
+          canScope={scope.canScope}
+          refusal={scope.refusal}
         />
 
         <ShareObject
