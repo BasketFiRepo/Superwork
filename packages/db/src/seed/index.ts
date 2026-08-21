@@ -964,6 +964,38 @@ async function seedMeetings(
       // assistant's reading of a transcript and something a person stood behind, which is
       // not visible on an empty screen. Left unconfirmed on purpose: that is the state every
       // decision starts in.
+      // Promises made in the room. Left `proposed` unless the transcript shows the owner
+      // agreeing out loud, because the ledger's founding rule is that an unaccepted
+      // commitment is a suggestion (ADR 0066).
+      for (const promise of meeting.commitments ?? []) {
+        await ctx.sql`
+          INSERT INTO commitments (
+            organization_id, owner_user_id, company_id, obligation, direction, due_at, status,
+            confidence, source_segment_id, source_excerpt, detected_by_agent_run_id,
+            confirmed_at, confirmed_by, is_demo, created_by
+          ) VALUES (
+            ${ctx.organizationId},
+            ${promise.ownerKey ? userIds.get(promise.ownerKey)! : null},
+            ${meeting.companyKey ? companyIds.get(meeting.companyKey)! : null},
+            ${promise.obligation}, ${promise.direction},
+            ${new Date(now + promise.dueInDays * DAY)}, ${promise.status ?? 'proposed'},
+            ${promise.confidence},
+            (SELECT seg.id FROM transcript_segments seg
+              JOIN transcripts tr ON tr.id = seg.transcript_id
+              WHERE seg.organization_id = ${ctx.organizationId} AND tr.meeting_id = ${meetingId}
+                -- The excerpt is the sentence somebody says, which is often one of several in
+                -- a segment; the anchor is the segment that contains it.
+                AND position(${promise.excerpt} in seg.text) > 0
+              LIMIT 1),
+            ${promise.excerpt},
+            (SELECT id FROM agent_runs WHERE organization_id = ${ctx.organizationId}
+              ORDER BY created_at LIMIT 1),
+            ${promise.status === 'confirmed' ? new Date(now - DAY) : null},
+            ${promise.status === 'confirmed' && promise.ownerKey ? userIds.get(promise.ownerKey)! : null},
+            true, ${ctx.userId}
+          )`
+      }
+
       if (meeting.decision) {
         await ctx.sql`
           INSERT INTO decisions (

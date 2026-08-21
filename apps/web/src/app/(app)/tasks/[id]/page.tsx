@@ -2,6 +2,7 @@ import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import {
+  commitmentsForTask,
   getTask,
   projectMilestones,
   listShares,
@@ -35,7 +36,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const { id } = await params
 
   try {
-    const { task, dependencies, candidates, scope, teams, shares, people, relations, comments, watchers, recurrence, milestones } = await withActor(session, async (ctx, actor) => {
+    const { task, dependencies, candidates, scope, promises, teams, shares, people, relations, comments, watchers, recurrence, milestones } = await withActor(session, async (ctx, actor) => {
       const loaded = await getTask(ctx, actor, id)
       const deps = await taskDependencies(ctx, actor, id)
       const open = await listTasks(ctx, actor, {
@@ -65,6 +66,9 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         // Where it sits, where it could go, and whether this person may move it — the last
         // decided by the same `can()` the write goes through (ADR 0064).
         scope: await teamScope(ctx, actor, 'task', id),
+        // What this work is for, read from the link rather than from the description the
+        // create wrote — a description is text somebody can edit (ADR 0066).
+        promises: await commitmentsForTask(ctx, actor, id),
         teams: visibleTeams.map((team) => ({ id: team.id, name: team.name })),
         // Anything already a prerequisite, and the task itself, would only be refused.
         candidates: open.tasks
@@ -102,6 +106,15 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             ) : null}
           </div>
           {task.description ? <p className="prose secondary">{task.description}</p> : null}
+          {promises.map((promise) => (
+            <p className="small secondary prose" style={{ margin: 0 }} key={promise.id} data-testid="task-promise">
+              This is how we keep a promise{promise.companyName ? ` to ${promise.companyName}` : ''}:{' '}
+              <strong>&ldquo;{promise.obligation}&rdquo;</strong>
+              {promise.status === 'kept'
+                ? ' — kept, because this was finished.'
+                : ' Finishing this marks it kept in the ledger.'}
+            </p>
+          ))}
         </header>
 
         <ShareObject
