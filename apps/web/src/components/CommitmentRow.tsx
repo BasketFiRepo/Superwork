@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { Link } from '@/components/Link'
 
 interface CommitmentState {
   id: string
@@ -14,6 +15,10 @@ interface CommitmentState {
   confidence: number | null
   sourceExcerpt: string | null
   isMine: boolean
+  /** The work that discharges it, if anybody has made any (ADR 0066). */
+  taskId: string | null
+  taskTitle: string | null
+  taskStatus: string | null
 }
 
 /**
@@ -46,7 +51,28 @@ export function CommitmentRow({ commitment }: { commitment: CommitmentState }) {
     router.refresh()
   }
 
+  async function plan() {
+    setBusy(true)
+    setError(null)
+    const result = await fetch(`/api/commitments/${commitment.id}/task`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    setBusy(false)
+    if (!result.ok) {
+      const body = await result.json().catch(() => ({ error: 'That could not be recorded.' }))
+      setError(body.error)
+      return
+    }
+    router.refresh()
+  }
+
   const proposed = commitment.status === 'proposed'
+  // A promise they made is discharged by them, so there is nothing here for us to plan.
+  const ours = commitment.direction === 'we_owe'
+  const outstanding = commitment.status === 'confirmed'
+  const hasWork = commitment.taskTitle !== null
 
   return (
     <article className="panel">
@@ -89,6 +115,24 @@ export function CommitmentRow({ commitment }: { commitment: CommitmentState }) {
               &ldquo;{commitment.sourceExcerpt}&rdquo;
             </p>
           </details>
+        ) : null}
+
+        {commitment.taskId ? (
+          <p className="small secondary prose" style={{ margin: 0 }} data-testid="commitment-task">
+            {hasWork ? (
+              <>
+                The work for this is{' '}
+                <Link href={`/tasks/${commitment.taskId}`}>
+                  <strong>{commitment.taskTitle}</strong>
+                </Link>
+                {commitment.taskStatus === 'completed'
+                  ? ' — finished, which is what marked this kept.'
+                  : ` — ${commitment.taskStatus?.replace(/_/g, ' ')}. Finishing it marks this kept.`}
+              </>
+            ) : (
+              <>The task for this has been deleted. The promise stands.</>
+            )}
+          </p>
         ) : null}
 
         {error ? <div className="banner banner-critical">{error}</div> : null}
@@ -140,11 +184,25 @@ export function CommitmentRow({ commitment }: { commitment: CommitmentState }) {
               <button className="btn btn-primary btn-sm" disabled={busy || !commitment.isMine} onClick={() => respond('confirm')}>
                 {commitment.isMine ? 'Yes, that is mine' : 'Only the owner can confirm'}
               </button>
+            ) : hasWork ? (
+              <span className="small muted" data-testid="commitment-done-elsewhere">
+                Finished on the task, not here.
+              </span>
             ) : (
               <button className="btn btn-sm" disabled={busy} onClick={() => respond('complete')}>
                 Done
               </button>
             )}
+            {ours && outstanding && !hasWork ? (
+              <button
+                className="btn btn-sm"
+                data-testid="commitment-plan"
+                disabled={busy}
+                onClick={plan}
+              >
+                {busy ? 'Saving…' : 'Make this a task'}
+              </button>
+            ) : null}
             <button className="btn btn-sm" disabled={busy} onClick={() => setMode('renegotiate')}>
               I need more time
             </button>

@@ -73,6 +73,9 @@ export default async function CommitmentsPage({ searchParams }: { searchParams: 
                 confidence: c.confidence ? Number(c.confidence) : null,
                 sourceExcerpt: c.sourceExcerpt,
                 isMine: c.ownerUserId === session.userId,
+                taskId: c.taskId,
+                taskTitle: c.taskTitle,
+                taskStatus: c.taskStatus,
               }}
             />
           ))
@@ -96,6 +99,9 @@ export default async function CommitmentsPage({ searchParams }: { searchParams: 
                 confidence: c.confidence ? Number(c.confidence) : null,
                 sourceExcerpt: c.sourceExcerpt,
                 isMine: c.ownerUserId === session.userId,
+                taskId: c.taskId,
+                taskTitle: c.taskTitle,
+                taskStatus: c.taskStatus,
               }}
             />
           ))}

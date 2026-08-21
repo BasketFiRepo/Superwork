@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { pinnedColumns, ROOT, stampedByTheDatabase } from '../../scripts/column-coverage.js'
+import { pinnedColumns, ROOT, stampedByTheDatabase, triggerAssignments } from '../../scripts/column-coverage.js'
 
 /**
  * The detector's two classifiers (ADR 0060).
@@ -112,5 +112,41 @@ describe('a CHECK that pins a column to one value', () => {
     ]) {
       expect(pinnedColumns(definition), definition).toEqual([])
     }
+  })
+})
+
+describe('what a trigger body actually writes', () => {
+  /**
+   * The fourth way this detector under-reported, and the first that was self-inflicted: the
+   * scan accepted `NEW.x =` as well as `NEW.x :=`. In plpgsql the first is equality, and
+   * because this scan is deliberately not attributed to a table, one `WHEN (NEW.status =
+   * 'completed')` in migration 0059 credited a write to `status` on all 96 tables —
+   * `email_accounts.status` and `subscriptions.status` silently left the queue (ADR 0066).
+   */
+  it('counts an assignment', () => {
+    expect(triggerAssignments('BEGIN NEW.updated_at := now(); RETURN NEW; END')).toEqual(['updated_at'])
+    expect(triggerAssignments('NEW.path :=  btrim(NEW.name);')).toEqual(['path'])
+  })
+
+  it('does not count a condition that happens to name a column', () => {
+    expect(triggerAssignments("FOR EACH ROW WHEN (NEW.status = 'completed')")).toEqual([])
+    expect(triggerAssignments('IF NEW.parent_id = NEW.id THEN')).toEqual([])
+    expect(triggerAssignments("IF NEW.sensitivity_source = 'human' THEN")).toEqual([])
+  })
+
+  it('and the migrations on disk assign nothing this test has not seen', () => {
+    // The report the whole queue is built from: every `NEW.x :=` across the real migrations,
+    // so a new trigger that assigns a column shows up here rather than only in the headline.
+    const dir = join(ROOT, 'packages', 'db', 'migrations')
+    const bodies = readdirSync(dir)
+      .filter((name) => name.endsWith('.up.sql'))
+      .map((name) => readFileSync(join(dir, name), 'utf8'))
+    const assigned = new Set(bodies.flatMap((body) => triggerAssignments(body)))
+    // These are writes no INSERT or UPDATE in the codebase performs, which is the entire
+    // reason the fallback exists.
+    expect(assigned.has('updated_at')).toBe(true)
+    expect(assigned.has('tsv')).toBe(true)
+    // And a column only ever named in a condition is not among them.
+    expect(assigned.has('parent_id')).toBe(false)
   })
 })

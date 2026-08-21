@@ -195,6 +195,19 @@ function matchingParen(text: string, open: number): number {
 }
 
 /**
+ * The columns a trigger body assigns: `NEW.column := …`, and nothing else.
+ *
+ * `:=` is plpgsql's assignment and `=` is its equality, so `IF NEW.parent_id = NEW.id` and
+ * `WHEN (NEW.status = 'completed')` are reads. This scan is deliberately not attributed to a
+ * table — a trigger body cannot be tied to one by text alone — which makes accepting a read
+ * here far worse than coarse: one condition in one migration credits a write to that column
+ * name on every table that has it. See the call site.
+ */
+export function triggerAssignments(body: string): string[] {
+  return [...body.matchAll(/\bNEW\.([a-z_]+)\s*:=/gi)].map((match) => match[1]!)
+}
+
+/**
  * Every stretch of text in `body` that decides what a row of `table` will hold: the column
  * list of an INSERT, the assignment list of an UPDATE, and any ON CONFLICT DO UPDATE SET.
  */
@@ -284,9 +297,18 @@ async function main(): Promise<void> {
     // maintained by `sw_document_chunks_tsv()` and looked untouched. Trigger bodies are not
     // attributable to one table by text alone, so every `NEW.x :=` in the migrations counts
     // for the column named x — coarse, and in the safe direction for a report about absence.
+    //
+    // `:=` and nothing else. This pattern used to accept `NEW.x =` as well, which is not an
+    // assignment in plpgsql but is exactly how a trigger *reads* one: `IF NEW.parent_id =
+    // NEW.id`, `WHEN (NEW.status = 'completed')`. Because the fallback is deliberately
+    // unattributed to a table, one condition in one migration credited a write to that column
+    // name on all 96 of them — `email_accounts.status` and `subscriptions.status` left the
+    // queue the day migration 0059 added a WHEN clause about a task's status (ADR 0066). The
+    // coarseness is the price of seeing trigger writes at all; accepting reads as well as
+    // writes was not part of that bargain.
     for (const file of files) {
       if (file.group !== 'migration') continue
-      const assignments = [...file.body.matchAll(/\bNEW\.([a-z_]+)\s*:?=/gi)].map((m) => m[1])
+      const assignments = triggerAssignments(file.body)
       if (assignments.length === 0) continue
       perGroup.set(
         'migration',

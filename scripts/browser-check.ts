@@ -342,6 +342,47 @@ try {
   ok('The briefing recommends one action', (await page.locator('[data-testid="briefing-action"]').count()) > 0)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/briefing.png`, fullPage: true })
 
+  // ---- A promise that became work (ADR 0066) -------------------------------
+  // `commitments.task_id` was read into every CommitmentView and written by nothing, so the
+  // ledger could record that somebody had accepted an obligation and offer no way to do it.
+  // Everyone's, not Maya's: the promises in this demo were made out loud in meetings by the
+  // people who were in them, and she was in none of those rooms.
+  await page.goto(`${BASE}/commitments?scope=all`)
+  await page.waitForSelector('[data-testid="commitment-plan"], [data-testid="commitment-task"]', { timeout: 15_000 })
+  const planButton = page.locator('[data-testid="commitment-plan"]').first()
+  const alreadyPlanned = (await planButton.count()) === 0
+
+  if (alreadyPlanned) {
+    // A second run against a demo the first one changed: the promise already has its work,
+    // which is the same statement about the product from the other side.
+    ok('An accepted promise carries the work that discharges it',
+      (await page.locator('[data-testid="commitment-task"]').count()) > 0,
+      'already planned by an earlier run')
+  } else {
+    await planButton.click()
+    const planned = await page
+      .waitForFunction(
+        () => document.querySelector('[data-testid="commitment-task"]') !== null,
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('An accepted promise can become the work that discharges it', planned,
+      planned ? (await page.locator('[data-testid="commitment-task"]').first().innerText()).slice(0, 70) : 'no task')
+    ok('And the ledger stops offering a second way to say it is finished',
+      (await page.locator('[data-testid="commitment-done-elsewhere"]').count()) > 0)
+  }
+
+  // The other end of the edge: the task says which promise it keeps.
+  const promiseLink = page.locator('[data-testid="commitment-task"] a').first()
+  if ((await promiseLink.count()) > 0) {
+    await promiseLink.click()
+    await page.waitForSelector('[data-testid="task-promise"]', { timeout: 20_000 })
+    ok('And the task says which promise finishing it keeps',
+      /how we keep a promise/i.test(await page.locator('[data-testid="task-promise"]').first().innerText()),
+      (await page.locator('[data-testid="task-promise"]').first().innerText()).slice(0, 70))
+  }
+
   // ---- AI ledger ----------------------------------------------------------
   await page.goto(`${BASE}/analytics`)
   await page.waitForSelector('[data-testid="ledger-totals"]', { timeout: 20_000 })
