@@ -20,6 +20,25 @@ const ok = (label: string, condition: boolean, detail = '') => {
   if (!condition) failures += 1
 }
 
+/**
+ * Several walks here make something the demo does not have — a department, a milestone, a
+ * shelf — and there is deliberately no way to unmake most of them from a screen. On the next
+ * run the create is refused for a name that is already taken, which was invisible in two ways
+ * at once: the beat still passed, because the thing it waited for was on screen from the run
+ * before, and the refused request was counted as a stray 400 by a check whose last beat is
+ * "no console errors on any screen".
+ *
+ * So a walk asks first. This returns true when the artifact is already there, and closes the
+ * editor it was about to type into.
+ */
+async function alreadyMade(container: string, text: RegExp, editor: string): Promise<boolean> {
+  const present = text.test(await page.locator(container).innerText())
+  if (!present) return false
+  const cancel = page.locator(`[data-testid="${editor}"]`).getByRole('button', { name: 'Cancel' })
+  if ((await cancel.count()) > 0) await cancel.first().click()
+  return true
+}
+
 // The pinned Playwright build may not match the browser on this machine; CHROMIUM_PATH
 // points the check at whatever Chromium is actually installed.
 const executablePath = process.env['CHROMIUM_PATH']
@@ -300,18 +319,33 @@ try {
   expectingRefusal = false
 
   // Then a domain nobody has. There is deliberately no way to delete a company from a screen, so
-  // this cannot put the demo back the way the other walks do — instead it accepts either outcome:
-  // added now, or already there from a previous run. A second run must not turn a working check
-  // red over a row the first one left.
-  await page.fill('#company-name', 'Browser Check Cold Chain')
-  await page.fill('#company-domains', 'browsercheck.example')
-  await page.locator('[data-testid="company-confirm"]').click()
-  const addedCompany = await page
-    .locator('[data-testid="company-row"]', { hasText: 'Browser Check Cold Chain' })
-    .first()
-    .waitFor({ timeout: 20_000 })
-    .then(() => true, () => false)
-  ok('A company can be added from the screen, and is there on a second run too', addedCompany)
+  // this walk cannot put the demo back the way the others do, and the row it leaves is still
+  // there on the next run.
+  //
+  // It used to try the create anyway and accept either outcome, which was not enough: the second
+  // attempt is refused for the duplicate domain, and a refused create leaves the editor open —
+  // so `add-contact-open`, which only renders when the editor is closed, never appeared and the
+  // run died four beats later on a timeout that named nothing to do with companies. The refusal
+  // also arrived outside the `expectingRefusal` bracket and counted as a stray 400.
+  //
+  // So the two runs are told apart before anything is typed, and each does the thing that is
+  // true of it. Both end with the editor closed and the row on screen.
+  const coldChain = page.locator('[data-testid="company-row"]', { hasText: 'Browser Check Cold Chain' })
+  const alreadyAdded = (await coldChain.count()) > 0
+
+  if (alreadyAdded) {
+    await page.locator('[data-testid="company-cancel"]').click()
+    await page.waitForSelector('[data-testid="company-editor"]', { state: 'detached', timeout: 15_000 })
+  } else {
+    await page.fill('#company-name', 'Browser Check Cold Chain')
+    await page.fill('#company-domains', 'browsercheck.example')
+    await page.locator('[data-testid="company-confirm"]').click()
+    await coldChain.first().waitFor({ timeout: 20_000 }).catch(() => undefined)
+  }
+
+  ok('A company can be added from the screen, and is there on a second run too',
+    (await coldChain.count()) > 0,
+    alreadyAdded ? 'left by an earlier run, and not added twice' : 'added now')
 
   // Somebody at it, which a member may do and opening an account is not. A repeat here is not a
   // refusal at all — it goes to the merge queue, which is the point.
@@ -696,26 +730,37 @@ try {
   // `send_email` has returned a `recallWindowSeconds` since Phase 2 and nothing could recall
   // anything: the window was a delay with no button behind it. The demo has one approved email
   // waiting out its real window, and this stops it.
+  //
+  // Stopping a send is terminal — it goes back to being a draft and needs approving again — so
+  // this walk cannot put the demo back either. The panel renders nothing at all when the queue
+  // is empty, which is why the second run used to die here on a selector that named a feature
+  // rather than the state. Both runs say something true about what they find.
   await page.goto(`${BASE}/approvals`)
-  await page.waitForSelector('[data-testid="outgoing-mail"]', { timeout: 20_000 })
-  const outgoingText = await page.locator('[data-testid="outgoing-explainer"]').innerText()
-  ok('The screen says what the wait is for, and what stopping one does',
-    /change of mind still counts/i.test(outgoingText) && /needs approving again/i.test(outgoingText))
-  const countdown = await page.locator('[data-testid="outgoing-countdown"]').first().innerText()
-  ok('An approved email is waiting, with the time left on it',
-    /\d+s left|window closed/i.test(countdown), countdown)
+  const outgoingPanel = page.locator('[data-testid="outgoing-mail"]')
+  await outgoingPanel.waitFor({ timeout: 20_000 }).catch(() => undefined)
 
-  await page.locator('[data-testid="outgoing-stop"]').first().click()
-  await page.waitForSelector('[data-testid="outgoing-stop-editor"]', { timeout: 15_000 })
-  const confirmStop = page.locator('[data-testid="outgoing-stop-confirm"]')
-  ok('Stopping one will not go through without a reason', await confirmStop.isDisabled())
-  await page.locator('[data-testid="outgoing-reason"]').fill('The handover time is wrong.')
-  await confirmStop.click()
-  const stopped = await page
-    .locator('[data-testid="outgoing-mail"]')
-    .waitFor({ state: 'detached', timeout: 20_000 })
-    .then(() => true, () => false)
-  ok('And it is stopped, so nothing is on its way out any more', stopped)
+  if ((await outgoingPanel.count()) === 0) {
+    ok('Nothing is on its way out, so the screen offers nothing to stop', true,
+      'an earlier run stopped the one the demo seeds')
+  } else {
+    const outgoingText = await page.locator('[data-testid="outgoing-explainer"]').innerText()
+    ok('The screen says what the wait is for, and what stopping one does',
+      /change of mind still counts/i.test(outgoingText) && /needs approving again/i.test(outgoingText))
+    const countdown = await page.locator('[data-testid="outgoing-countdown"]').first().innerText()
+    ok('An approved email is waiting, with the time left on it',
+      /\d+s left|window closed/i.test(countdown), countdown)
+
+    await page.locator('[data-testid="outgoing-stop"]').first().click()
+    await page.waitForSelector('[data-testid="outgoing-stop-editor"]', { timeout: 15_000 })
+    const confirmStop = page.locator('[data-testid="outgoing-stop-confirm"]')
+    ok('Stopping one will not go through without a reason', await confirmStop.isDisabled())
+    await page.locator('[data-testid="outgoing-reason"]').fill('The handover time is wrong.')
+    await confirmStop.click()
+    const stopped = await outgoingPanel
+      .waitFor({ state: 'detached', timeout: 20_000 })
+      .then(() => true, () => false)
+    ok('And it is stopped, so nothing is on its way out any more', stopped)
+  }
 
   // ---- Approve with edits -------------------------------------------------
   await page.goto(`${BASE}/approvals`)
@@ -916,7 +961,18 @@ try {
   ok('Memory explains the arrangement it enforces',
     /Nothing is used until a person agrees/i.test(memoryIntro) && /supersed/i.test(memoryIntro))
 
+  // Agreeing with a candidate takes it off this list, and correcting it supersedes it, so the
+  // demo has one fewer each time this runs. On the run that finds none, the panel's own empty
+  // state is the thing to check — the walk below would otherwise wait for a proposal that a
+  // previous run agreed with.
   const candidates = await page.locator('[data-testid="memory-candidate"]').count()
+  if (candidates === 0) {
+    ok('Nothing is waiting to be agreed with, and the panel says where they come from',
+      /Facts appear here after the assistant answers a question/i.test(
+        await page.locator('[data-testid="memory-candidates"]').innerText(),
+      ),
+      'an earlier run agreed with the ones the demo seeds')
+  } else {
   ok('It lists what the assistant noticed', candidates > 0, `${candidates} waiting`)
   const firstCandidate = await page.locator('[data-testid="memory-candidate"]').first().innerText()
   ok('Every proposal shows the passage it came from and is not in use yet',
@@ -948,6 +1004,7 @@ try {
     { timeout: 20_000 },
   )
   ok('The correction replaces what is recalled, without deleting the old answer', true)
+  }
 
   // ---- Legal holds --------------------------------------------------------
   await page.goto(`${BASE}/settings/holds`)
@@ -1063,18 +1120,23 @@ try {
     /where somebody sits/i.test(departmentText) && /what somebody is working on/i.test(departmentText))
   await page.locator('[data-testid="department-add"]').click()
   await page.waitForSelector('[data-testid="department-editor"]', { timeout: 15_000 })
-  await page.fill('#department-name', 'Customs')
-  await page.selectOption('#department-parent', { label: 'Operations' })
-  await page.locator('[data-testid="department-confirm"]').click()
-  const nested = await page
-    .waitForFunction(
-      () =>
-        /Operations \/ Customs/i.test(document.querySelector('[data-testid="departments"]')?.textContent ?? ''),
-      undefined,
-      { timeout: 20_000 },
-    )
-    .then(() => true, () => false)
-  ok('A nested department lands with the path the database wrote', nested)
+  const hadCustoms = await alreadyMade('[data-testid="departments"]', /Operations \/ Customs/i, 'department-editor')
+  if (!hadCustoms) {
+    await page.fill('#department-name', 'Customs')
+    await page.selectOption('#department-parent', { label: 'Operations' })
+    await page.locator('[data-testid="department-confirm"]').click()
+    await page
+      .waitForFunction(
+        () =>
+          /Operations \/ Customs/i.test(document.querySelector('[data-testid="departments"]')?.textContent ?? ''),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .catch(() => undefined)
+  }
+  ok('A nested department lands with the path the database wrote',
+    /Operations \/ Customs/i.test(await page.locator('[data-testid="departments"]').innerText()),
+    hadCustoms ? 'made by an earlier run, and not made twice' : 'made now')
 
   await page.locator('[data-testid="team-add-member"]').first().click()
   await page.waitForSelector('[data-testid="team-member-editor"]', { timeout: 15_000 })
@@ -1146,8 +1208,16 @@ try {
     )
     .then(() => true, () => false)
   ok('A person can comment, and it lands on the task', commented)
-  ok('And can take their own words back again',
-    await page.locator('[data-testid="comment-remove"]').first().isEnabled())
+  // Scoped to the comment this run just wrote, not to whichever happens to be first: the
+  // assistant leaves notes here too and nobody may remove those, so `.first()` was asserting
+  // about a row it had not chosen. On a second run against the same demo it picked one of the
+  // agent's and reported that a person cannot take their own words back.
+  const ownComment = page
+    .locator('[data-testid="comment-row"]', { hasText: 'nothing back yet' })
+    .first()
+  const ownRemove = ownComment.locator('[data-testid="comment-remove"]')
+  await ownRemove.waitFor({ timeout: 15_000 }).catch(() => undefined)
+  ok('And can take their own words back again', (await ownRemove.count()) > 0)
 
   // Following: the task told nobody but its assignee anything until now.
   const watchText = await page.locator('[data-testid="task-watchers"]').innerText()
@@ -1242,26 +1312,37 @@ try {
   await page.waitForSelector('[data-testid="document-audience"]', { timeout: 15_000 })
   const audienceText = await page.locator('[data-testid="document-audience"]').innerText()
   const audienceRows = await page.locator('[data-testid="audience-row"]').count()
-  ok('A restricted document lists who can find it', audienceRows >= 3, `${audienceRows} on the list`)
-  ok('It says administrators are not exempt', /including administrators/i.test(audienceText))
-  ok('Every entry says why they are on it', /Signs the storage agreements/i.test(audienceText))
 
-  // Reopening is its own control, not the side effect of removing the last name.
-  await page.locator('[data-testid="audience-open"]').click()
-  await page.waitForSelector('[data-testid="audience-open-editor"]', { timeout: 15_000 })
-  ok('Reopening will not happen without a reason',
-    await page.locator('[data-testid="audience-open-confirm"]').isDisabled())
-  await page.fill('#audience-open-reason', 'Agreement executed; the terms are internal now.')
-  await page.locator('[data-testid="audience-open-confirm"]').click()
-  await page.waitForFunction(
-    () =>
-      /Anybody whose classification allows it/i.test(
-        document.querySelector('[data-testid="document-audience"]')?.textContent ?? '',
-      ),
-    undefined,
-    { timeout: 20_000 },
-  )
-  ok('Removing the restriction says what it did', true)
+  // Reopening a document is not something this walk can put back — restricting it again is a
+  // deliberate act with its own warning, and doing it silently to tidy up would leave the demo
+  // claiming a circulation list nobody decided on. So the run that finds it already open says
+  // what is true of that instead.
+  if (audienceRows === 0) {
+    ok('The document is open to anybody whose classification allows it',
+      /Anybody whose classification allows it/i.test(audienceText),
+      'an earlier run lifted the restriction the demo seeds')
+  } else {
+    ok('A restricted document lists who can find it', audienceRows >= 3, `${audienceRows} on the list`)
+    ok('It says administrators are not exempt', /including administrators/i.test(audienceText))
+    ok('Every entry says why they are on it', /Signs the storage agreements/i.test(audienceText))
+
+    // Reopening is its own control, not the side effect of removing the last name.
+    await page.locator('[data-testid="audience-open"]').click()
+    await page.waitForSelector('[data-testid="audience-open-editor"]', { timeout: 15_000 })
+    ok('Reopening will not happen without a reason',
+      await page.locator('[data-testid="audience-open-confirm"]').isDisabled())
+    await page.fill('#audience-open-reason', 'Agreement executed; the terms are internal now.')
+    await page.locator('[data-testid="audience-open-confirm"]').click()
+    await page.waitForFunction(
+      () =>
+        /Anybody whose classification allows it/i.test(
+          document.querySelector('[data-testid="document-audience"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    ok('Removing the restriction says what it did', true)
+  }
 
   // And restricting again warns before the first name, because that is the moment
   // everybody else loses it.
@@ -1378,20 +1459,29 @@ try {
   await page.waitForSelector('[data-testid="milestone-editor"]', { timeout: 15_000 })
   ok('Nothing is added without something to call it',
     await page.locator('[data-testid="milestone-confirm"]').isDisabled())
-  await page.fill('#milestone-name', 'Broker consolidation signed off')
-  await page.fill('#milestone-date', '2026-09-30')
-  await page.locator('[data-testid="milestone-confirm"]').click()
-  const milestoneLanded = await page
-    .waitForFunction(
-      () =>
-        /Broker consolidation signed off/i.test(
-          document.querySelector('[data-testid="milestones"]')?.textContent ?? '',
-        ),
-      undefined,
-      { timeout: 20_000 },
-    )
-    .then(() => true, () => false)
-  ok('It lands on the project with its date', milestoneLanded)
+  const hadMilestone = await alreadyMade(
+    '[data-testid="milestones"]',
+    /Broker consolidation signed off/i,
+    'milestone-editor',
+  )
+  if (!hadMilestone) {
+    await page.fill('#milestone-name', 'Broker consolidation signed off')
+    await page.fill('#milestone-date', '2026-09-30')
+    await page.locator('[data-testid="milestone-confirm"]').click()
+    await page
+      .waitForFunction(
+        () =>
+          /Broker consolidation signed off/i.test(
+            document.querySelector('[data-testid="milestones"]')?.textContent ?? '',
+          ),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .catch(() => undefined)
+  }
+  ok('It lands on the project with its date',
+    /Broker consolidation signed off/i.test(await page.locator('[data-testid="milestones"]').innerText()),
+    hadMilestone ? 'added by an earlier run, and not added twice' : 'added now')
   ok('And says nothing is filed against it yet, rather than showing a bare date',
     /Nothing filed against it yet/i.test(
       await page.locator('[data-testid="milestones"]').innerText(),
@@ -1511,8 +1601,14 @@ try {
     )
     .then(() => true, () => false)
   ok('A project share lands, with its reason on the row', shareLanded)
+  // Scoped to the share this run granted. `.first()` asserted about whichever row happened to
+  // be at the top, and a project already shared by somebody else puts a row there that Maya
+  // may not revoke.
+  const ownShare = page
+    .locator('[data-testid="share-row"]', { hasText: 'Reviewing the delivery plan' })
+    .first()
   ok('And the owner can take it back again',
-    await page.locator('[data-testid="share-revoke"]').first().isEnabled())
+    (await ownShare.locator('[data-testid="share-revoke"]').count()) > 0)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/project.png`, fullPage: true })
 
   // ---- What the company pays for, and what it limits ----------------------
@@ -1717,17 +1813,22 @@ try {
   await page.waitForSelector('[data-testid="space-editor"]', { timeout: 15_000 })
   ok('Making one says what a shelf does and does not lend',
     /never a say/i.test(await page.locator('[data-testid="space-editor"]').innerText()))
-  await page.fill('#space-name', 'Customs procedures')
-  await page.fill('#space-description', 'Everything the broker asks for.')
-  await page.locator('[data-testid="space-confirm"]').click()
-  const shelfMade = await page
-    .waitForFunction(
-      () => /Customs procedures/i.test(document.querySelector('[data-testid="spaces"]')?.textContent ?? ''),
-      undefined,
-      { timeout: 20_000 },
-    )
-    .then(() => true, () => false)
-  ok('A new shelf lands in the library', shelfMade)
+  const hadShelf = await alreadyMade('[data-testid="spaces"]', /Customs procedures/i, 'space-editor')
+  if (!hadShelf) {
+    await page.fill('#space-name', 'Customs procedures')
+    await page.fill('#space-description', 'Everything the broker asks for.')
+    await page.locator('[data-testid="space-confirm"]').click()
+    await page
+      .waitForFunction(
+        () => /Customs procedures/i.test(document.querySelector('[data-testid="spaces"]')?.textContent ?? ''),
+        undefined,
+        { timeout: 20_000 },
+      )
+      .catch(() => undefined)
+  }
+  ok('A new shelf lands in the library',
+    /Customs procedures/i.test(await page.locator('[data-testid="spaces"]').innerText()),
+    hadShelf ? 'made by an earlier run, and not made twice' : 'made now')
 
   // The shelf with documents on it, not the empty one this walk just made.
   await page
@@ -1929,18 +2030,47 @@ try {
   // ---- What the model was asked, and what it cost -------------------------
   // `agent_messages` was written by nothing, so a run could say it cost four cents and not
   // which step, which model, or how long any of it took.
+  // Not every run calls a model — a workflow run that only executes tools makes none — so the
+  // walk has to find one that did.
+  //
+  // It used to read the run links out of the activity feed, which shows only the newest
+  // handful. That worked exactly once: every walk above this one starts runs of its own, so on
+  // a second run against the same demo the feed's two links were both tool-only workflow runs
+  // and the model-calling ones were buried. Analytics lists runs *with what they cost*, which
+  // is the question being asked here — a run with a cost is a run that called a model.
+  await page.goto(`${BASE}/analytics`)
+  await page.waitForSelector('main', { timeout: 15_000 })
+  await page.locator('details').evaluateAll((nodes) => {
+    for (const node of nodes) (node as HTMLDetailsElement).open = true
+  })
+  const paidRuns = await page.locator('tr').evaluateAll((rows) =>
+    rows
+      .filter((row) => {
+        const cost = Array.from(row.querySelectorAll('td.num')).pop()?.textContent ?? ''
+        return /[1-9]/.test(cost.replace(/^[^0-9]*0[.,]?0*$/, ''))
+      })
+      .map((row) => row.querySelector<HTMLAnchorElement>('a[href*="/activity?run="]')?.getAttribute('href') ?? '')
+      .filter(Boolean),
+  )
+
   await page.goto(`${BASE}/activity`)
   await page.waitForSelector('[data-testid="activity-row"], [data-testid="run-row"]', { timeout: 15_000 }).catch(() => undefined)
-  // Not every run calls a model — a workflow run that only executes tools makes none — so
-  // the walk looks for one that did rather than assuming the newest one qualifies.
-  const runHrefs = await page.locator('a[href*="/activity?run="]').evaluateAll((links) =>
+  const feedHrefs = await page.locator('a[href*="/activity?run="]').evaluateAll((links) =>
     Array.from(new Set(links.map((link) => (link as HTMLAnchorElement).getAttribute('href') ?? ''))).filter(Boolean),
   )
-  ok('The run list has a run to open', runHrefs.length > 0, `${runHrefs.length} runs`)
+  const runHrefs = [...new Set([...paidRuns, ...feedHrefs])]
+  ok('The run list has a run to open', runHrefs.length > 0,
+    `${runHrefs.length} runs, ${paidRuns.length} of them with a cost`)
 
   let messages = ''
   let messageRows = 0
-  for (const href of runHrefs.slice(0, 8)) {
+  // Every earlier walk in this check starts runs of its own — workflow runs that execute tools
+  // and call no model at all — so on a second run the newest eight are all of those and the
+  // scan gave up before reaching one that spoke to a model. It looks at every run it can see
+  // and says how many it had to open.
+  let runsOpened = 0
+  for (const href of runHrefs.slice(0, 30)) {
+    runsOpened += 1
     await page.goto(`${BASE}${href}`)
     const found = await page
       .waitForSelector('[data-testid="run-messages"]', { timeout: 5_000 })
@@ -1957,7 +2087,7 @@ try {
     messages.slice(0, 60).replace(/\n/g, ' '))
   ok('And says the totals above are the sum of those rows, kept by the database',
     /sum of these rows/i.test(messages))
-  ok('Every model call is on the record', messageRows > 0, `${messageRows} calls`)
+  ok('Every model call is on the record', messageRows > 0, `${messageRows} calls, ${runsOpened} runs opened`)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/run-messages.png`, fullPage: true })
 
   await page.goto(`${BASE}/analytics`)
@@ -2064,6 +2194,25 @@ try {
     )
     .then(() => true, () => false)
   ok('A term can be extended, and the panel says the new one', reopened)
+
+  // And put back, through the same control. Without this the rate card stays in force and the
+  // next run finds no expired document to ask about — the demo would have quietly lost the
+  // state this walk exists to check.
+  await page.locator('[data-testid="term-edit"]').click()
+  await page.waitForSelector('[data-testid="term-editor"]', { timeout: 15_000 })
+  await page.fill('#term-to', '2025-12-31')
+  await page.locator('[data-testid="term-confirm"]').click()
+  const termRestored = await page
+    .waitForFunction(
+      () =>
+        /stopped applying on 2025-12-31/i.test(
+          document.querySelector('[data-testid="document-term"]')?.textContent ?? '',
+        ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And the term goes back where the demo had it', termRestored)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/document-term.png`, fullPage: true })
 
   // ---- Who decided this was confidential -----------------------------------
@@ -2331,8 +2480,12 @@ try {
   const threadUrl = page.url()
   const threadSubject = await page.locator('h1').first().innerText()
   const unclassified = await page.locator('[data-testid="classification-summary"]').innerText()
+  // Either answer is the one this beat asks for, and the second is what a thread looks like
+  // once somebody has decided: the attribution survives being set back down, which is the
+  // whole point of recording who decided (ADR 0061).
   ok('A thread says whether anybody has decided who may read it',
-    /Nobody has classified this thread/i.test(unclassified), unclassified.slice(0, 60))
+    /Nobody has classified this thread/i.test(unclassified) || /set this to/i.test(unclassified),
+    unclassified.slice(0, 60))
 
   await page.locator('[data-testid="classification-edit"]').click()
   await page.waitForSelector('[data-testid="classification-editor"]', { timeout: 15_000 })

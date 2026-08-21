@@ -173,7 +173,12 @@ export function AddCompany({ canAddCompany, canAddContact, companies }: AddCompa
               >
                 {busy ? 'Adding…' : 'Add it'}
               </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(null)}>
+              <button
+                className="btn btn-ghost"
+                data-testid="company-cancel"
+                disabled={busy}
+                onClick={() => setOpen(null)}
+              >
                 Cancel
               </button>
             </div>
