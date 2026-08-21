@@ -1,7 +1,7 @@
 import type { Priority, TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
-import { can, readCeiling, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
-import type { Sensitivity } from '@superwork/db'
+import { can, readCeiling, ROLE_MAX_SENSITIVITY, SENSITIVITY_RANK, type Actor } from '@superwork/auth'
+import type { Role, Sensitivity } from '@superwork/db'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { assertSteppedUp } from '../step-up.js'
 import { writeActivity, writeAudit } from '../audit.js'
@@ -48,6 +48,11 @@ export interface ConversationView {
   sensitivitySetByName: string | null
   sensitivitySetAt: Date | null
   sensitivityReason: string | null
+  /** Whose it is to answer (ADR 0063). Null means nobody has been handed it. */
+  assignedToId: string | null
+  assignedToName: string | null
+  assignedByName: string | null
+  assignedAt: Date | null
 }
 
 const SELECT_CONVERSATION = (ctx: TenantContext) => ctx.sql`
@@ -64,6 +69,10 @@ const SELECT_CONVERSATION = (ctx: TenantContext) => ctx.sql`
          conv.triaged_by_agent_run_id AS "triagedByAgentRunId",
          EXISTS (SELECT 1 FROM messages m
                   WHERE m.conversation_id = conv.id AND m.injection_flagged) AS "hasFlaggedContent",
+         conv.assigned_to AS "assignedToId",
+         (SELECT name FROM users WHERE id = conv.assigned_to) AS "assignedToName",
+         (SELECT name FROM users WHERE id = conv.assigned_by) AS "assignedByName",
+         conv.assigned_at AS "assignedAt",
          conv.sensitivity, conv.sensitivity_source AS "sensitivitySource",
          (SELECT name FROM users WHERE id = conv.sensitivity_set_by) AS "sensitivitySetByName",
          conv.sensitivity_set_at AS "sensitivitySetAt",
@@ -139,6 +148,12 @@ export async function getConversation(ctx: TenantContext, actor: Actor, id: stri
     id: row.id,
     organizationId: ctx.organizationId,
     ownerId: row.ownerId,
+    // `scopeSatisfied('own')` accepts an assignee, and this had never been passed because
+    // nothing could make an assignment for it to read. No *role* reads conversations at `own`
+    // scope — every one of them is `org` — so this changes no answer a role decides today. It
+    // is what an exception granted to one person reads (ADR 0055), and a resource that omits a
+    // field the policy engine consults is a resource that lies about the row.
+    assigneeId: row.assignedToId,
     sensitivity: row.sensitivity,
   })
   // A thread above the reader's clearance is not theirs to know about, so it answers the way a
@@ -275,6 +290,113 @@ export async function applyTriage(ctx: TenantContext, actor: Actor, input: Triag
   })
 
   return getConversation(ctx, actor, input.conversationId)
+}
+
+/**
+ * Handing a thread to somebody (ADR 0063).
+ *
+ * `conversations.assigned_to` has existed since migration 0010 and nothing has ever written it,
+ * while three things read it: the inbox's "My work" view, the personal record's count of what is
+ * held about you, and `scopeSatisfied('own')` — which accepts an assignee, so an assignment is
+ * the thing that lets somebody act on a thread they do not own. A column, a filter and a policy
+ * branch, with no way to put a value in.
+ *
+ * Two things this refuses, and one it does not:
+ *
+ * **Somebody who is not here.** Enforced by `sw_conversation_assignee_same_org` as well, because
+ * a foreign key to `users` says the person exists and nothing about which organization they are
+ * in — and a thread assigned across tenants would sit in a "My work" view nobody can open.
+ *
+ * **Somebody who could not open it.** A thread classified above the assignee's clearance would
+ * land in a queue where it is invisible to them: assigned, and gone. The refusal names the
+ * classification rather than the person, because that is the thing to change if this was meant.
+ *
+ * **It does not ask for a reason.** An assignment is routine, and a sentence per hand-over is
+ * friction on the wrong control. Who did it and when are recorded, which is what answers "why is
+ * this mine?" — and the feed carries it, because being given work is news to the person given it.
+ */
+export async function assignConversation(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { conversationId: string; assigneeId: string | null },
+): Promise<ConversationView> {
+  const before = await getConversation(ctx, actor, input.conversationId)
+
+  const decision = can(actor, 'conversation:update', {
+    type: 'conversation',
+    id: before.id,
+    organizationId: ctx.organizationId,
+    ownerId: before.ownerId,
+    assigneeId: before.assignedToId,
+    sensitivity: before.sensitivity,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  let assigneeName: string | null = null
+  if (input.assigneeId !== null) {
+    const [person] = await ctx.sql<{ name: string; role: Role }[]>`
+      SELECT u.name, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.organization_id = ${ctx.organizationId} AND m.user_id = ${input.assigneeId}
+        AND m.deleted_at IS NULL AND m.status = 'active'`
+    if (!person) throw new NotFoundError()
+    assigneeName = person.name
+
+    if (SENSITIVITY_RANK[before.sensitivity] > SENSITIVITY_RANK[ROLE_MAX_SENSITIVITY[person.role]]) {
+      throw new ValidationError(
+        `This thread is classified ${before.sensitivity}, which is above what the ${person.role} ` +
+          `role may read. ${person.name} would be given something they cannot open — the ` +
+          'classification is the thing to change, deliberately, if that is what is meant.',
+      )
+    }
+  }
+
+  await ctx.sql`
+    UPDATE conversations SET
+      assigned_to = ${input.assigneeId},
+      assigned_by = ${input.assigneeId === null ? null : actor.userId},
+      assigned_at = ${input.assigneeId === null ? null : ctx.sql`now()`},
+      updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.conversationId}`
+
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.agent?.agentName ?? actor.displayName,
+    verb: input.assigneeId === null ? 'unassigned' : 'assigned',
+    entityType: 'conversation',
+    entityId: input.conversationId,
+    entityLabel: before.subject,
+    summary:
+      input.assigneeId === null
+        ? `Took "${before.subject}" off ${before.assignedToName ?? 'somebody'}`
+        : `Gave "${before.subject}" to ${assigneeName}`,
+  })
+
+  return getConversation(ctx, actor, input.conversationId)
+}
+
+/**
+ * Who this thread could be handed to.
+ *
+ * Filtered by clearance, so the picker does not offer somebody the assignment would be refused
+ * for. The repository refuses anyway — a list is a convenience and never a control.
+ */
+export async function assignableTo(
+  ctx: TenantContext,
+  actor: Actor,
+  conversationId: string,
+): Promise<{ id: string; name: string }[]> {
+  const conversation = await getConversation(ctx, actor, conversationId)
+  const rank = SENSITIVITY_RANK[conversation.sensitivity]
+  const rows = await ctx.sql<{ id: string; name: string; role: Role }[]>`
+    SELECT u.id, u.name, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+    WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL
+      AND m.status = 'active'
+    ORDER BY u.name`
+  return rows
+    .filter((row) => SENSITIVITY_RANK[ROLE_MAX_SENSITIVITY[row.role]] >= rank)
+    .map((row) => ({ id: row.id, name: row.name }))
 }
 
 export const SENSITIVITIES: Sensitivity[] = ['public', 'internal', 'confidential', 'restricted']

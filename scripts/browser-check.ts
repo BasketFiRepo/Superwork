@@ -2104,6 +2104,75 @@ try {
   ok('And it is gone from the library', documentsAfter === documentsBefore - 1,
     `${documentsBefore} → ${documentsAfter}`)
 
+  // ---- Whose thread this is to answer (ADR 0063) ---------------------------
+  // `conversations.assigned_to` has existed since migration 0010 and nothing has ever written
+  // it, while the inbox offers a "My work" view that reads it: a filter on the busiest screen
+  // here, half of which could never match anything.
+  await page.goto(`${BASE}/inbox`)
+  await page.waitForSelector('[data-testid="inbox-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="inbox-row"]').first().dblclick()
+  await page.waitForSelector('[data-testid="conversation-assignment"]', { timeout: 15_000 })
+  const assignUrl = page.url()
+  const assignSubject = await page.locator('h1').first().innerText()
+  ok('A thread says whose it is to answer, or that nobody has been handed it',
+    /Nobody has been handed this thread/i.test(
+      await page.locator('[data-testid="assignment-summary"]').innerText(),
+    ))
+
+  await page.locator('[data-testid="assignment-open"]').click()
+  await page.waitForSelector('[data-testid="assignment-editor"]', { timeout: 15_000 })
+  ok('Nothing is handed over until somebody is chosen',
+    await page.locator('[data-testid="assignment-confirm"]').isDisabled())
+  const offered = await page.locator('#assignment-person option').count()
+  ok('It offers the people whose clearance reaches the thread', offered > 1, `${offered - 1} people`)
+  await page.selectOption('#assignment-person', { label: 'Priya Raman' })
+  await page.locator('[data-testid="assignment-confirm"]').click()
+  const handed = await page
+    .waitForFunction(
+      () => /assigned to Priya Raman/i.test(
+        document.querySelector('[data-testid="assignment-state"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A thread can be handed to somebody, and says who did it', handed)
+  ok('And names who handed it over, which is what answers “why is this mine?”',
+    /handed it over/i.test(await page.locator('[data-testid="assignment-summary"]').innerText()))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/conversation-assignment.png`, fullPage: true })
+
+  // The half that matters: the view that reads the column, from the other side.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'priya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(`${BASE}/inbox?view=mine`)
+  await page.waitForTimeout(1_000)
+  const myWork = await page.locator('[data-testid="inbox-row"]').allInnerTexts()
+  ok('And it is on their My work list, which could never match anything before',
+    myWork.some((text) => text.includes(assignSubject)), assignSubject.slice(0, 50))
+
+  // Put the demo back.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'maya@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(assignUrl)
+  await page.waitForSelector('[data-testid="assignment-clear"]', { timeout: 15_000 })
+  await page.locator('[data-testid="assignment-clear"]').click()
+  const takenBack = await page
+    .waitForFunction(
+      () => /nobody yet/i.test(
+        document.querySelector('[data-testid="assignment-state"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And it can be taken back off them, which is what puts the demo back', takenBack)
+
   // ---- How far a thread may travel (ADR 0061) ------------------------------
   // `conversations.sensitivity` carried `internal` since Phase 0, written by nothing and read by
   // nothing: no repository put it in the resource the policy engine checks. Every member holds
