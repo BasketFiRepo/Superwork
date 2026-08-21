@@ -162,11 +162,13 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
         agentId={data.agent.agentId}
         agentName={data.agent.name}
         ownerName={data.agent.ownerName}
+        viewerIsOwner={data.agent.ownerUserId === data.viewerId}
         digests={data.digests.map((digest) => ({
           id: digest.id,
           periodFrom: digest.periodFrom.toISOString(),
           periodTo: digest.periodTo.toISOString(),
           narrative: digest.narrative,
+          readAt: digest.readAt ? digest.readAt.toISOString() : null,
           facts: digest.facts,
         }))}
       />

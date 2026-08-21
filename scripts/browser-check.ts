@@ -592,6 +592,40 @@ try {
   ok('A persona opens with its configuration', (await page.locator('[data-testid="agent-config"]').count()) === 1)
   ok('It shows its history', (await page.locator('[data-testid="agent-history"]').count()) === 1)
   ok('It shows what it reported to its owner', (await page.locator('[data-testid="digests"]').count()) === 1)
+
+  // Whether anybody read it (ADR 0070). `agent_digests.read_at` was on the view and never on the
+  // screen, and the digest itself was written to a table nobody was told about — an agent
+  // reporting into a void, under a heading that says every agent has a named accountable human.
+  const digestPanel = page.locator('[data-testid="digests"]')
+  if ((await page.locator('[data-testid="digest-mark-read"]').count()) === 0) {
+    await page.getByRole('button', { name: /Write last week/i }).click()
+    await page
+      .locator('[data-testid="digest-mark-read"]')
+      .first()
+      .waitFor({ timeout: 30_000 })
+      .catch(() => undefined)
+  }
+  ok('A report says whether the person accountable for the agent has read it',
+    /has not read|Read by/i.test(await page.locator('[data-testid="digest-unread"]').innerText()),
+    (await page.locator('[data-testid="digest-unread"]').innerText()).trim())
+
+  const markRead = page.locator('[data-testid="digest-mark-read"]').first()
+  if ((await markRead.count()) > 0) {
+    await markRead.click()
+    const receipted = await page
+      .locator('[data-testid="digest-read"]')
+      .first()
+      .waitFor({ timeout: 20_000 })
+      .then(() => true, () => false)
+    ok('And the person it went to can say they have read it', receipted,
+      receipted ? (await page.locator('[data-testid="digest-read"]').first().innerText()).trim() : 'no receipt')
+  } else {
+    ok('And the person it went to can say they have read it', true,
+      'every report on this agent was read by an earlier run')
+  }
+  ok('Which is what the panel counts, rather than that a page was rendered',
+    /Read by/i.test(await digestPanel.locator('[data-testid="digest-unread"]').innerText()),
+    (await digestPanel.locator('[data-testid="digest-unread"]').innerText()).trim())
   await page.locator('[data-testid="simulate"]').click()
   await page.waitForSelector('[data-testid="simulation"]', { timeout: 60_000 })
   const simulation = await page.locator('[data-testid="simulation"]').innerText()

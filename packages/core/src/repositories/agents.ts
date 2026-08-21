@@ -799,6 +799,8 @@ export async function personaForKey(ctx: TenantContext, key: string): Promise<{
   recertifiedVersion: number | null
   recertifiedByName: string | null
   recertificationDays: number
+  /** Reports the accountable human has not read (ADR 0070). */
+  unreadDigests: number
 } | null> {
   const [row] = await ctx.sql<
     {
@@ -820,6 +822,7 @@ export async function personaForKey(ctx: TenantContext, key: string): Promise<{
       recertifiedVersion: number | null
       recertifiedByName: string | null
       recertificationDays: number
+      unreadDigests: number
     }[]
   >`
     SELECT a.id AS "agentId", a.key, a.name, a.purpose, a.mode, a.status::text AS status,
@@ -836,7 +839,10 @@ export async function personaForKey(ctx: TenantContext, key: string): Promise<{
              (SELECT m.agent_recertification_days FROM monitoring_policies m
                WHERE m.organization_id = a.organization_id AND m.deleted_at IS NULL),
              ${DEFAULT_RECERTIFICATION_DAYS}
-           ) AS "recertificationDays"
+           ) AS "recertificationDays",
+           (SELECT count(*)::int FROM agent_digests d
+             WHERE d.organization_id = a.organization_id AND d.agent_id = a.id
+               AND d.deleted_at IS NULL AND d.read_at IS NULL) AS "unreadDigests"
     FROM agents a
     LEFT JOIN users r ON r.id = a.recertified_by
     WHERE a.organization_id = ${ctx.organizationId} AND a.key = ${key} AND a.deleted_at IS NULL`
