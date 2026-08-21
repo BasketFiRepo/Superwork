@@ -202,6 +202,20 @@ jobs:
         env:
           SHOT_DIR: screenshots
 
+      # And again, against the demo the first walk left behind.
+      #
+      # Several walks make something the demo does not have and cannot unmake from a screen — a
+      # company, a department, a shelf — and several consume something it seeds: the one email
+      # waiting out its recall window, the memory candidates, the restriction on a document. For
+      # a long time a second run died four beats after the company walk on a timeout that named
+      # nothing to do with companies, and nothing noticed, because CI only ever ran it once
+      # against a database that had just been created.
+      #
+      # A check that only works on a machine nobody has is not a check. This is the step that
+      # says so — it costs about two minutes and it is how that stays true (ADR 0067).
+      - name: And again, on the demo the first walk left
+        run: pnpm check:browser
+
       # The screenshots are the evidence for anything the check asserts about a screen.
       #
       # v6 is the first major of this one that runs on Node 24 — its v5 is still Node 20,
