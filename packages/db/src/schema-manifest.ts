@@ -71,6 +71,7 @@ export const MIGRATIONS: readonly string[] = [
   '0057_work_a_team_can_hold',
   '0058_a_decision_somebody_stood_behind',
   '0059_a_promise_that_became_work',
+  '0060_an_agent_somebody_still_stands_behind',
 ]
 
 /** The id half of a migration's name: `0054_correspondence…` → `0054`. */

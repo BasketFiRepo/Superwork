@@ -4,6 +4,7 @@ import { NotFoundError, PermissionError, ValidationError } from './errors.js'
 import { assertSteppedUp } from './step-up.js'
 import { writeAudit } from './audit.js'
 import { PROFILES, strictestProfile, type JurisdictionProfile } from './compliance.js'
+import { DEFAULT_RECERTIFICATION_DAYS } from './agent-recertification.js'
 
 /**
  * The two ceilings an admin could see and not set (§4.4, §29.5).
@@ -29,6 +30,8 @@ export interface MonitoringPolicyView {
   jurisdictionProfile: JurisdictionProfile
   nudgeBudgetPerPersonPerDay: number
   noSurprisesReviewHours: number
+  /** How long an agent's recertification is good for (ADR 0068). */
+  agentRecertificationDays: number
   /** What the jurisdiction itself requires — the boundary the organization may only tighten. */
   ceiling: { nudgeBudgetPerPersonPerDay: number; noSurprisesReviewHours: number }
   reason: string | null
@@ -70,6 +73,7 @@ export async function monitoringPolicy(
     {
       nudgeBudgetPerPersonPerDay: number
       noSurprisesReviewHours: number
+      agentRecertificationDays: number
       reason: string | null
       setByName: string | null
       setAt: Date | null
@@ -77,6 +81,7 @@ export async function monitoringPolicy(
   >`
     SELECT nudge_budget_per_person_per_day AS "nudgeBudgetPerPersonPerDay",
            no_surprises_review_hours AS "noSurprisesReviewHours",
+           agent_recertification_days AS "agentRecertificationDays",
            reason, set_at AS "setAt",
            (SELECT u.name FROM users u WHERE u.id = set_by) AS "setByName"
     FROM monitoring_policies
@@ -93,6 +98,10 @@ export async function monitoringPolicy(
       rules.noSurprisesReviewHours,
       row?.noSurprisesReviewHours ?? rules.noSurprisesReviewHours,
     ),
+    // Not a jurisdiction rule: no profile has an opinion about how often a company reviews
+    // what its own agents may do. The schema's default is the whole policy until somebody
+    // sets one.
+    agentRecertificationDays: row?.agentRecertificationDays ?? DEFAULT_RECERTIFICATION_DAYS,
     ceiling: {
       nudgeBudgetPerPersonPerDay: rules.maxNudgesPerPersonPerDay,
       noSurprisesReviewHours: rules.noSurprisesReviewHours,
@@ -116,7 +125,12 @@ export async function monitoringPolicy(
 export async function setMonitoringPolicy(
   ctx: TenantContext,
   actor: Actor,
-  input: { nudgeBudgetPerPersonPerDay?: number; noSurprisesReviewHours?: number; reason: string },
+  input: {
+    nudgeBudgetPerPersonPerDay?: number
+    noSurprisesReviewHours?: number
+    agentRecertificationDays?: number
+    reason: string
+  },
 ): Promise<MonitoringPolicyView> {
   const decision = can(actor, 'settings:update', {
     type: 'settings',
@@ -131,12 +145,21 @@ export async function setMonitoringPolicy(
   const current = await monitoringPolicy(ctx)
   const budget = input.nudgeBudgetPerPersonPerDay ?? current.nudgeBudgetPerPersonPerDay
   const hours = input.noSurprisesReviewHours ?? current.noSurprisesReviewHours
+  const recertDays = input.agentRecertificationDays ?? current.agentRecertificationDays
 
   if (!Number.isInteger(budget) || budget < 0 || budget > 20) {
     throw new ValidationError('The daily contact budget is a whole number between 0 and 20.')
   }
   if (!Number.isInteger(hours) || hours < 1 || hours > 168) {
     throw new ValidationError('The review window is a whole number of hours between 1 and 168.')
+  }
+  // The bounds are the database's, stated here in words. The floor exists because a review
+  // interval of a day is a review nobody performs; the ceiling because one of five years is a
+  // policy that reads like a control and behaves like nothing.
+  if (!Number.isInteger(recertDays) || recertDays < 7 || recertDays > 365) {
+    throw new ValidationError(
+      'How often agents are re-examined is a whole number of days between 7 and 365.',
+    )
   }
   if (budget > current.ceiling.nudgeBudgetPerPersonPerDay) {
     throw new ValidationError(
@@ -154,15 +177,16 @@ export async function setMonitoringPolicy(
   await ctx.sql`
     INSERT INTO monitoring_policies (
       organization_id, jurisdiction_profile, nudge_budget_per_person_per_day,
-      no_surprises_review_hours, reason, set_by, set_at, created_by
+      no_surprises_review_hours, agent_recertification_days, reason, set_by, set_at, created_by
     ) VALUES (
-      ${ctx.organizationId}, ${current.jurisdictionProfile}, ${budget}, ${hours},
+      ${ctx.organizationId}, ${current.jurisdictionProfile}, ${budget}, ${hours}, ${recertDays},
       ${input.reason.trim()}, ${actor.userId}, now(), ${ctx.userId}
     )
     ON CONFLICT (organization_id) WHERE deleted_at IS NULL
     DO UPDATE SET jurisdiction_profile = EXCLUDED.jurisdiction_profile,
                   nudge_budget_per_person_per_day = EXCLUDED.nudge_budget_per_person_per_day,
                   no_surprises_review_hours = EXCLUDED.no_surprises_review_hours,
+                  agent_recertification_days = EXCLUDED.agent_recertification_days,
                   reason = EXCLUDED.reason, set_by = EXCLUDED.set_by, set_at = now(),
                   updated_at = now()`
 

@@ -19,6 +19,7 @@ export const STEP_UP_MAX_AGE_MS = 5 * 60_000
 export const STEP_UP_ACTIONS = {
   'agent.publish': 'publishing an agent, or widening what one is allowed to do',
   'agent.rollback': 'restoring an agent to an earlier configuration',
+  'agent.recertify': 'saying an agent may still do everything it may do',
   'custom_tool.activate': 'letting a tool call a system outside this company',
   'custom_tool_host.review': 'adding a system that tools may call',
   'kill_switch.release': 'letting the agents run again',

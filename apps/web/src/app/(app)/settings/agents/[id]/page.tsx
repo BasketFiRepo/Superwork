@@ -2,7 +2,9 @@ import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
 import {
+  certificationState,
   getAgent,
+  monitoringPolicy,
   listAgentVersions,
   listChangeRequests,
   listSimulations,
@@ -26,6 +28,7 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
   try {
     data = await withActor(session, async (ctx, actor) => {
       const agent = await getAgent(ctx, actor, id)
+      const policy = await monitoringPolicy(ctx)
       const [changes, versions, simulations, digests, people, departments] = await Promise.all([
         listChangeRequests(ctx, actor, { agentId: id, limit: 20 }),
         listAgentVersions(ctx, actor, id),
@@ -39,7 +42,20 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
           SELECT id, name FROM departments
           WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL ORDER BY name`,
       ])
-      return { agent, changes, versions, simulations, digests, people, departments, viewerId: actor.userId }
+      return {
+        agent,
+        changes,
+        versions,
+        simulations,
+        digests,
+        people,
+        departments,
+        viewerId: actor.userId,
+        // Whether anybody still stands behind what this may do (ADR 0068). The same rule the
+        // runtime uses to decide the mode ceiling, so the screen and the run agree.
+        certification: certificationState(agent, policy.agentRecertificationDays),
+        recertificationDays: policy.agentRecertificationDays,
+      }
     })
   } catch (error) {
     if (error instanceof NotFoundError) notFound()
@@ -92,6 +108,14 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
           ownerName: data.agent.ownerName,
           publishedByName: data.agent.publishedByName,
           publishedAt: data.agent.publishedAt ? data.agent.publishedAt.toISOString() : null,
+        }}
+        certification={{
+          state: data.certification.state,
+          summary: data.certification.summary,
+          stale: data.certification.stale,
+          daysOverdue: data.certification.daysOverdue,
+          intervalDays: data.recertificationDays,
+          note: data.agent.recertificationNote,
         }}
         snapshot={personaSnapshot(data.agent)}
         tools={tools}
