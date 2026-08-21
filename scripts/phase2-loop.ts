@@ -138,7 +138,7 @@ try {
   await withTenant(session, async (ctx) => {
     const actor = await loadActor(ctx)
     const queue = await listConversations(ctx, actor, { view: 'queue', limit: 50 })
-    const decisions = await listDecisions(ctx, { limit: 100 })
+    const decisions = await listDecisions(ctx, actor, { limit: 100 })
     const merges = await listMergeCandidates(ctx, actor)
     console.log(
       `\n  Queue: ${queue.length} threads · ${decisions.length} decisions · ${commitments.length} commitments · ${merges.length} merge candidates`,

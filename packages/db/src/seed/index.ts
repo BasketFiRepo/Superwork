@@ -957,6 +957,33 @@ async function seedMeetings(
           text: segment.text,
         })),
       })
+
+      // What the summarizer would have read out of it. The decision log was empty in the
+      // demo, which is a strange thing for "the most valuable and most neglected artifact in
+      // project work" to be — and the whole point of ADR 0065 is the difference between an
+      // assistant's reading of a transcript and something a person stood behind, which is
+      // not visible on an empty screen. Left unconfirmed on purpose: that is the state every
+      // decision starts in.
+      if (meeting.decision) {
+        await ctx.sql`
+          INSERT INTO decisions (
+            organization_id, project_id, meeting_id, summary, rationale, decided_by,
+            decided_at, status, source_segment_id, confidence, agent_run_id, is_demo, created_by
+          ) VALUES (
+            ${ctx.organizationId},
+            ${meeting.projectKey ? projectIds.get(meeting.projectKey)! : null},
+            ${meetingId}, ${meeting.decision.summary}, ${meeting.decision.rationale ?? null},
+            ${userIds.get(meeting.organizerKey)!}, ${endsAt}, ${meeting.decision.status ?? 'decided'},
+            (SELECT seg.id FROM transcript_segments seg
+              JOIN transcripts tr ON tr.id = seg.transcript_id
+              WHERE seg.organization_id = ${ctx.organizationId} AND tr.meeting_id = ${meetingId}
+              ORDER BY seg.starts_at_seconds LIMIT 1),
+            ${meeting.decision.confidence},
+            (SELECT id FROM agent_runs WHERE organization_id = ${ctx.organizationId}
+              ORDER BY created_at LIMIT 1),
+            true, ${ctx.userId}
+          )`
+      }
     }
   }
 

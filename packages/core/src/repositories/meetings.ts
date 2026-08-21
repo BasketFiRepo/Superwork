@@ -1,9 +1,10 @@
-import type { TenantContext } from '@superwork/db'
+import type { Sensitivity, TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { link } from '../links.js'
+import { canReadProject } from './projects.js'
 import { ingestDocument } from '../retrieval/ingest.js'
 import { recordIngestion } from '../retrieval/ingestion-queue.js'
 
@@ -424,31 +425,135 @@ export interface DecisionView {
   projectId: string | null
   sourceSegmentId: string | null
   sourceAnchor: string | null
+  /** Who stood behind it, and when. Written by nothing until ADR 0065. */
   confirmedAt: Date | null
+  confirmedBy: string | null
+  confirmedByName: string | null
   confidence: number | null
+  /** Whether the assistant extracted it from a transcript, rather than a person writing it. */
+  fromAgentRun: boolean
 }
 
+/**
+ * A decision row plus the project fields the read gate needs. The project is the only
+ * container a decision has and the only classification available to it — `decisions` carries
+ * no `sensitivity` of its own, and neither does `meetings`.
+ */
+type DecisionRow = DecisionView & {
+  projectOwnerId: string | null
+  projectCreatedBy: string | null
+  projectDepartmentId: string | null
+  projectTeamId: string | null
+  projectSensitivity: Sensitivity | null
+}
+
+const SELECT_DECISION = (ctx: TenantContext) => ctx.sql`
+  SELECT d.id, d.summary, d.rationale, d.rejected_alternatives AS "rejectedAlternatives",
+         d.status, d.decided_by AS "decidedBy", u.name AS "decidedByName", d.decided_at AS "decidedAt",
+         d.meeting_id AS "meetingId", m.title AS "meetingTitle", d.project_id AS "projectId",
+         d.source_segment_id AS "sourceSegmentId",
+         s.starts_at_seconds::text AS "sourceAnchor",
+         d.confirmed_at AS "confirmedAt", d.confirmed_by AS "confirmedBy",
+         cu.name AS "confirmedByName", d.confidence,
+         (d.agent_run_id IS NOT NULL) AS "fromAgentRun",
+         p.owner_id AS "projectOwnerId", p.created_by AS "projectCreatedBy",
+         p.department_id AS "projectDepartmentId", p.team_id AS "projectTeamId",
+         p.sensitivity AS "projectSensitivity"
+  FROM decisions d
+  LEFT JOIN users u ON u.id = d.decided_by
+  LEFT JOIN users cu ON cu.id = d.confirmed_by
+  LEFT JOIN meetings m ON m.id = d.meeting_id
+  LEFT JOIN transcript_segments s ON s.id = d.source_segment_id
+  LEFT JOIN projects p ON p.id = d.project_id`
+
+/**
+ * Drops the rows this actor may not read.
+ *
+ * A decision filed against a project takes that project's classification and scope, decided by
+ * `canReadProject` — the same call the projects list makes, so the two cannot disagree about a
+ * project a person is not cleared for. A decision on no project has nothing narrower to be
+ * judged by and stands on the organization-level gate above.
+ */
+function visibleDecisions(actor: Actor, organizationId: string, rows: DecisionRow[]): DecisionView[] {
+  return rows
+    .filter((row) => {
+      if (!row.projectId || !row.projectSensitivity) return true
+      return canReadProject(actor, organizationId, {
+        id: row.projectId,
+        ownerId: row.projectOwnerId,
+        createdBy: row.projectCreatedBy,
+        departmentId: row.projectDepartmentId,
+        teamId: row.projectTeamId,
+        sensitivity: row.projectSensitivity,
+      }).allow
+    })
+    .map(strip)
+}
+
+function strip(row: DecisionRow): DecisionView {
+  const {
+    projectOwnerId: _o,
+    projectCreatedBy: _c,
+    projectDepartmentId: _d,
+    projectTeamId: _t,
+    projectSensitivity: _s,
+    ...view
+  } = row
+  return view
+}
+
+/**
+ * The decision log (§12.2).
+ *
+ * This took no actor and made no permission check of any kind until ADR 0065: RLS kept it
+ * inside the organization and that was the entire gate, on a list of what was decided in
+ * meetings — commercial terms, personnel, pricing. Every comparable list here takes an actor,
+ * asks `grantedScope` and filters by clearance. This one now does too.
+ */
 export async function listDecisions(
   ctx: TenantContext,
-  filter: { projectId?: string; meetingId?: string; limit?: number } = {},
+  actor: Actor,
+  filter: { projectId?: string; meetingId?: string; unconfirmedOnly?: boolean; limit?: number } = {},
 ): Promise<DecisionView[]> {
+  const gate = can(actor, 'project:read', { type: 'project', organizationId: ctx.organizationId })
+  if (!gate.allow) throw new PermissionError(gate.reason)
+
   const sql = ctx.sql
-  return sql<DecisionView[]>`
-    SELECT d.id, d.summary, d.rationale, d.rejected_alternatives AS "rejectedAlternatives",
-           d.status, d.decided_by AS "decidedBy", u.name AS "decidedByName", d.decided_at AS "decidedAt",
-           d.meeting_id AS "meetingId", m.title AS "meetingTitle", d.project_id AS "projectId",
-           d.source_segment_id AS "sourceSegmentId",
-           s.starts_at_seconds::text AS "sourceAnchor",
-           d.confirmed_at AS "confirmedAt", d.confidence
-    FROM decisions d
-    LEFT JOIN users u ON u.id = d.decided_by
-    LEFT JOIN meetings m ON m.id = d.meeting_id
-    LEFT JOIN transcript_segments s ON s.id = d.source_segment_id
+  const rows = await sql<DecisionRow[]>`
+    ${SELECT_DECISION(ctx)}
     WHERE d.organization_id = ${ctx.organizationId} AND d.deleted_at IS NULL
       ${filter.projectId ? sql`AND d.project_id = ${filter.projectId}` : sql``}
       ${filter.meetingId ? sql`AND d.meeting_id = ${filter.meetingId}` : sql``}
+      ${filter.unconfirmedOnly ? sql`AND d.confirmed_at IS NULL` : sql``}
     ORDER BY d.decided_at DESC
     LIMIT ${Math.min(filter.limit ?? 50, 200)}`
+  return visibleDecisions(actor, ctx.organizationId, rows)
+}
+
+/** One decision, with the read gate that governs the list. */
+export async function getDecision(ctx: TenantContext, actor: Actor, id: string): Promise<DecisionView> {
+  const gate = can(actor, 'project:read', { type: 'project', organizationId: ctx.organizationId })
+  if (!gate.allow) throw new PermissionError(gate.reason)
+
+  const rows = await ctx.sql<DecisionRow[]>`
+    ${SELECT_DECISION(ctx)}
+    WHERE d.organization_id = ${ctx.organizationId} AND d.id = ${id} AND d.deleted_at IS NULL`
+  const row = rows[0]
+  if (!row) throw new NotFoundError()
+  const [visible] = visibleDecisions(actor, ctx.organizationId, [row])
+  // A decision on a project above this actor's clearance answers as though it is not here,
+  // never as forbidden — the refusal would otherwise confirm that it exists (§3.2).
+  if (!visible) throw new NotFoundError()
+  return visible
+}
+
+/** Unguarded read by id, for the paths that have just written the row they are reading back. */
+async function loadDecision(ctx: TenantContext, id: string): Promise<DecisionView> {
+  const rows = await ctx.sql<DecisionRow[]>`
+    ${SELECT_DECISION(ctx)}
+    WHERE d.organization_id = ${ctx.organizationId} AND d.id = ${id}`
+  if (!rows[0]) throw new NotFoundError()
+  return strip(rows[0])
 }
 
 export interface RecordDecisionInput {
@@ -504,8 +609,160 @@ export async function recordDecision(
     agentRunId: input.agentRunId ?? null,
   })
 
-  const [created] = await listDecisions(ctx, { meetingId: input.meetingId ?? undefined, limit: 1 })
-  return created ?? (await listDecisions(ctx, { limit: 1 }))[0]!
+  // Read back by id. It used to take the newest row of the meeting and fall back to the
+  // newest row in the organization, which is a guess that two summarizers running at once
+  // would get wrong — and now that the list filters by clearance, a guess that could come
+  // back empty.
+  return loadDecision(ctx, row!.id)
+}
+
+/**
+ * Who may stand behind a decision (ADR 0065).
+ *
+ * Being in the room comes first. The person who can say whether a transcript was read
+ * correctly is somebody who was there, not somebody senior to the project — so a participant
+ * or the organizer of the meeting it came from may confirm it, whatever their role. Somebody
+ * with a say over the project may too, because a decision filed against a project is part of
+ * that project's record and there has to be a route when nobody who attended is left.
+ *
+ * Returns the reason when the answer is no, so a refusal names what would work.
+ */
+async function mayConfirm(
+  ctx: TenantContext,
+  actor: Actor,
+  decision: DecisionView,
+): Promise<{ allow: true } | { allow: false; reason: string }> {
+  if (actor.type !== 'user') {
+    return {
+      allow: false,
+      reason:
+        'Only a person can confirm a decision. The assistant read it out of a transcript — it ' +
+        'cannot also be the one who agrees that it read it right.',
+    }
+  }
+
+  if (decision.meetingId) {
+    const [wasThere] = await ctx.sql<{ id: string }[]>`
+      SELECT m.id FROM meetings m
+      WHERE m.organization_id = ${ctx.organizationId} AND m.id = ${decision.meetingId}
+        AND m.deleted_at IS NULL
+        AND (m.organizer_id = ${actor.userId} OR EXISTS (
+          SELECT 1 FROM meeting_participants mp
+          WHERE mp.organization_id = m.organization_id AND mp.meeting_id = m.id
+            AND mp.user_id = ${actor.userId} AND mp.deleted_at IS NULL
+        ))`
+    if (wasThere) return { allow: true }
+  }
+
+  const say = can(actor, 'project:update', {
+    type: 'project',
+    ...(decision.projectId ? { id: decision.projectId } : {}),
+    organizationId: ctx.organizationId,
+    riskTier: 'low',
+  })
+  if (say.allow) return { allow: true }
+
+  return {
+    allow: false,
+    reason:
+      `${say.reason} Confirming a decision is for somebody who was in the meeting it came from, ` +
+      'or who has a say over the project it belongs to.',
+  }
+}
+
+/**
+ * Stands behind a decision, or takes that back (ADR 0065).
+ *
+ * Every decision in the log was extracted by the assistant from a transcript and carries a
+ * confidence — `recordDecision` is called from exactly one place, the meeting summarizer. The
+ * confirmation is the human half of that, and the same rule `confirmMemory` states: an
+ * assistant confirming its own observation is how a wrong reading becomes the record.
+ *
+ * **Confirming asks for no reason; withdrawing does.** A confirmation is an affirmation of
+ * text that is already there — the decision is its own reason. Withdrawing says the standing
+ * record is wrong while leaving it in place, so the next person to read it needs to know what
+ * the signature knew.
+ */
+export async function setDecisionConfirmation(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { decisionId: string; confirmed: boolean; reason?: string },
+): Promise<DecisionView> {
+  const before = await getDecision(ctx, actor, input.decisionId)
+
+  const allowed = await mayConfirm(ctx, actor, before)
+  if (!allowed.allow) throw new PermissionError(allowed.reason)
+
+  if (input.confirmed && before.confirmedAt) {
+    throw new ValidationError(
+      before.confirmedBy === actor.userId
+        ? 'You have already confirmed this.'
+        : `${before.confirmedByName ?? 'Somebody'} has already confirmed this. Two signatures on one ` +
+          'line would say less than one, not more — withdraw theirs first if it was wrong.',
+    )
+  }
+  if (!input.confirmed && !before.confirmedAt) {
+    throw new ValidationError('Nobody has confirmed this, so there is nothing to withdraw.')
+  }
+
+  const reason = input.reason?.trim() ?? ''
+  if (!input.confirmed && reason.length < 4) {
+    throw new ValidationError(
+      'Say why it is being withdrawn. The decision stays on the record either way, so the next ' +
+        'person to read it needs to know what changed.',
+    )
+  }
+
+  await ctx.sql`
+    UPDATE decisions
+    SET confirmed_at = ${input.confirmed ? ctx.sql`now()` : null},
+        confirmed_by = ${input.confirmed ? actor.userId : null},
+        updated_at = now()
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.decisionId} AND deleted_at IS NULL`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: input.confirmed ? 'decision.confirmed' : 'decision.confirmation_withdrawn',
+    entityType: 'decision',
+    entityId: input.decisionId,
+    before: { confirmedBy: before.confirmedByName, summary: before.summary },
+    after: {
+      confirmedBy: input.confirmed ? actor.displayName : null,
+      // What was being agreed with: an extraction the model was this sure of.
+      extractedByAssistant: before.fromAgentRun,
+      confidence: before.confidence,
+      ...(reason ? { reason } : {}),
+    },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: input.confirmed ? 'confirmed' : 'withdrew a confirmation',
+    entityType: 'decision',
+    entityId: input.decisionId,
+    entityLabel: before.summary.slice(0, 80),
+    summary: input.confirmed
+      ? `${actor.displayName} confirmed: ${before.summary.slice(0, 140)}`
+      : `${actor.displayName} withdrew the confirmation on “${before.summary.slice(0, 100)}”. ${reason}`,
+  })
+
+  return loadDecision(ctx, input.decisionId)
+}
+
+/** Whether this actor may confirm, so a page can say why not rather than show a dead button. */
+export async function confirmability(
+  ctx: TenantContext,
+  actor: Actor,
+  decisions: DecisionView[],
+): Promise<Record<string, { allow: boolean; reason: string | null }>> {
+  const out: Record<string, { allow: boolean; reason: string | null }> = {}
+  for (const decision of decisions) {
+    const answer = await mayConfirm(ctx, actor, decision)
+    out[decision.id] = { allow: answer.allow, reason: answer.allow ? null : answer.reason }
+  }
+  return out
 }
 
 /**

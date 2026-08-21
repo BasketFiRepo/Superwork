@@ -113,11 +113,31 @@ export async function getProject(ctx: TenantContext, actor: Actor, id: string): 
   return project
 }
 
-function readable(actor: Actor, ctx: TenantContext, project: ProjectView) {
+/**
+ * Whether this actor may read this project.
+ *
+ * Exported because a project is a container: the things filed against it — its decisions, for
+ * one (ADR 0065) — have no classification of their own and take the project's. Two places
+ * deciding separately whether a project is readable is two places that will disagree, so this
+ * is the one place, and it takes the fields rather than a whole `ProjectView` because a caller
+ * that has joined `projects` for four columns should not have to assemble a view to ask.
+ */
+export function canReadProject(
+  actor: Actor,
+  organizationId: string,
+  project: {
+    id: string
+    ownerId: string | null
+    createdBy: string | null
+    departmentId: string | null
+    teamId: string | null
+    sensitivity: Sensitivity
+  },
+) {
   return can(actor, 'project:read', {
     type: 'project',
     id: project.id,
-    organizationId: ctx.organizationId,
+    organizationId,
     ownerId: project.ownerId,
     createdBy: project.createdBy,
     departmentId: project.departmentId,
@@ -126,6 +146,10 @@ function readable(actor: Actor, ctx: TenantContext, project: ProjectView) {
     // a confidential project does not make you cleared to read one.
     sensitivity: project.sensitivity,
   })
+}
+
+function readable(actor: Actor, ctx: TenantContext, project: ProjectView) {
+  return canReadProject(actor, ctx.organizationId, project)
 }
 
 export interface MilestoneView {

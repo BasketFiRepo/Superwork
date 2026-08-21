@@ -181,7 +181,59 @@ try {
   await page.waitForSelector('[data-testid="transcript-segment"]', { timeout: 15_000 })
   const anchors = await page.locator('[data-testid="segment-anchor"]').count()
   ok('The transcript renders with timestamp anchors', anchors > 0, `${anchors} anchors`)
+
+  // Decisions somebody stood behind (ADR 0065). `decisions.confirmed_at` had been rendered as
+  // a "Confirmed" column since Phase 1 and written by nothing, while the panel told people to
+  // "confirm anything that reads wrong". Every row was an assistant's reading of a transcript.
+  await page.waitForSelector('[data-testid="meeting-decisions"]', { timeout: 15_000 })
+  const decisionsPanel = page.locator('[data-testid="meeting-decisions"]')
+  ok('A meeting says what was decided, and that the assistant read it out of the transcript',
+    /read out of the transcript by the assistant/i.test(await decisionsPanel.innerText()))
+  ok('And how many nobody has confirmed',
+    /nobody has confirmed yet/i.test(
+      await page.locator('[data-testid="decisions-unconfirmed"]').innerText(),
+    ),
+    (await page.locator('[data-testid="decisions-unconfirmed"]').innerText()).slice(0, 60))
+
+  await page.locator('[data-testid="decision-confirm"]').first().click()
+  const stood = await page
+    .waitForFunction(
+      () => document.querySelector('[data-testid="decision-confirmed"]') !== null,
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  // Maya is not on this meeting's participant list, so this is the second route: somebody with
+  // a say over the project it belongs to. The participant route is proved in the test suite,
+  // where a member with no `project:update` at all confirms one because they were there.
+  ok('A decision can be stood behind, and says by whom', stood,
+    stood ? (await page.locator('[data-testid="decision-confirmed"]').first().innerText()).trim() : 'not confirmed')
+
+  await page.locator('[data-testid="decision-withdraw-open"]').first().click()
+  await page.waitForSelector('[data-testid="decision-withdraw-reason"]', { timeout: 15_000 })
+  ok('Taking it back will not happen without a reason, because the decision stays either way',
+    await page.locator('[data-testid="decision-withdraw-confirm"]').first().isDisabled())
+  await page.locator('[data-testid="decision-withdraw-reason"]').first()
+    .fill('Rereading it, that was discussed rather than settled — and the demo goes back.')
+  await page.locator('[data-testid="decision-withdraw-confirm"]').first().click()
+  const withdrawn = await page
+    .waitForFunction(
+      () => document.querySelector('[data-testid="decision-confirmed"]') === null,
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And withdrawn again, which is what puts the demo back', withdrawn)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/meeting.png`, fullPage: true })
+
+  // The log itself, which said "not yet" in every row it would ever have.
+  await page.goto(`${BASE}/meetings`)
+  await page.waitForSelector('[data-testid="decision-log-state"]', { timeout: 15_000 })
+  ok('The decision log says how much of it is still an assistant’s reading',
+    /an assistant’s reading of a transcript|stood behind by somebody/i.test(
+      await page.locator('[data-testid="decision-log-state"]').innerText(),
+    ),
+    (await page.locator('[data-testid="decision-log-state"]').innerText()).slice(0, 60))
 
   // ---- CRM ----------------------------------------------------------------
   await page.goto(`${BASE}/companies`)

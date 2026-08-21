@@ -123,7 +123,7 @@ describe('a transcript that carries an instruction', () => {
         expect(commitment.status).toBe('proposed')
       }
 
-      const decisions = await listDecisions(ctx, { meetingId })
+      const decisions = await listDecisions(ctx, actor, { meetingId })
       for (const decision of decisions) {
         expect(decision.summary).not.toMatch(/rate card|procurement-archive/i)
       }
