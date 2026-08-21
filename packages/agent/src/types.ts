@@ -120,4 +120,11 @@ export interface RunPersona {
   /** Hard ceilings on unattended work (§27.6). */
   autopilotDailyActionCap: number
   autopilotWeeklyCostCapCents: number
+  /**
+   * Why this persona cannot run unattended, when it cannot. Null when it may (ADR 0068).
+   *
+   * A stale recertification does not stop an agent — it stops it acting with nobody watching,
+   * which is the one mode whose whole premise is that somebody signed off on it recently.
+   */
+  autopilotWithheldReason?: string | null
 }

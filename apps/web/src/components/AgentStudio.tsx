@@ -69,6 +69,7 @@ const SENSITIVITIES: Snapshot['maxSensitivity'][] = ['public', 'internal', 'conf
 
 export function AgentStudio({
   agent,
+  certification,
   snapshot,
   tools,
   people,
@@ -86,6 +87,14 @@ export function AgentStudio({
     ownerName: string | null
     publishedByName: string | null
     publishedAt: string | null
+  }
+  certification: {
+    state: 'never' | 'current' | 'changed' | 'expired'
+    summary: string
+    stale: boolean
+    daysOverdue: number
+    intervalDays: number
+    note: string | null
   }
   snapshot: Snapshot
   tools: { name: string; riskTier: string; description: string }[]
@@ -112,6 +121,7 @@ export function AgentStudio({
   const [simulation, setSimulation] = useState<SimulationSummary | null>(simulations[0] ?? null)
 
   const stepUp = useStepUp()
+  const [recertNote, setRecertNote] = useState('')
   const dirty = JSON.stringify(draft) !== JSON.stringify(snapshot)
   const open = changes.find((change) => change.status === 'awaiting_approval') ?? null
 
@@ -182,6 +192,16 @@ export function AgentStudio({
     }
   }
 
+  async function recertify() {
+    if (recertNote.trim().length < 8) return
+    const result = await call(`/api/agents/${agent.agentId}/recertify`, { note: recertNote }, 'recertify')
+    if (result) {
+      setRecertNote('')
+      setNote(`${agent.name} is confirmed on version ${agent.currentVersion}.`)
+      router.refresh()
+    }
+  }
+
   async function setStatus(status: 'active' | 'paused' | 'retired') {
     const reason =
       status === 'active' ? undefined : window.prompt(`Why is ${agent.name} being ${status}? People depending on it will see this.`)
@@ -248,6 +268,60 @@ export function AgentStudio({
           </div>
         </section>
       ) : null}
+
+      <section className="panel" data-testid="agent-recertification">
+        <div className="panel-header">
+          <h2>Who stands behind this</h2>
+          <span
+            className={certification.stale ? 'chip chip-attention' : 'chip chip-positive'}
+            data-testid="recertification-state"
+          >
+            {certification.state === 'never'
+              ? 'never reviewed'
+              : certification.state === 'changed'
+                ? 'changed since'
+                : certification.state === 'expired'
+                  ? `overdue by ${certification.daysOverdue} days`
+                  : 'confirmed'}
+          </span>
+        </div>
+        <div className="panel-body stack stack-4">
+          <p className="small secondary prose" style={{ margin: 0 }} data-testid="recertification-summary">
+            {certification.summary}
+            {certification.note ? <> &ldquo;{certification.note}&rdquo;</> : null}
+          </p>
+
+          <p className="small muted" style={{ margin: 0 }}>
+            Publishing takes two people and happens when something changes. This is the other
+            half: every {certification.intervalDays} days somebody reads what this may do and
+            says it is still right. Until they do, it will not run unattended — everything
+            short of autopilot still works, and a person is back in the loop for the rest.
+          </p>
+
+          <label className="stack stack-2" htmlFor="recertify-note">
+            <span className="micro">What you checked</span>
+            <input
+              id="recertify-note"
+              className="input"
+              data-testid="recertify-note"
+              value={recertNote}
+              placeholder="Still the right tools and the right clearance for what it does."
+              onChange={(event) => setRecertNote(event.target.value)}
+            />
+          </label>
+
+          <div className="row">
+            <button
+              className="btn btn-primary"
+              data-testid="recertify-confirm"
+              disabled={busy !== null || recertNote.trim().length < 8}
+              onClick={recertify}
+            >
+              {busy === 'recertify' ? 'Saving…' : `Confirm version ${agent.currentVersion}`}
+            </button>
+          </div>
+        </div>
+      </section>
 
       <section className="panel" data-testid="agent-config">
         <div className="panel-header">

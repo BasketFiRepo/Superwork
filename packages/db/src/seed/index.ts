@@ -788,6 +788,9 @@ async function seedAgents(
       owner: 'maya',
       mode: 'execute',
       status: 'active',
+      // Reviewed recently, so the one agent that actually acts is one somebody stands behind.
+      recertifiedDaysAgo: 12,
+      recertificationNote: 'Still the right tools and the right clearance for what it does.',
     },
     {
       key: 'follow_up',
@@ -796,6 +799,7 @@ async function seedAgents(
       owner: 'david',
       mode: 'assist',
       status: 'staged',
+      // Nobody has ever read what this may do — the state every agent starts in (ADR 0068).
     },
     {
       key: 'researcher',
@@ -804,6 +808,9 @@ async function seedAgents(
       owner: 'maya',
       mode: 'ask',
       status: 'active',
+      // Reviewed once and then forgotten, which is what the interval exists to surface.
+      recertifiedDaysAgo: 200,
+      recertificationNote: 'Read-only, and nothing about it has changed since it was built.',
     },
   ]
 
@@ -811,7 +818,9 @@ async function seedAgents(
     await ctx.sql`
       INSERT INTO agents (organization_id, key, name, purpose, owner_user_id, scope_department_id,
                           mode, status, tool_grants, max_sensitivity, budget, escalation_user_id,
-                          is_subagent, published_by, published_at, is_demo, created_by)
+                          is_subagent, published_by, published_at,
+                          recertified_at, recertified_by, recertified_version, recertification_note,
+                          is_demo, created_by)
       VALUES (${ctx.organizationId}, ${agent.key}, ${agent.name}, ${agent.purpose},
               ${userIds.get(agent.owner)!}, ${departmentIds.get('Operations')!},
               ${agent.mode}::sw_agent_mode, ${agent.status}::sw_agent_status,
@@ -819,7 +828,12 @@ async function seedAgents(
               'confidential',
               ${ctx.sql.json(asJson({ runsPerDay: 200, tokensPerDay: 2_000_000, spendPerMonthCents: 50_000, maxActionsPerDay: 100 }))},
               ${userIds.get('david')!}, ${agent.key !== 'orchestrator'},
-              ${userIds.get('maya')!}, ${ago(20)}, true, ${ctx.userId})`
+              ${userIds.get('maya')!}, ${ago(20)},
+              ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? ago(agent.recertifiedDaysAgo) : null},
+              ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? userIds.get('maya')! : null},
+              ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? 0 : null},
+              ${'recertificationNote' in agent ? (agent.recertificationNote ?? null) : null},
+              true, ${ctx.userId})`
   }
 
   // The organization-level ceiling the agent can never exceed.

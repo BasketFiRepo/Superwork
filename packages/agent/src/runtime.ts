@@ -8,6 +8,7 @@ import {
   claimNextRun,
   createApproval,
   enqueueRun,
+  certificationState,
   personaForKey,
   proposeMemories,
   record as recordUsageRecord,
@@ -278,7 +279,13 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
   // studio writes and the gate enforces, so "structurally incapable of writing" is a
   // property of the row rather than a sentence in a prompt (§27.2).
   const persona = intake.persona
-  const effectiveMode = narrowerMode(input.mode, persona.mode)
+  // Nobody has stood behind this configuration recently enough to let it act unattended, so
+  // the ceiling drops one rung and the run says so rather than failing (ADR 0068). Everything
+  // short of autopilot still works: the agent goes on proposing and doing reversible things,
+  // and a person is back in the loop for the rest.
+  const withheld = persona.autopilotWithheldReason ?? null
+  const ceiling = withheld && persona.mode === 'autopilot' ? 'execute' : persona.mode
+  const effectiveMode = narrowerMode(input.mode, ceiling)
   const agentActor = await withTenant(session, (ctx) =>
     asAgent(ctx, intake.actor, {
       agentId: runId,
@@ -288,6 +295,19 @@ async function drive(session: RunSession & { traceId: string }, runId: string, i
       maxSensitivity: persona.maxSensitivity,
     }),
   )
+
+  // A ceiling that drops silently is a ceiling nobody can appeal. This says which review is
+  // outstanding, on the run's own timeline, where the person reading the result will see it.
+  if (withheld && persona.mode === 'autopilot') {
+    await withTenant(session, (ctx) =>
+      emitStep(ctx, runId, phase, {
+        phase: 'intake',
+        label: `Not running unattended — ${withheld}`,
+        status: 'succeeded',
+        detail: { requested: input.mode, running_as: effectiveMode, reason: withheld },
+      }),
+    )
+  }
 
   // ---- Ground --------------------------------------------------------------
   const grounded = await withTenant(session, async (ctx) => {
@@ -1258,6 +1278,16 @@ function narrowerMode(requested: StartRunInput['mode'], ceiling: StartRunInput['
 async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPersona> {
   const persona = await personaForKey(ctx, key)
   if (persona) {
+    const certification = certificationState(
+      {
+        name: persona.name,
+        publishedVersion: persona.publishedVersion,
+        recertifiedAt: persona.recertifiedAt,
+        recertifiedVersion: persona.recertifiedVersion,
+        recertifiedByName: persona.recertifiedByName,
+      },
+      persona.recertificationDays,
+    )
     return {
       agentId: persona.agentId,
       key: persona.key,
@@ -1269,6 +1299,7 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
       maxSensitivity: persona.maxSensitivity,
       autopilotDailyActionCap: persona.autopilotDailyActionCap,
       autopilotWeeklyCostCapCents: persona.autopilotWeeklyCostCapCents,
+      autopilotWithheldReason: certification.stale ? certification.summary : null,
     }
   }
   // No row: the ad-hoc assistant, which is what a person gets when they type into the

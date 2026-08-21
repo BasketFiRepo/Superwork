@@ -1,6 +1,13 @@
 import { requireSession, withActor } from '@/lib/session'
 import { can, describeEffectiveCapability, ROLE_MAX_SENSITIVITY } from '@superwork/auth'
-import { agentGrants, formatCents, monitoringPolicy, spendSnapshot, trustLedger } from '@superwork/core'
+import {
+  agentGrants,
+  certificationState,
+  formatCents,
+  monitoringPolicy,
+  spendSnapshot,
+  trustLedger,
+} from '@superwork/core'
 import { allTools } from '@superwork/tools'
 import { GovernanceControls } from '@/components/GovernanceControls'
 import { KillSwitch } from '@/components/KillSwitch'
@@ -30,11 +37,18 @@ export default async function AiGovernancePage() {
         toolGrants: string[]
         budget: Record<string, number>
         recertifiedAt: Date | null
+        recertifiedVersion: number | null
+        recertifiedByName: string | null
+        publishedVersion: number
       }[]
     >`
       SELECT a.id, a.key, a.name, a.purpose, a.mode, a.status, u.name AS "ownerName",
              a.max_sensitivity AS "maxSensitivity", a.tool_grants AS "toolGrants",
-             a.budget, a.recertified_at AS "recertifiedAt"
+             a.budget, a.recertified_at AS "recertifiedAt",
+             a.recertified_version AS "recertifiedVersion",
+             (SELECT coalesce(max(v.ordinal), 0) FROM agent_versions v
+               WHERE v.organization_id = a.organization_id AND v.agent_id = a.id) AS "publishedVersion",
+             (SELECT r.name FROM users r WHERE r.id = a.recertified_by) AS "recertifiedByName"
       FROM agents a JOIN users u ON u.id = a.owner_user_id
       WHERE a.organization_id = ${ctx.organizationId} AND a.deleted_at IS NULL
       ORDER BY a.is_subagent, a.name`
@@ -65,6 +79,7 @@ export default async function AiGovernancePage() {
       spend: await spendSnapshot(ctx, 'business'),
       ledger: await trustLedger(ctx),
       monitoring,
+      recertificationDays: monitoring.agentRecertificationDays,
       departments,
       canEdit,
       capability: describeEffectiveCapability({
@@ -140,6 +155,7 @@ export default async function AiGovernancePage() {
                 <th style={{ width: 100 }}>Status</th>
                 <th style={{ width: 130 }}>Reads up to</th>
                 <th style={{ width: 130 }}>Daily action cap</th>
+                <th style={{ width: 200 }}>Who stands behind it</th>
               </tr>
             </thead>
             <tbody>
@@ -158,6 +174,36 @@ export default async function AiGovernancePage() {
                   </td>
                   <td className="small secondary">{agent.maxSensitivity}</td>
                   <td className="num">{agent.budget?.maxActionsDay ?? agent.budget?.maxActionsPerDay ?? '—'}</td>
+                  <td className="small" data-testid="agent-certification">
+                    {(() => {
+                      // `recertified_at` was selected on this very screen and rendered nowhere
+                      // for twenty increments, which is how a column with no writer stays
+                      // invisible. The same rule the runtime uses for the mode ceiling.
+                      const state = certificationState(
+                        {
+                          name: agent.name,
+                          publishedVersion: agent.publishedVersion,
+                          recertifiedAt: agent.recertifiedAt,
+                          recertifiedVersion: agent.recertifiedVersion,
+                          recertifiedByName: agent.recertifiedByName,
+                        },
+                        data.recertificationDays,
+                      )
+                      return state.stale ? (
+                        <span className="chip chip-attention">
+                          {state.state === 'never'
+                            ? 'never reviewed'
+                            : state.state === 'changed'
+                              ? 'changed since'
+                              : `overdue by ${state.daysOverdue}d`}
+                        </span>
+                      ) : (
+                        <span className="secondary">
+                          {agent.recertifiedByName} · {agent.recertifiedAt?.toISOString().slice(0, 10)}
+                        </span>
+                      )
+                    })()}
+                  </td>
                 </tr>
               ))}
             </tbody>

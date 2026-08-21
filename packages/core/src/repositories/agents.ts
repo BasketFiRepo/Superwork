@@ -3,6 +3,7 @@ import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { assertSteppedUp } from '../step-up.js'
+import { certificationState, DEFAULT_RECERTIFICATION_DAYS } from '../agent-recertification.js'
 import { writeActivity, writeAudit } from '../audit.js'
 
 /**
@@ -40,7 +41,13 @@ export interface AgentPersona {
   digestDay: number
   publishedAt: Date | null
   publishedByName: string | null
+  /** Who last read what this may do and said it was still right (ADR 0068). */
   recertifiedAt: Date | null
+  recertifiedByName: string | null
+  recertifiedVersion: number | null
+  recertificationNote: string | null
+  /** The ordinal of the published configuration, or 0 for one never through the flow. */
+  publishedVersion: number
   pausedReason: string | null
   currentVersion: number
   isDemo: boolean
@@ -74,11 +81,17 @@ const SELECT_AGENT = (ctx: TenantContext) => ctx.sql`
          a.autopilot_weekly_cost_cap_cents AS "autopilotWeeklyCostCapCents",
          a.autopilot_paused_until AS "autopilotPausedUntil", a.digest_day AS "digestDay",
          a.published_at AS "publishedAt", p.name AS "publishedByName",
-         a.recertified_at AS "recertifiedAt", a.paused_reason AS "pausedReason",
+         a.recertified_at AS "recertifiedAt", r.name AS "recertifiedByName",
+         a.recertified_version AS "recertifiedVersion",
+         a.recertification_note AS "recertificationNote",
+         a.paused_reason AS "pausedReason",
+         (SELECT coalesce(max(v.ordinal), 0) FROM agent_versions v
+           WHERE v.organization_id = a.organization_id AND v.agent_id = a.id) AS "publishedVersion",
          a.version AS "currentVersion", a.is_demo AS "isDemo"
   FROM agents a
   LEFT JOIN users o ON o.id = a.owner_user_id
   LEFT JOIN users p ON p.id = a.published_by
+  LEFT JOIN users r ON r.id = a.recertified_by
   LEFT JOIN departments d ON d.id = a.scope_department_id`
 
 function guard(actor: Actor, ctx: TenantContext, action: string, departmentId: string | null = null): void {
@@ -386,6 +399,18 @@ export async function decideChange(
 
   await applySnapshot(ctx, request.agentId, proposed, actor.userId)
 
+  // Publishing *is* a recertification: two people have just read this configuration and one of
+  // them signed it off with a fresh password. Recording it here is what stops the column being
+  // a second, parallel record that drifts from the one the approval flow already keeps — and it
+  // means a company that publishes regularly never sees an overdue agent, which is correct
+  // (ADR 0068).
+  await ctx.sql`
+    UPDATE agents
+    SET recertified_at = now(), recertified_by = ${actor.userId},
+        recertified_version = ${version!.ordinal},
+        recertification_note = ${`Approved version ${version!.ordinal}: ${request.justification}`}
+    WHERE organization_id = ${ctx.organizationId} AND id = ${request.agentId}`
+
   await ctx.sql`
     UPDATE agent_change_requests
     SET status = 'published', decided_by = ${actor.userId}, decided_at = now(),
@@ -523,6 +548,91 @@ export async function rollbackAgent(
     entityId: input.agentId,
     entityLabel: agent.name,
     summary: `Rolled "${agent.name}" back to version ${version.ordinal}. ${input.reason}`,
+  })
+
+  return getAgent(ctx, actor, input.agentId)
+}
+
+/**
+ * Says an agent may still do everything it may do (ADR 0068).
+ *
+ * The act publishing cannot express, because publishing is about a change. An agent that has
+ * not changed is never re-examined by any flow this product has: the person who approved it in
+ * March approved it once, and nothing since has asked whether `email:send` and `restricted`
+ * reading are still what this thing needs.
+ *
+ * **Step-up, and a note.** Re-attesting a capability is the same weight as granting one — the
+ * step-up catalogue calls it "saying an agent may still do everything it may do" — and the note
+ * is what makes it a review rather than a click. Both are what stop a periodic control becoming
+ * a periodic formality. The step-up is also what refuses an agent actor: `assertSteppedUp` will
+ * not take a fresh proof of identity from something that has none, and says so by name, so an
+ * assistant cannot vouch for its own capability.
+ *
+ * **Against a version, not a date.** The ordinal is recorded beside the timestamp, so a later
+ * publication makes the attestation stale immediately rather than at the end of the interval.
+ *
+ * The owner of an agent may recertify their own — access review is the owner attesting, and in
+ * a company with one administrator any other rule would mean nobody could ever do it. What is
+ * recorded is who, so a reviewer reading the trail can see when an agent has only ever been
+ * vouched for by the person who runs it.
+ */
+export async function recertifyAgent(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { agentId: string; note: string },
+): Promise<AgentPersona> {
+  const agent = await getAgent(ctx, actor, input.agentId)
+  guard(actor, ctx, 'agent:update', agent.scopeDepartmentId)
+  assertSteppedUp(actor, 'agent.recertify')
+
+  if (agent.status === 'draft') {
+    throw new ValidationError(
+      'This is still a draft, so there is nothing running to stand behind. Publish it and the ' +
+        'approval records who read it.',
+    )
+  }
+
+  const note = input.note.trim()
+  if (note.length < 8) {
+    throw new ValidationError(
+      'Say what you checked. A recertification with nothing written on it is a date, and the ' +
+        'next person to read the trail cannot tell it from a click.',
+    )
+  }
+
+  await ctx.sql`
+    UPDATE agents
+    SET recertified_at = now(), recertified_by = ${actor.userId},
+        recertified_version = ${agent.publishedVersion}, recertification_note = ${note}
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.agentId} AND deleted_at IS NULL`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'agent.recertified',
+    entityType: 'agent',
+    entityId: input.agentId,
+    before: { recertifiedAt: agent.recertifiedAt, recertifiedVersion: agent.recertifiedVersion },
+    after: {
+      recertifiedVersion: agent.publishedVersion,
+      note,
+      // What was being stood behind, so the trail says more than that somebody pressed it.
+      mode: agent.mode,
+      maxSensitivity: agent.maxSensitivity,
+      toolGrants: agent.toolGrants,
+    },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'recertified',
+    entityType: 'agent',
+    entityId: input.agentId,
+    entityLabel: agent.name,
+    summary:
+      `${actor.displayName} confirmed ${agent.name} may still do what it does, on version ` +
+      `${agent.publishedVersion}. ${note}`,
   })
 
   return getAgent(ctx, actor, input.agentId)
@@ -683,6 +793,12 @@ export async function personaForKey(ctx: TenantContext, key: string): Promise<{
   autopilotPausedUntil: Date | null
   scheduleCron: string | null
   ownerUserId: string
+  /** What the runtime needs to decide whether anybody still stands behind this (ADR 0068). */
+  publishedVersion: number
+  recertifiedAt: Date | null
+  recertifiedVersion: number | null
+  recertifiedByName: string | null
+  recertificationDays: number
 } | null> {
   const [row] = await ctx.sql<
     {
@@ -699,15 +815,30 @@ export async function personaForKey(ctx: TenantContext, key: string): Promise<{
       autopilotPausedUntil: Date | null
       scheduleCron: string | null
       ownerUserId: string
+      publishedVersion: number
+      recertifiedAt: Date | null
+      recertifiedVersion: number | null
+      recertifiedByName: string | null
+      recertificationDays: number
     }[]
   >`
-    SELECT id AS "agentId", key, name, purpose, mode, status::text AS status,
-           tool_grants AS "toolGrants", max_sensitivity AS "maxSensitivity",
-           autopilot_daily_action_cap AS "autopilotDailyActionCap",
-           autopilot_weekly_cost_cap_cents AS "autopilotWeeklyCostCapCents",
-           autopilot_paused_until AS "autopilotPausedUntil",
-           schedule_cron AS "scheduleCron", owner_user_id AS "ownerUserId"
-    FROM agents
-    WHERE organization_id = ${ctx.organizationId} AND key = ${key} AND deleted_at IS NULL`
+    SELECT a.id AS "agentId", a.key, a.name, a.purpose, a.mode, a.status::text AS status,
+           a.tool_grants AS "toolGrants", a.max_sensitivity AS "maxSensitivity",
+           a.autopilot_daily_action_cap AS "autopilotDailyActionCap",
+           a.autopilot_weekly_cost_cap_cents AS "autopilotWeeklyCostCapCents",
+           a.autopilot_paused_until AS "autopilotPausedUntil",
+           a.schedule_cron AS "scheduleCron", a.owner_user_id AS "ownerUserId",
+           (SELECT coalesce(max(v.ordinal), 0) FROM agent_versions v
+             WHERE v.organization_id = a.organization_id AND v.agent_id = a.id) AS "publishedVersion",
+           a.recertified_at AS "recertifiedAt", a.recertified_version AS "recertifiedVersion",
+           r.name AS "recertifiedByName",
+           coalesce(
+             (SELECT m.agent_recertification_days FROM monitoring_policies m
+               WHERE m.organization_id = a.organization_id AND m.deleted_at IS NULL),
+             ${DEFAULT_RECERTIFICATION_DAYS}
+           ) AS "recertificationDays"
+    FROM agents a
+    LEFT JOIN users r ON r.id = a.recertified_by
+    WHERE a.organization_id = ${ctx.organizationId} AND a.key = ${key} AND a.deleted_at IS NULL`
   return row ?? null
 }

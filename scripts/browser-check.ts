@@ -848,6 +848,61 @@ try {
     /erp\.northwind\.example/.test(hostsText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/step-up.png`, fullPage: true })
 
+  // Who stands behind an agent (ADR 0068). `agents.recertified_at` was selected into
+  // `AgentPersona` and again by the governance screen's own query, written by nothing and
+  // rendered nowhere — so publishing was the only review this product had, and publishing only
+  // happens when something changes.
+  await page.goto(`${BASE}/settings/agents`)
+  await page.waitForSelector('[data-testid="agent-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="agent-row"] a').first().click()
+  await page.waitForSelector('[data-testid="agent-recertification"]', { timeout: 15_000 })
+  const recertPanel = page.locator('[data-testid="agent-recertification"]')
+  ok('An agent says who last read what it may do, and how often that is asked',
+    /days somebody reads what this may do/i.test(await recertPanel.innerText()),
+    (await page.locator('[data-testid="recertification-state"]').innerText()).trim())
+  ok('And that a stale one stops running unattended rather than stopping',
+    /will not run unattended/i.test(await recertPanel.innerText()))
+  ok('Nothing is confirmed with nothing written on it',
+    await page.locator('[data-testid="recertify-confirm"]').isDisabled())
+
+  await page.fill('[data-testid="recertify-note"]', 'Read the tools and the clearance; both still fit what it does.')
+  expectingRefusal = true
+  await page.locator('[data-testid="recertify-confirm"]').click()
+  // Re-attesting a capability is the same weight as granting one, so it asks for the password.
+  // Tolerant of an already-confirmed one, the way the grant beat below is: the host review
+  // above confirms a password and a confirmation lasts five minutes. That this act *needs* one
+  // is asserted in tests/security/agent-recertification.test.ts, where the clock is ours.
+  const recertStepUp = page.locator('[data-testid="step-up"]')
+  if (await recertStepUp.waitFor({ timeout: 5_000 }).then(() => true, () => false)) {
+    await page.fill('#step-up-password', 'superwork')
+    await page.locator('[data-testid="step-up-confirm"]').click()
+  }
+  expectingRefusal = false
+  // Asserted against today's date rather than the chip: the first agent in the list is already
+  // confirmed in the demo, so "it says confirmed" would have passed without the click.
+  const today = new Date().toISOString().slice(0, 10)
+  const recertified = await page
+    .waitForFunction(
+      (stamp) =>
+        (document.querySelector('[data-testid="recertification-summary"]')?.textContent ?? '').includes(
+          stamp as string,
+        ),
+      today,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And it lands, naming who read it, when, and which version', recertified,
+    recertified ? (await page.locator('[data-testid="recertification-summary"]').innerText()).slice(0, 70) : 'not recorded')
+
+  // The inventory that fetched this column for twenty increments and showed it nowhere.
+  await page.goto(`${BASE}/settings/ai-governance`)
+  await page.waitForSelector('[data-testid="agent-certification"]', { timeout: 15_000 })
+  const inventory = await page.locator('[data-testid="agent-certification"]').allInnerTexts()
+  ok('The agent inventory says which of them nobody is standing behind',
+    inventory.some((cell) => /never reviewed|overdue by/i.test(cell)),
+    inventory.map((cell) => cell.trim()).join(' · ').slice(0, 80))
+
+
   // ---- AI governance: the two ceilings the refusals point at ---------------
   // The agent's own denial says "An admin can add it in Settings → AI governance", and that
   // screen listed the grants with no control on it.
