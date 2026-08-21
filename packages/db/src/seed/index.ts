@@ -1125,6 +1125,13 @@ async function seedTeams(
     UPDATE documents SET team_id = ${team!.id}
     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
       AND title LIKE 'Halden Foods%'`
+  // And a project. Left out until now because the product had no way to put one in a team
+  // (ADR 0064), so the Teams screen's project count could only ever show zero — a demo that
+  // quietly agreed with the gap instead of showing it.
+  await ctx.sql`
+    UPDATE projects SET team_id = ${team!.id}
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      AND name LIKE 'Halden peak%'`
 
   return 1
 }

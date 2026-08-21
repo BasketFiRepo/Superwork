@@ -13,11 +13,13 @@ import {
   projectMilestones,
   projectRoster,
   shareableRelations,
+  teamScope,
 } from '@superwork/core'
 import { Milestones } from '@/components/Milestones'
 import { ProjectStatus } from '@/components/ProjectStatus'
 import { ProjectRoster } from '@/components/ProjectRoster'
 import { ShareObject } from '@/components/ShareObject'
+import { TeamScope } from '@/components/TeamScope'
 
 export const dynamic = 'force-dynamic'
 
@@ -34,7 +36,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params
 
   try {
-    const { project, health, milestones, tasks, shares, people, teams, relations, roster, canStaff, everybody } = await withActor(
+    const { project, health, milestones, tasks, shares, people, teams, relations, roster, scope, canStaff, everybody } = await withActor(
       session,
       async (ctx, actor) => {
         const loaded = await getProject(ctx, actor, id)
@@ -57,6 +59,9 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             riskTier: 'low',
           }),
           relations: shareableRelations(actor, 'project', id, ctx.organizationId),
+          // `projects.team_id` has been read by the scope filter since 0022 and written by
+          // nothing in the product until now (ADR 0064).
+          scope: await teamScope(ctx, actor, 'project', id),
           teams: await listTeams(ctx, actor).catch(() => []),
           // Two lists, because they answer different questions. Sharing with yourself is
           // meaningless; putting yourself on a project you are running is not.
@@ -116,6 +121,17 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             addedByName: member.addedByName,
             joinedAt: member.joinedAt.toISOString(),
           }))}
+        />
+
+        <TeamScope
+          entity="project"
+          id={project.id}
+          sensitivity={scope.sensitivity}
+          teamId={scope.teamId}
+          teamName={scope.teamName}
+          options={scope.options}
+          canScope={scope.canScope}
+          refusal={scope.refusal}
         />
 
         <ShareObject

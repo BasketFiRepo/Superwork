@@ -304,8 +304,12 @@ export interface UpdateTaskInput {
   dueAt?: Date | null
   waitingOn?: string | null
   blockedReason?: string | null
-  teamId?: string | null
   /**
+   * No `teamId`. It used to ride along in this bulk write with no reason recorded and no check
+   * that the team was even in this organization — `setTeamScope` owns it now, because scoping
+   * work to a team is a change to who can reach it rather than an attribute of the work
+   * (ADR 0064).
+   *
    * The milestone of this task's own project, or null to take it off one (ADR 0048).
    * Through `updateTask` rather than a control of its own, so filing work against a date goes
    * past the same version check, the same watchers and the same audit as every other change.
@@ -393,7 +397,6 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
       due_at = ${input.dueAt !== undefined ? input.dueAt : before.dueAt},
       waiting_on = ${waitingOn},
       blocked_reason = ${blockedReason},
-      team_id = ${input.teamId !== undefined ? input.teamId : before.teamId},
       completed_at = ${status === 'completed' ? new Date() : null},
       cancelled_at = ${status === 'cancelled' ? new Date() : null}
     WHERE organization_id = ${ctx.organizationId} AND id = ${input.id} AND deleted_at IS NULL`
