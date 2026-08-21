@@ -945,11 +945,13 @@ async function seedMeetings(
           ${meeting.daysAgo > 0}, ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
         )`
     }
+    const outsidersInTheRoom: string[] = []
     for (const external of meeting.externalParticipants ?? []) {
       const [contact] = await ctx.sql<{ id: string }[]>`
         SELECT id FROM contacts
         WHERE organization_id = ${ctx.organizationId} AND company_id = ${companyIds.get(external.companyKey)!}
         LIMIT 1`
+      if (contact) outsidersInTheRoom.push(contact.id)
       await ctx.sql`
         INSERT INTO meeting_participants (
           organization_id, meeting_id, contact_id, display_name, role, attended, consented_at, is_demo, created_by
@@ -981,16 +983,24 @@ async function seedMeetings(
       // Promises made in the room. Left `proposed` unless the transcript shows the owner
       // agreeing out loud, because the ledger's founding rule is that an unaccepted
       // commitment is a suggestion (ADR 0066).
+      //
+      // The counterparty is the person on the other side of the promise, whichever way it
+      // runs: who we owe it to, or who owes it to us. A room with exactly one outsider in it
+      // has exactly one — and with two it has none this can name, so it names none rather
+      // than guessing (ADR 0071).
+      const counterparty = outsidersInTheRoom.length === 1 ? outsidersInTheRoom[0]! : null
       for (const promise of meeting.commitments ?? []) {
         await ctx.sql`
           INSERT INTO commitments (
-            organization_id, owner_user_id, company_id, obligation, direction, due_at, status,
+            organization_id, owner_user_id, company_id, counterparty_contact_id, obligation,
+            direction, due_at, status,
             confidence, source_segment_id, source_excerpt, detected_by_agent_run_id,
             confirmed_at, confirmed_by, is_demo, created_by
           ) VALUES (
             ${ctx.organizationId},
             ${promise.ownerKey ? userIds.get(promise.ownerKey)! : null},
             ${meeting.companyKey ? companyIds.get(meeting.companyKey)! : null},
+            ${counterparty},
             ${promise.obligation}, ${promise.direction},
             ${new Date(now + promise.dueInDays * DAY)}, ${promise.status ?? 'proposed'},
             ${promise.confidence},

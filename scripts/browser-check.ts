@@ -1960,6 +1960,23 @@ try {
     /does not reach the documents or work filed against it/i.test(companyShareText))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/company-share.png`, fullPage: true })
 
+  // ---- What happens next with a person ------------------------------------
+  // `contacts.next_step` was a column nothing had ever written, and the contacts table showed
+  // the backward-looking half only: when we last spoke to somebody, never what is next with
+  // them. Derived rather than typed, so there is nothing here to go stale (ADR 0071).
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('a[href^="/companies/"]', { timeout: 15_000 })
+  await page.locator('a[href^="/companies/"]', { hasText: 'Halden Foods' }).first().click()
+  await page.waitForSelector('[data-testid="company-contact"]', { timeout: 15_000 })
+  const nextStepText = await page.locator('[data-testid="contact-next-step"]').first().innerText()
+  ok('A contact says what happens next with them, not only when we last spoke',
+    /\d{4}-\d{2}-\d{2}/.test(nextStepText) && /we owe|they owe|meeting/i.test(nextStepText),
+    nextStepText.replace(/\s+/g, ' ').slice(0, 80))
+  ok('And it is a promise the ledger already holds rather than a note somebody typed',
+    /Gothenburg|pre-cool|QA sign-off|retraining/i.test(nextStepText),
+    nextStepText.replace(/\s+/g, ' ').slice(0, 80))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/contact-next-step.png`, fullPage: true })
+
   // ---- Indexing, and a document that can be put back into memory -----------
   // `ingestion_jobs` was written by nothing: indexing ran inline, so a failure rolled back
   // with the transaction it happened in and there was no way to ask for another attempt.
