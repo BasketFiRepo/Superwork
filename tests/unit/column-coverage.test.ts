@@ -222,6 +222,62 @@ describe('which table a read belongs to', () => {
     expect(readSites(body).size).toBe(0)
   })
 
+  /**
+   * The whole-body branch, and what it cost (ADR 0075).
+   *
+   * It exists so a `.sql` file — all statements, no backticks — is scanned at all. Its test was
+   * `/\b(SELECT|INSERT INTO|UPDATE|CREATE TABLE)\b/i`, which matched the *word* "update" in any
+   * file. A React component with a function called `update` and no SQL in it had its entire body
+   * pushed as one statement; nothing in that body names a table, so every `x.y` in it landed on
+   * `ANY_TABLE` and was lent to all ninety-six tables at once.
+   *
+   * That produced every one of the report's eight unplaceable readings. Three were taken for
+   * build candidates and `document_versions.note` — a column nothing selects anywhere — was most
+   * of the way to being built before a hand-patched copy of the script said which rows they were.
+   */
+  it('does not scan a whole component because it contains the word "update"', () => {
+    const body = [
+      'export function Row({ contact, onUpdate }) {',
+      '  async function update() { await fetch("/api/x", { method: "POST" }) }',
+      '  return <span>{contact.title}</span>',
+      '}',
+    ].join('\n')
+    expect(readSites(body).size).toBe(0)
+  })
+
+  it('but still reads a .sql file, which is what that branch is for', () => {
+    const body = 'UPDATE contacts SET last_interaction_at = now() WHERE next_step_at IS NULL;'
+    expect(readSites(body, true).size).toBeGreaterThan(0)
+  })
+
+  it('and a column named in a comment is prose, not a read', () => {
+    // On the real file, because a synthetic one did not reproduce it: this test passed with and
+    // without the fix until it was pointed at `inbox.ts` itself, and a test that agrees with you
+    // either way is worse than none.
+    //
+    // `-- the same argument the relationship view makes about a restricted contract's title` is
+    // the last unplaceable reading the report had after the `.sql` fix above, and it put
+    // `memberships.title` on the work list.
+    const path = join(ROOT, 'packages', 'core', 'src', 'repositories', 'inbox.ts')
+    const body = readFileSync(path, 'utf8')
+    // The test is only worth anything while the comment is still there to be misread.
+    expect(/--[^\n]*\btitle\b/.test(body)).toBe(true)
+    expect(readSites(body).get(ANY_TABLE)?.has('title')).toBeFalsy()
+    // And the statement around it still reads what it actually reads.
+    expect(readSites(body).get('conversations')?.has('snoozed_until')).toBe(true)
+  })
+
+  it('and taking one out does not lose the read on the other side of it', () => {
+    // A block comment sitting between the FROM and the WHERE. This does not discriminate between
+    // blanking a comment and deleting it — neither does anything else, which is why the note
+    // beside `withoutComments` calls the blanking caution rather than a requirement.
+    const body = [
+      'const q = sql`',
+      '  SELECT t.id FROM tasks t /* a long block comment about starts_on */ WHERE t.starts_on IS NULL`',
+    ].join('\n')
+    expect(read(body, 'tasks', 'starts_on')).toBe(true)
+  })
+
   it('and on the real thing, nothing reads the events table', () => {
     // `events` was designed in migration 0005 and wired to nothing; `activities` and
     // `audit_logs` do its job. Seven of its columns sat on the queue because their names are

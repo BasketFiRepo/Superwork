@@ -272,7 +272,7 @@ function scopesOf(body: string): Scope[] {
  * Text only. It cannot see through a helper that builds a query from strings, and it does not
  * try to — everything this reports is a candidate to go and read the code with.
  */
-export function readSites(body: string): Map<string, Set<string>> {
+export function readSites(body: string, isSql = false): Map<string, Set<string>> {
   const sites = new Map<string, Set<string>>()
   const add = (table: string, column: string) => {
     const set = sites.get(table) ?? new Set<string>()
@@ -283,7 +283,14 @@ export function readSites(body: string): Map<string, Set<string>> {
   // Only the SQL. Scanning whole files would read `contact.name` in a React component as a
   // column read of `name` on every table — the same over-reporting from a different direction,
   // and worse because it looks like precision.
-  const spans = sqlSpans(body)
+  // Without the comments. A column name written in prose beside a statement is not a read of it,
+  // and this codebase comments its SQL more than most: `-- makes about a restricted contract's
+  // title` in `inbox.ts` was the last unplaceable reading left after the `.sql` fix above, and
+  // it put `memberships.title` on the work list (ADR 0075).
+  //
+  // Blanked rather than deleted, so every offset in the span still lines up with the scopes
+  // computed from it.
+  const spans = sqlSpans(body, isSql).map(withoutComments)
 
   // Aliases are gathered across the file and used everywhere, because a fragment is routinely
   // written apart from the `FROM` it is spliced into: `AND conv.archived_at IS NULL` in one
@@ -338,7 +345,35 @@ export function readSites(body: string): Map<string, Set<string>> {
 const SQL_SHAPED =
   /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN|WHERE|SET|AND|OR|ORDER\s+BY|GROUP\s+BY|LIMIT|VALUES|RETURNING|IS\s+NULL)\b/
 
-function sqlSpans(body: string): string[] {
+/**
+ * `isSql` is the file's own extension, and it decides whether the whole-body branch below may
+ * fire at all (ADR 0075).
+ *
+ * That branch is for `.sql` files, which are all statements and carry no backticks — the comment
+ * has said so since it was written. Its test did not: `/…/i` matched the *word* "update" in any
+ * file, so a React component with no SQL in it and a function called `update` had its entire
+ * body pushed as one statement. Nothing in that body names a table, so every `x.y` in it landed
+ * on `ANY_TABLE` and was lent to all ninety-six tables at once.
+ *
+ * That is where every one of the eight unplaceable readings came from. Three of them were taken
+ * for build candidates, and `document_versions.note` — a column nothing selects anywhere — was
+ * most of the way to being built.
+ */
+/**
+ * A SQL span with its comments blanked out, keeping every other character where it was.
+ *
+ * Spaces rather than deletion so that offsets into the span do not move. Nothing today depends
+ * on that — `scopesOf` is handed this same stripped string and both sides shift together, and
+ * the tests pass with deletion — so it is caution rather than a requirement, and it is written
+ * down as caution rather than as a reason the tests do not actually hold anybody to.
+ */
+export function withoutComments(span: string): string {
+  return span
+    .replace(/--[^\n]*/g, (match) => ' '.repeat(match.length))
+    .replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, ' '))
+}
+
+function sqlSpans(body: string, isSql: boolean): string[] {
   const spans: string[] = []
   for (let i = 0; i < body.length; i++) {
     if (body[i] !== '`') continue
@@ -347,8 +382,9 @@ function sqlSpans(body: string): string[] {
     if (SQL_SHAPED.test(text)) spans.push(text)
     i = end
   }
-  // A `.sql` file is all statements and has no backticks around them.
-  if (spans.length === 0 && /\b(SELECT|INSERT\s+INTO|UPDATE|CREATE\s+TABLE)\b/i.test(body)) spans.push(body)
+  if (isSql && spans.length === 0 && /\b(SELECT|INSERT\s+INTO|UPDATE|CREATE\s+TABLE)\b/i.test(body)) {
+    spans.push(body)
+  }
   return spans
 }
 
@@ -482,12 +518,27 @@ async function main(): Promise<void> {
 
   // Which table each read belongs to, rather than which names appear somewhere in the product.
   const productReads = new Map<string, Set<string>>()
+  /**
+   * Where each fallback-placed column name was seen, so a guess can be resolved rather than
+   * believed (ADR 0075).
+   *
+   * The report used to give the *number* of guesses and not their names, which is a reading
+   * nobody can act on: three of them were taken for candidates and one was most of the way to
+   * being built before a hand-patched copy of this script said which rows they were.
+   */
+  const fallbackSources = new Map<string, Set<string>>()
   for (const file of files) {
     if (file.group !== 'product') continue
-    for (const [table, columns] of readSites(file.body)) {
+    for (const [table, columns] of readSites(file.body, file.path.endsWith('.sql'))) {
       const set = productReads.get(table) ?? new Set<string>()
       for (const column of columns) set.add(column)
       productReads.set(table, set)
+      if (table !== ANY_TABLE) continue
+      for (const column of columns) {
+        const where = fallbackSources.get(column) ?? new Set<string>()
+        where.add(relative(ROOT, file.path))
+        fallbackSources.set(column, where)
+      }
     }
   }
   const readsColumn = (table: string, column: string): boolean =>
@@ -502,6 +553,8 @@ async function main(): Promise<void> {
     hasDefault: boolean
     writtenBy: Group[]
     readInProduct: boolean
+    /** Read only because the fallback lent the name to every table — a guess, not a reading. */
+    guessed: boolean
   }
   const findings: Finding[] = []
   const stamped: Finding[] = []
@@ -534,6 +587,7 @@ async function main(): Promise<void> {
       hasDefault: row.columnDefault !== null,
       writtenBy,
       readInProduct: readsColumn(row.table, row.column),
+      guessed: readsOnlyByFallback(row.table, row.column),
     }
     // Only when *nothing* writes it. A clock default on a column the seed also fills is still
     // a column whose value is whatever the seed said — `messages.sent_at` is when a message was
@@ -543,16 +597,21 @@ async function main(): Promise<void> {
     else findings.push(finding)
   }
 
-  const read = findings.filter((finding) => finding.readInProduct)
+  // A guess is not a reading, so it is not on the work list. The fallback still runs and is
+  // still deliberately wide — a column named in a span that mentions no table is lent to every
+  // table — but "the detector could not tell" and "the interface shows this" are different
+  // findings, and printing them in one list is how the first gets mistaken for the second.
+  const read = findings.filter((finding) => finding.readInProduct && !finding.guessed)
+  const guesses = findings.filter((finding) => finding.readInProduct && finding.guessed)
   const unread = findings.filter((finding) => !finding.readInProduct)
 
   console.log(`${columns.length} columns across ${tables.length} tables.`)
-  const guessed = read.filter((finding) => readsOnlyByFallback(finding.table, finding.column)).length
   console.log(
-    `${findings.length} that no product write touches — ${read.length} of them read by the product` +
-      (guessed > 0
-        ? `, ${guessed} of those placed by the fallback rather than by a statement.`
-        : ', every one of them by a statement that names the table.'),
+    `${findings.length} that no product write touches — ${read.length} of them read by a statement that ` +
+      `names the table` +
+      (guesses.length > 0
+        ? `, and ${guesses.length} more the fallback could not place. Those are listed apart, below.`
+        : '.'),
   )
   console.log(
     `${stamped.length} more are stamped by the database and ${pins.length} are pinned by a constraint; both are listed below and neither is counted above.\n`,
@@ -568,6 +627,24 @@ async function main(): Promise<void> {
     }
     const by = finding.writtenBy.length ? `written by: ${finding.writtenBy.join(', ')}` : 'written by nothing at all'
     console.log(`    ${finding.column.padEnd(28)} ${finding.hasDefault ? '[has default] ' : ''}${by}`)
+  }
+
+  if (guesses.length > 0) {
+    console.log('\nTHE DETECTOR COULD NOT TELL (a column of this name is read somewhere that names no table)')
+    console.log('(so this may be work or may be nothing — open the file named beside it and see')
+    console.log(' which table that statement is really about, before building anything)\n')
+    lastTable = ''
+    for (const finding of guesses) {
+      if (finding.table !== lastTable) {
+        console.log(`  ${finding.table}`)
+        lastTable = finding.table
+      }
+      const where = [...(fallbackSources.get(finding.column) ?? [])].sort()
+      const by = finding.writtenBy.length ? `written by: ${finding.writtenBy.join(', ')}` : 'written by nothing at all'
+      console.log(`    ${finding.column.padEnd(28)} ${finding.hasDefault ? '[has default] ' : ''}${by}`)
+      // Named, not counted. A count of guesses is a reading nobody can act on.
+      console.log(`      seen in ${where.slice(0, 3).join(', ') || 'a span this run could not name'}`)
+    }
   }
 
   console.log('\nNOT READ BY THE PRODUCT EITHER (dead, or waiting for its feature)\n')
