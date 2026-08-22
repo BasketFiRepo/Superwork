@@ -1,3 +1,4 @@
+import { RecordCorrespondence } from '@/components/RecordCorrespondence'
 import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
@@ -155,6 +156,10 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
             </div>
           </section>
         ) : null}
+
+        {/* A reply somebody sent from their own mail client is still correspondence on this
+            thread, and until now there was no way to say so (ADR 0076). */}
+        <RecordCorrespondence conversationId={conversation.id} />
 
         <section className="stack stack-5">
           {messages.map((message) => (

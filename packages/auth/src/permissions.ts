@@ -69,6 +69,11 @@ const MEMBER = compose(VIEWER, [
   'document:create:own', 'document:update:own',
   'knowledge:create:own', 'knowledge:update:own',
   'contact:create:org', 'note:create:org', 'note:read:org',
+  // Writing down correspondence that reached you another way (ADR 0076). A member who cannot
+  // file the email a customer sent them is a member who keeps it in their own mailbox, which is
+  // the state this whole subsystem exists to end — and it is the same act as logging a call,
+  // which they have had since the ladder was built.
+  'conversation:create:org',
   'email:draft:own',
   'approval:request:own', 'insight:update:own', 'agent_run:undo:own',
 ])

@@ -77,6 +77,7 @@ export const MIGRATIONS: readonly string[] = [
   '0063_a_default_is_not_a_control',
   '0064_what_a_workflow_run_costs',
   '0065_somewhere_the_data_may_not_go',
+  '0066_correspondence_the_product_can_record',
 ]
 
 /** The id half of a migration's name: `0054_correspondence…` → `0054`. */

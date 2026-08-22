@@ -4,6 +4,7 @@ import { inboxCounts, listConversations, listSavedViews } from '@superwork/core'
 import { SavedViews } from '@/components/SavedViews'
 import { InboxQueue } from '@/components/InboxQueue'
 import { TriageButton } from '@/components/TriageButton'
+import { RecordCorrespondence } from '@/components/RecordCorrespondence'
 
 export const dynamic = 'force-dynamic'
 
@@ -21,10 +22,16 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
   const params = await searchParams
   const view = (params.view ?? 'queue') as (typeof VIEWS)[number]['id']
 
-  const { conversations, counts, views } = await withActor(session, async (ctx, actor) => ({
+  const { conversations, counts, views, companies } = await withActor(session, async (ctx, actor) => ({
     conversations: await listConversations(ctx, actor, { view, limit: 100 }),
     counts: await inboxCounts(ctx, actor),
     views: await listSavedViews(ctx, actor, 'inbox'),
+    // For filing a thread against an account by hand. The repository falls back to the domain
+    // rule when nobody chooses, so this is a correction rather than a requirement.
+    companies: await ctx.sql<{ id: string; name: string }[]>`
+      SELECT id, name FROM companies
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      ORDER BY name`,
   }))
 
   const active = views.find((saved) => saved.query.view === view) ?? null
@@ -42,7 +49,11 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
             {counts.untriaged > 0 ? `${counts.untriaged} have not been classified yet.` : 'Everything here is classified.'}
           </p>
         </div>
-        <TriageButton untriaged={counts.untriaged} />
+        <div className="row-tight">
+          {/* Every thread in this product was put here by the seed until now (ADR 0076). */}
+          <RecordCorrespondence companies={companies} />
+          <TriageButton untriaged={counts.untriaged} />
+        </div>
       </header>
 
       <SavedViews
