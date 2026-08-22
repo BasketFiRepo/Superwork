@@ -53,6 +53,10 @@ export const STEP_UP_ACTIONS = {
   // read the correspondence in it, and cascades to every message already sent. Raising one only
   // narrows, so it never asks.
   'conversation.declassify': 'widening who can read a thread of correspondence',
+  // Adding a region back widens where a company's data may be kept, and undoes a promise it made
+  // about itself. Narrowing never asks: making a stronger promise is the direction that should be
+  // easy (ADR 0074).
+  'settings.widen_data_regions': 'widening where this company’s data may be kept',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

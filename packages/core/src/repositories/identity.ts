@@ -4,6 +4,7 @@ import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import type { DirectoryUser } from '@superwork/integrations'
 import { PermissionError, ValidationError } from '../errors.js'
+import { assertSteppedUp } from '../step-up.js'
 import { writeAudit } from '../audit.js'
 
 /**
@@ -278,14 +279,131 @@ export const REGIONS = [
   { id: 'us', label: 'United States', note: 'US regions.' },
 ] as const
 
-export async function residency(
+export interface Residency {
+  /** Where the data is. */
+  region: string
+  /** Where this organization has said it may go. Its own to narrow (ADR 0074). */
+  allowed: string[]
+  /** Where somebody actually provisioned a database. The ceiling, and not a setting. */
+  provisioned: string[]
+  setByName: string | null
+  setAt: Date | null
+  reason: string | null
+}
+
+export async function residency(ctx: TenantContext, actor: Actor): Promise<Residency> {
+  guard(ctx, actor, 'settings:read')
+  const [row] = await ctx.sql<
+    {
+      region: string
+      allowed: string[]
+      provisioned: string[]
+      setByName: string | null
+      setAt: Date | null
+      reason: string | null
+    }[]
+  >`
+    SELECT o.data_region AS region, o.allowed_regions AS allowed,
+           o.provisioned_regions AS provisioned, u.name AS "setByName",
+           o.allowed_regions_set_at AS "setAt", o.allowed_regions_reason AS reason
+    FROM organizations o
+    LEFT JOIN users u ON u.id = o.allowed_regions_set_by
+    WHERE o.id = ${ctx.organizationId}`
+  return {
+    region: row?.region ?? 'eu',
+    allowed: row?.allowed ?? ['eu'],
+    provisioned: row?.provisioned ?? ['eu'],
+    setByName: row?.setByName ?? null,
+    setAt: row?.setAt ?? null,
+    reason: row?.reason ?? null,
+  }
+}
+
+/**
+ * Where this organization's data may go (ADR 0074).
+ *
+ * `allowed_regions` was read by four things and written by nothing, so every organization was
+ * stuck at the column's default and the residency panel refused two of the three regions it
+ * offered — with a message naming a provisioning act nobody could perform.
+ *
+ * The repair is not a tick-box that adds a region. A settings screen cannot make a database exist
+ * in Ohio, and an organization recording that it may keep data somewhere it has none would be
+ * writing down something untrue — then `setResidency` would be free to move there. So there are
+ * two levels, the arrangement `plan_limits` and `subscriptions` already use for spend: a ceiling
+ * somebody provisioned, and beneath it a restriction the organization sets on itself.
+ *
+ * **Narrowing asks for nothing but a reason.** "Our data must never leave the EU" is a promise a
+ * company makes about itself, and a control that interrogated somebody for making a stronger
+ * promise would be the wrong way round.
+ *
+ * **Widening asks for a password**, because it widens — the direction rule, unchanged since 0044.
+ *
+ * **Widening past the ceiling is refused**, and the refusal names what would actually work rather
+ * than naming provisioning in the passive voice at somebody who cannot do it.
+ */
+export async function setAllowedRegions(
   ctx: TenantContext,
   actor: Actor,
-): Promise<{ region: string; allowed: string[] }> {
-  guard(ctx, actor, 'settings:read')
-  const [row] = await ctx.sql<{ data_region: string; allowed_regions: string[] }[]>`
-    SELECT data_region, allowed_regions FROM organizations WHERE id = ${ctx.organizationId}`
-  return { region: row?.data_region ?? 'eu', allowed: row?.allowed_regions ?? ['eu'] }
+  input: { regions: string[]; reason: string },
+): Promise<Residency> {
+  guard(ctx, actor, 'settings:update')
+  const current = await residency(ctx, actor)
+
+  const wanted = [...new Set(input.regions)].sort()
+  const known = wanted.filter((region) => !REGIONS.some((entry) => entry.id === region))
+  if (known.length > 0) {
+    throw new ValidationError(`Superwork has no region called ${known.join(', ')}.`)
+  }
+  if (wanted.length === 0) {
+    throw new ValidationError('Data has to live somewhere. Leave at least one region.')
+  }
+  if (!input.reason?.trim()) {
+    throw new ValidationError(
+      'Say why. Somebody will ask, in a room where "it has always been like that" is not an answer.',
+    )
+  }
+
+  const unprovisioned = wanted.filter((region) => !current.provisioned.includes(region))
+  if (unprovisioned.length > 0) {
+    const names = unprovisioned.map((id) => REGIONS.find((entry) => entry.id === id)?.label ?? id)
+    throw new ValidationError(
+      `Superwork holds no database for this organization in ${names.join(' or ')}, so it cannot promise to keep ` +
+        `your data there. Provisioning a region means moving data into it — ask us to do that, and this list ` +
+        `grows when it is true. You are provisioned for ${current.provisioned.join(', ')}.`,
+    )
+  }
+
+  // The database refuses this too, through `data_region_allowed`. It is caught here so the
+  // person reads a sentence rather than a constraint name.
+  if (!wanted.includes(current.region)) {
+    throw new ValidationError(
+      `Your data is in ${current.region} right now, so that is not a region you can rule out. Move it first, ` +
+        `then rule this one out.`,
+    )
+  }
+
+  const widening = wanted.filter((region) => !current.allowed.includes(region))
+  if (widening.length > 0) assertSteppedUp(actor, 'settings.widen_data_regions')
+
+  await ctx.sql`
+    UPDATE organizations
+    SET allowed_regions = ${wanted},
+        allowed_regions_set_by = ${actor.userId},
+        allowed_regions_set_at = now(),
+        allowed_regions_reason = ${input.reason.trim()}
+    WHERE id = ${ctx.organizationId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'settings.allowed_regions_changed',
+    entityType: 'organization',
+    entityId: ctx.organizationId,
+    before: { allowed: current.allowed },
+    after: { allowed: wanted, reason: input.reason.trim(), widened: widening },
+  })
+
+  return residency(ctx, actor)
 }
 
 /**
@@ -296,9 +414,15 @@ export async function setResidency(ctx: TenantContext, actor: Actor, region: str
   guard(ctx, actor, 'settings:update')
   const current = await residency(ctx, actor)
   if (!current.allowed.includes(region)) {
+    // Two refusals, because there are now two reasons and they need different answers from the
+    // reader. The old message said "provisioned" for both, which named an act nobody could
+    // perform even in the case where the answer was one click away (ADR 0074).
     throw new ValidationError(
-      `This organization is provisioned for ${current.allowed.join(', ')}. Moving to ${region} is a migration, ` +
-        `not a setting — it needs the data moved first, and Superwork will not claim otherwise.`,
+      current.provisioned.includes(region)
+        ? `This organization has ruled ${region} out of where its data may be kept. Allow it again first — that ` +
+          `asks for your password, because it widens.`
+        : `This organization is provisioned for ${current.provisioned.join(', ')}. Moving to ${region} is a ` +
+          `migration, not a setting — it needs the data moved first, and Superwork will not claim otherwise.`,
     )
   }
 

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useStepUp } from './StepUp'
 
 interface Settings {
   ssoEnabled: boolean
@@ -23,16 +24,26 @@ interface Plan {
   skippedUnverifiedDomain: string[]
 }
 
+interface Region {
+  region: string
+  allowed: string[]
+  provisioned: string[]
+  setByName: string | null
+  setAt: string | null
+  reason: string | null
+}
+
 export function IdentitySettingsForm({
   settings,
   region,
   regions,
 }: {
   settings: Settings
-  region: { region: string; allowed: string[] }
+  region: Region
   regions: { id: string; label: string; note: string }[]
 }) {
   const router = useRouter()
+  const stepUp = useStepUp()
   const [form, setForm] = useState(settings)
   const [domains, setDomains] = useState(settings.verifiedDomains.join(', '))
   const [busy, setBusy] = useState<string | null>(null)
@@ -40,6 +51,37 @@ export function IdentitySettingsForm({
   const [scimToken, setScimToken] = useState<string | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [regionEdit, setRegionEdit] = useState<{ id: string; allow: boolean } | null>(null)
+  const [regionWhy, setRegionWhy] = useState('')
+
+  /**
+   * Saying where this company's data may be kept (ADR 0074).
+   *
+   * Widening asks for a password because it widens, and the client decides that from the same
+   * fact the repository does — whether the region is being added. The repository is still the
+   * authority: this only saves the round trip of being refused.
+   */
+  async function saveRegions(next: string[], widening: boolean) {
+    setBusy('regions')
+    setError(null)
+    const send = () =>
+      fetch('/api/data-regions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ regions: next, reason: regionWhy.trim() }),
+      })
+    const response = widening ? await stepUp.run(send) : await send()
+    setBusy(null)
+    if (!response) return
+    const payload = await response.json().catch(() => ({ error: 'That could not be read.' }))
+    if (!response.ok) {
+      setError(payload.error)
+      return
+    }
+    setRegionEdit(null)
+    setRegionWhy('')
+    router.refresh()
+  }
 
   async function save() {
     setBusy('save')
@@ -233,34 +275,142 @@ export function IdentitySettingsForm({
       </section>
 
       <section className="panel" data-testid="residency">
+        {/* Asked for beside the thing it protects, not at the top of the page. */}
+        {stepUp.prompt}
+
         <div className="panel-header">
           <h2>Data residency</h2>
           <span className="chip">{region.region.toUpperCase()}</span>
         </div>
+
+        {/* `allowed_regions` was read by four things and written by nothing, so every organization
+            sat at the column's default and this panel refused two of the three regions it offered
+            — with a message naming a provisioning act nobody could perform (ADR 0074). */}
+        <p className="small muted" style={{ margin: 0, padding: '0 var(--s-5)' }} data-testid="residency-explainer">
+          Where your data <em>is</em>, and where you have said it <em>may</em> go. Ruling a region out is a
+          promise this company makes about itself and Superwork will keep it. Allowing one again asks for
+          your password, because it widens.
+        </p>
+
         <div className="panel-body stack stack-3">
           {regions.map((entry) => {
             const allowed = region.allowed.includes(entry.id)
+            const provisioned = region.provisioned.includes(entry.id)
             const current = region.region === entry.id
+            const editing = regionEdit?.id === entry.id
+            const next = regionEdit?.allow
+              ? [...region.allowed, entry.id]
+              : region.allowed.filter((id) => id !== entry.id)
             return (
-              <div className="spread" key={entry.id}>
-                <div className="stack stack-1">
-                  <strong className="small">{entry.label}</strong>
-                  <span className="small muted">{entry.note}</span>
+              <div className="stack stack-2" key={entry.id} data-testid="residency-region">
+                <div className="spread">
+                  <div className="stack stack-1">
+                    <strong className="small">{entry.label}</strong>
+                    <span className="small muted">{entry.note}</span>
+                  </div>
+                  <div className="row-tight">
+                    {current ? <span className="chip chip-positive">current</span> : null}
+                    {!provisioned ? (
+                      /* Was a `title` tooltip, which no keyboard reaches. It is also the one
+                         case a button would be a lie, so it says what would work instead. */
+                      <span className="small muted" data-testid="region-unprovisioned">
+                        No database here — ask us to provision it
+                      </span>
+                    ) : allowed ? (
+                      <>
+                        {!current ? (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => moveRegion(entry.id)}
+                            disabled={busy !== null}
+                          >
+                            Switch
+                          </button>
+                        ) : null}
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          data-testid="region-restrict"
+                          disabled={busy !== null || current}
+                          title={current ? 'Your data is here. Move it before ruling this region out.' : undefined}
+                          onClick={() => {
+                            setRegionEdit({ id: entry.id, allow: false })
+                            setRegionWhy('')
+                          }}
+                        >
+                          Rule out
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn btn-sm"
+                        data-testid="region-allow"
+                        disabled={busy !== null}
+                        onClick={() => {
+                          setRegionEdit({ id: entry.id, allow: true })
+                          setRegionWhy('')
+                        }}
+                      >
+                        Allow
+                      </button>
+                    )}
+                  </div>
                 </div>
-                {current ? (
-                  <span className="chip chip-positive">current</span>
-                ) : allowed ? (
-                  <button className="btn btn-sm" onClick={() => moveRegion(entry.id)} disabled={busy !== null}>
-                    Switch
-                  </button>
-                ) : (
-                  <span className="chip" title="Moving region means moving the data. It is a migration, not a setting.">
-                    not provisioned
-                  </span>
-                )}
+
+                {editing ? (
+                  <div className="stack stack-2" data-testid="region-editor">
+                    <label className="stack stack-2">
+                      <span className="micro">
+                        {regionEdit!.allow
+                          ? `Why ${entry.label} may hold this company’s data`
+                          : `Why this company’s data may not be kept in ${entry.label}`}
+                      </span>
+                      <input
+                        className="input"
+                        id="region-reason"
+                        value={regionWhy}
+                        onChange={(event) => setRegionWhy(event.target.value)}
+                        placeholder={
+                          regionEdit!.allow
+                            ? 'Opening a Manchester office; our UK entity signs its own contracts.'
+                            : 'Customer contracts commit us to EU-only processing.'
+                        }
+                      />
+                    </label>
+                    <div className="row-tight">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        data-testid="region-confirm"
+                        disabled={busy !== null || regionWhy.trim().length < 4}
+                        onClick={() => saveRegions(next, regionEdit!.allow)}
+                      >
+                        {busy === 'regions' ? 'Saving…' : regionEdit!.allow ? 'Allow it' : 'Rule it out'}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        data-testid="region-cancel"
+                        disabled={busy !== null}
+                        onClick={() => setRegionEdit(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )
           })}
+
+          <p className="small muted" style={{ margin: 0 }} data-testid="residency-attribution">
+            {region.setByName && region.setAt ? (
+              <>
+                Set by {region.setByName} on {region.setAt.slice(0, 10)} — &ldquo;{region.reason}&rdquo;
+              </>
+            ) : (
+              /* Not blank. "Nobody has narrowed this" is the fact, and for every organization
+                 that existed before this was buildable it is the true one. */
+              <>Nobody has ruled a region out. Your data may be kept anywhere you are provisioned for.</>
+            )}
+          </p>
         </div>
       </section>
     </div>

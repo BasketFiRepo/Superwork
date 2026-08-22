@@ -339,6 +339,16 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
     ) RETURNING id`
   const organizationId = org!.id
 
+  // Northwind is a British company with EU customers, and somebody provisioned it a database in
+  // each place. `provisioned_regions` is written here rather than through a screen because
+  // provisioning is infrastructure: a settings page cannot make a database exist (ADR 0074).
+  //
+  // Its `allowed_regions` stays at the column's default — the EU alone — so the demo opens on the
+  // interesting state: a region it *could* use and has not said it may, which is one click and a
+  // password away, beside a region nobody has provisioned at all, which is neither.
+  await sql`
+    UPDATE organizations SET provisioned_regions = ARRAY['eu', 'uk'] WHERE id = ${organizationId}`
+
   // ---- Departments ---------------------------------------------------------
   const departmentIds = new Map<string, string>()
   for (const name of ['Executive', 'Operations', 'Finance', 'Commercial', 'Quality']) {
