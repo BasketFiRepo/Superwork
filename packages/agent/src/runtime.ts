@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { withTenant, type TenantContext } from '@superwork/db'
-import { env } from '@superwork/config'
+import { env, type RunBudget } from '@superwork/config'
 import { asAgent, can, killSwitchEngaged, loadActor, type Actor } from '@superwork/auth'
 import {
   BudgetError,
@@ -93,10 +93,19 @@ export async function startRun(session: RunSession, input: StartRunInput): Promi
     const spend = await checkSpendLimits(ctx, org?.plan_tier ?? 'free')
     if (!spend.allow) throw new BudgetError(spend.reason)
 
-    const budget = newBudget()
+    // The agent is resolved before the budget rather than inside `insertRun`, because what this
+    // run may spend is its own agent's business (ADR 0077). `agents.budget` has existed since
+    // migration 0006 and nothing consulted it, so every agent in every organization ran on the
+    // product's constant and the column was read into the persona and dropped.
+    //
+    // An empty budget is not "no limit": it means the product's own, which is what every agent
+    // had all along. The database refuses anything above it, so what arrives here can only ever
+    // narrow.
+    const agentId = await resolveAgentId(ctx, input.agentKey ?? 'orchestrator')
+    const budget = newBudget(agentId ? await agentBudget(ctx, agentId) : {})
     const id = await insertRun(ctx, {
       principalUserId: actor.userId,
-      agentId: await resolveAgentId(ctx, input.agentKey ?? 'orchestrator'),
+      agentId,
       mode: input.mode,
       request: input.request,
       uiContext: input.uiContext ?? {},
@@ -1323,6 +1332,18 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
     autopilotDailyActionCap: 10,
     autopilotWeeklyCostCapCents: 500,
   }
+}
+
+/**
+ * What this agent has been tightened to, or nothing at all.
+ *
+ * Read from the row rather than passed in, so a budget set while a run is being started still
+ * governs the next one, and so no caller can hand the runtime a budget of its own.
+ */
+async function agentBudget(ctx: TenantContext, agentId: string): Promise<Partial<RunBudget>> {
+  const [row] = await ctx.sql<{ budget: Partial<RunBudget> | null }[]>`
+    SELECT budget FROM agents WHERE organization_id = ${ctx.organizationId} AND id = ${agentId}`
+  return row?.budget ?? {}
 }
 
 async function resolveAgentId(ctx: TenantContext, key: string): Promise<string | null> {

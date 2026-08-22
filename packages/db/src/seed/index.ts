@@ -821,6 +821,10 @@ async function seedAgents(
       // Reviewed once and then forgotten, which is what the interval exists to surface.
       recertifiedDaysAgo: 200,
       recertificationNote: 'Read-only, and nothing about it has changed since it was built.',
+      // The one agent somebody has tightened, so the demo opens on both states (ADR 0077).
+      // Modest on purpose: it only ever reads, so a long run means it is stuck rather than busy.
+      budget: { maxSteps: 8, maxToolCalls: 12, maxCostCents: 10 },
+      budgetReason: 'It only ever reads, so a long run means it is stuck rather than working.',
     },
   ]
 
@@ -830,19 +834,23 @@ async function seedAgents(
                           mode, status, tool_grants, max_sensitivity, budget, escalation_user_id,
                           is_subagent, published_by, published_at,
                           recertified_at, recertified_by, recertified_version, recertification_note,
+                          budget_set_by, budget_set_at, budget_reason,
                           is_demo, created_by)
       VALUES (${ctx.organizationId}, ${agent.key}, ${agent.name}, ${agent.purpose},
               ${userIds.get(agent.owner)!}, ${departmentIds.get('Operations')!},
               ${agent.mode}::sw_agent_mode, ${agent.status}::sw_agent_status,
               ${agent.key === 'researcher' ? ['search_knowledge@v1', 'query_aggregate@v1', 'read_document@v1'] : ['*']},
               'confidential',
-              ${ctx.sql.json(asJson({ runsPerDay: 200, tokensPerDay: 2_000_000, spendPerMonthCents: 50_000, maxActionsPerDay: 100 }))},
+              ${ctx.sql.json(asJson(('budget' in agent && agent.budget) || {}))},
               ${userIds.get('david')!}, ${agent.key !== 'orchestrator'},
               ${userIds.get('maya')!}, ${ago(20)},
               ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? ago(agent.recertifiedDaysAgo) : null},
               ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? userIds.get('maya')! : null},
               ${'recertifiedDaysAgo' in agent && agent.recertifiedDaysAgo ? 0 : null},
               ${'recertificationNote' in agent ? (agent.recertificationNote ?? null) : null},
+              ${'budgetReason' in agent && agent.budgetReason ? userIds.get('maya')! : null},
+              ${'budgetReason' in agent && agent.budgetReason ? ago(6) : null},
+              ${'budgetReason' in agent ? (agent.budgetReason ?? null) : null},
               true, ${ctx.userId})`
   }
 
