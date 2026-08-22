@@ -130,9 +130,21 @@ async function dispatchEmail(
   // Somebody stopped it, or another worker has it. Either way this message is done.
   if (!claimed) return { deferUntil: null }
 
-  const [draft] = await ctx.sql<{ subject: string; body_text: string; to_addresses: string[] }[]>`
-    SELECT subject, body_text, to_addresses FROM email_drafts
-    WHERE organization_id = ${ctx.organizationId} AND id = ${payload.draftId}`
+  const [draft] = await ctx.sql<
+    {
+      subject: string
+      body_text: string
+      to_addresses: string[]
+      conversation_id: string | null
+      sender_address: string | null
+      sender_name: string | null
+    }[]
+  >`
+    SELECT d.subject, d.body_text, d.to_addresses, d.conversation_id,
+           u.email AS sender_address, u.name AS sender_name
+    FROM email_drafts d
+    LEFT JOIN users u ON u.id = d.created_by
+    WHERE d.organization_id = ${ctx.organizationId} AND d.id = ${payload.draftId}`
   if (!draft) throw new Error('The draft no longer exists.')
 
   const receipt = await emailProvider().send({
@@ -145,6 +157,26 @@ async function dispatchEmail(
   await ctx.sql`
     UPDATE email_sends SET sent_at = ${receipt.sentAt}, provider_message_id = ${receipt.providerMessageId}
     WHERE organization_id = ${ctx.organizationId} AND id = ${send.id}`
+
+  // The reply goes into the thread it answers (ADR 0076).
+  //
+  // Until now a send set `sent_at`, wrote an activity, and left the thread showing the
+  // customer's message as the last one — so `last_direction` stayed `inbound`, and the queue's
+  // SLA test went on counting a reply we had already sent as one we owed. The inbox chased
+  // threads it had itself answered.
+  //
+  // Written here rather than where the send is queued, because this is the moment it actually
+  // left: a recalled message never reaches this line, and never appears in the record as
+  // correspondence that happened.
+  if (draft.conversation_id) {
+    await ctx.sql`
+      INSERT INTO messages (organization_id, conversation_id, direction, from_address, from_name,
+                            to_addresses, sent_at, body_text, trust_level, created_by)
+      VALUES (${ctx.organizationId}, ${draft.conversation_id}, 'outbound'::sw_message_direction,
+              ${draft.sender_address ?? 'superwork@localhost'}, ${draft.sender_name},
+              ${draft.to_addresses}, ${receipt.sentAt},
+              ${draft.body_text}, 'org_data', ${ctx.userId})`
+  }
 
   await writeActivity(ctx, {
     actorType: 'system',

@@ -619,3 +619,180 @@ export async function inboxCounts(ctx: TenantContext, actor: Actor): Promise<Inb
       AND conv.sensitivity <= ${readCeiling(actor)}::sw_sensitivity`
   return row ?? { queue: 0, pastSla: 0, needsReply: 0, waiting: 0, snoozed: 0, untriaged: 0 }
 }
+
+// ---------------------------------------------------------------------------
+// Correspondence the product can record (ADR 0076)
+// ---------------------------------------------------------------------------
+
+/**
+ * The channels a thread can be. One, today.
+ *
+ * Deliberately not a CHECK on the column. A constraint listing a single value would be read by
+ * the coverage detector as a pin — and a pin inverts it, so a *product* write to the column
+ * becomes a red build. `channel` is written from here, so the vocabulary lives here until there
+ * is a second value to put in it. A call or a meeting is not a thread: it is an interaction, and
+ * `logInteraction` is where it goes.
+ */
+export const CONVERSATION_CHANNELS = ['email'] as const
+export type ConversationChannel = (typeof CONVERSATION_CHANNELS)[number]
+
+export interface RecordMessageInput {
+  /** Append to this thread, or omit to start one. */
+  conversationId?: string
+  /** Starting a thread needs these; appending ignores them. */
+  subject?: string
+  companyId?: string | null
+  channel?: ConversationChannel
+  direction: 'inbound' | 'outbound' | 'internal'
+  fromAddress: string
+  fromName?: string | null
+  toAddresses?: string[]
+  sentAt?: Date
+  body: string
+}
+
+/** The address the organization corresponds from when nobody says otherwise. */
+const ADDRESS = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/**
+ * Files a piece of correspondence that reached somebody another way (§12.3, ADR 0076).
+ *
+ * Superwork has no mailbox — build rule three is that the whole product runs with zero external
+ * credentials, so the answer to "the inbox is a fixture" is not an IMAP client. It is a way to
+ * record what actually happened: the email a customer sent to somebody's own address, the reply
+ * they wrote from their phone, the message that arrived while the integration did not exist.
+ *
+ * **Trust is derived, never declared.** `direction` decides it, and the caller cannot pass it.
+ * Anything that came from outside is `untrusted_external`, which is what makes `listMessages`
+ * run the injection scan over it. A field the caller could set would be a way to paste an
+ * instruction into the product and have it marked safe, and no interface should be able to ask
+ * for that (§5.9).
+ *
+ * **The thread's clock is not set here.** `last_message_at` and `last_direction` are the
+ * database's, from the messages themselves (migration 0066), so this function cannot get them
+ * wrong and neither can the worker.
+ */
+export async function recordMessage(
+  ctx: TenantContext,
+  actor: Actor,
+  input: RecordMessageInput,
+): Promise<{ conversationId: string; messageId: string }> {
+  const decision = can(actor, input.conversationId ? 'conversation:update' : 'conversation:create', {
+    type: 'conversation',
+    organizationId: ctx.organizationId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const body = input.body.trim()
+  if (body.length < 2) {
+    throw new ValidationError('Paste what was actually said. An empty message records nothing.')
+  }
+  if (body.length > 100_000) {
+    throw new ValidationError('That is longer than Superwork will keep as one message.')
+  }
+
+  const fromAddress = input.fromAddress.trim().toLowerCase()
+  if (!ADDRESS.test(fromAddress)) {
+    throw new ValidationError(`"${input.fromAddress}" is not an address this could have come from.`)
+  }
+  const toAddresses = (input.toAddresses ?? []).map((address) => address.trim().toLowerCase()).filter(Boolean)
+  const badTo = toAddresses.find((address) => !ADDRESS.test(address))
+  if (badTo) throw new ValidationError(`"${badTo}" is not an address this could have gone to.`)
+
+  // The same rule `logInteraction` keeps, and not a CHECK for the same reason: a constraint
+  // cannot call `now()`, and a row that was legitimate when written must not become invalid as
+  // the clock passes it.
+  const sentAt = input.sentAt ?? new Date()
+  if (sentAt.getTime() > Date.now() + 60_000) {
+    throw new ValidationError('That is in the future. Record it after it is sent.')
+  }
+
+  // Derived, never taken from the caller. This is the whole security posture of the inbox in
+  // one line: content from outside the organization is adversarial until something says
+  // otherwise, and nothing here is allowed to say otherwise.
+  const trustLevel = input.direction === 'inbound' ? 'untrusted_external' : 'org_data'
+
+  let conversationId = input.conversationId ?? null
+  let startedThread = false
+
+  if (conversationId) {
+    // Through the reader, so a thread above this person's ceiling answers as though it is not
+    // here rather than accepting a message onto it (§3.2).
+    await getConversation(ctx, actor, conversationId)
+  } else {
+    const subject = (input.subject ?? '').trim()
+    if (subject.length < 2) throw new ValidationError('Give the thread the subject it arrived with.')
+    if (subject.length > 500) throw new ValidationError('That is longer than a subject line.')
+
+    const channel = input.channel ?? 'email'
+    if (!CONVERSATION_CHANNELS.includes(channel)) {
+      throw new ValidationError(`Superwork records correspondence by ${CONVERSATION_CHANNELS.join(' or ')}.`)
+    }
+
+    // Named explicitly rather than inferred from the body: a company the message merely
+    // mentions is not the account it is about, and retrieved content may never decide where
+    // something is filed.
+    let companyId = input.companyId ?? null
+    if (companyId) {
+      const [company] = await ctx.sql<{ id: string }[]>`
+        SELECT id FROM companies
+        WHERE organization_id = ${ctx.organizationId} AND id = ${companyId} AND deleted_at IS NULL`
+      if (!company) throw new NotFoundError()
+    } else {
+      // Falling back to the domain rule the CRM already uses for inbound mail. It associates to
+      // a company that exists; it never creates one.
+      const outside = input.direction === 'inbound' ? fromAddress : toAddresses[0]
+      const domain = outside?.split('@')[1]
+      if (domain) {
+        const [match] = await ctx.sql<{ id: string }[]>`
+          SELECT id FROM companies
+          WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+            AND ${domain} = ANY(domains)
+          LIMIT 1`
+        companyId = match?.id ?? null
+      }
+    }
+
+    const [conversation] = await ctx.sql<{ id: string }[]>`
+      INSERT INTO conversations (organization_id, channel, subject, company_id, owner_id,
+                                 status, created_by)
+      VALUES (${ctx.organizationId}, ${channel}, ${subject}, ${companyId}, ${actor.userId},
+              'open', ${ctx.userId})
+      RETURNING id`
+    conversationId = conversation!.id
+    startedThread = true
+  }
+
+  const [message] = await ctx.sql<{ id: string }[]>`
+    INSERT INTO messages (organization_id, conversation_id, direction, from_address, from_name,
+                          to_addresses, sent_at, body_text, trust_level, created_by)
+    VALUES (${ctx.organizationId}, ${conversationId}, ${input.direction}::sw_message_direction,
+            ${fromAddress}, ${input.fromName?.trim() || null}, ${toAddresses}, ${sentAt},
+            ${body}, ${trustLevel}, ${ctx.userId})
+    RETURNING id`
+
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'recorded',
+    entityType: 'conversation',
+    entityId: conversationId!,
+    entityLabel: input.subject ?? 'a thread',
+    summary:
+      `Recorded ${input.direction} correspondence from ${fromAddress}` +
+      (startedThread ? ', opening the thread.' : ' onto an existing thread.'),
+  })
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'conversation.message_recorded',
+    entityType: 'conversation',
+    entityId: conversationId!,
+    after: { direction: input.direction, from: fromAddress, sentAt: sentAt.toISOString(), trustLevel },
+  })
+
+  return { conversationId: conversationId!, messageId: message!.id }
+}

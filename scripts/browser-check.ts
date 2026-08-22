@@ -155,6 +155,65 @@ try {
     `${afterArchive} → ${await page.locator('[data-testid="inbox-row"]').count()}`,
   )
 
+  // ---- Correspondence the product can record (ADR 0076) -------------------
+  // Every thread in this demo was put here by `seedThreads`, and the only INSERT INTO
+  // conversations or messages in the repository was in the seed: fourteen columns read by the
+  // product and written by nothing in it. Superwork has no mailbox on purpose, so the repair is
+  // a way to write down what actually arrived.
+  const recordedSubject = 'Peak season capacity — revised volumes'
+  const alreadyRecorded = (
+    await page.locator('[data-testid="inbox-row"]', { hasText: recordedSubject }).count()
+  ) > 0
+
+  if (!alreadyRecorded) {
+    await page.locator('[data-testid="record-open"]').first().click()
+    await page.waitForSelector('[data-testid="record-editor"]', { timeout: 15_000 })
+    ok('Nothing is recorded until there is something to record',
+      await page.locator('[data-testid="record-confirm"]').isDisabled())
+    ok('And the screen says what happens to anything that came from outside',
+      /treated as adversarial/i.test(await page.locator('[data-testid="record-explainer"]').innerText()))
+
+    await page.fill('#record-subject', recordedSubject)
+    await page.fill('#record-from', 'ingrid@haldenfoods.example')
+    await page.fill('#record-from-name', 'Ingrid Solberg')
+    await page.fill('#record-to', 'ops@northwind.example')
+    await page.fill('#record-body', 'We are revising the Gothenburg volumes upward for weeks 44 to 48.')
+    await page.locator('[data-testid="record-confirm"]').click()
+    // Starting a thread opens it, which is where the evidence is. Waited for by its own
+    // heading rather than a testid: the thread page carries none.
+    await page.waitForFunction(
+      (subject) => (document.querySelector('h1')?.textContent ?? '').includes(subject as string),
+      recordedSubject,
+      { timeout: 20_000 },
+    )
+    const recordedText = await page.locator('main').innerText()
+    ok('An email that arrived another way can be written down at last',
+      /Gothenburg volumes/i.test(recordedText))
+    ok('And it files itself against the account the address belongs to',
+      /Halden Foods/i.test(recordedText), recordedText.replace(/\s+/g, ' ').slice(0, 70))
+  } else {
+    // A second run against a demo the first one changed: the thread is already here, which is
+    // the same statement about the product from the other side.
+    ok('An email that arrived another way is in the record', true, 'recorded by an earlier run')
+  }
+
+  // Put the demo back, so the queue does not grow by one thread every run.
+  await page.goto(`${BASE}/inbox`)
+  await page.waitForSelector('[data-testid="inbox-row"]', { timeout: 15_000 })
+  const recordedRow = page.locator('[data-testid="inbox-row"]', { hasText: recordedSubject }).first()
+  if ((await recordedRow.count()) > 0) {
+    await recordedRow.click()
+    await page.keyboard.press('e')
+    await page.waitForTimeout(800)
+  }
+  await page.goto(`${BASE}/inbox`)
+  await page.waitForSelector('[data-testid="inbox-row"]', { timeout: 15_000 })
+  // Stated as the thread's absence rather than as a count. Comparing counts read the queue
+  // *before* the walk knew whether an earlier run had already added the thread, so on a rerun
+  // the archive took it one below the number it was checked against.
+  ok('And the check puts the queue back where it found it',
+    (await page.locator('[data-testid="inbox-row"]', { hasText: recordedSubject }).count()) === 0)
+
   // ---- A follow-up on a thread --------------------------------------------
   // `create_follow_up@v1` promised one "resurfaces if no reply arrives" and nothing read
   // the table, so every follow-up the agent ever recorded was still open and invisible.
