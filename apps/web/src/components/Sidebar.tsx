@@ -94,6 +94,7 @@ export function Sidebar({
         { href: '/settings/api', label: 'API and MCP' },
         { href: '/settings/members', label: 'Members' },
         { href: '/settings/identity', label: 'Identity' },
+        { href: '/settings/audit', label: 'Audit trail' },
         { href: '/settings/compliance', label: 'Jurisdiction' },
         { href: '/settings/retention', label: 'Retention and erasure' },
         { href: '/settings/holds', label: 'Legal holds' },

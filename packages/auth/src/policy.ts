@@ -145,6 +145,31 @@ function splitAction(action: string, resourceType: string): [string, string] {
   return [resourceType, action]
 }
 
+/**
+ * Resource types a wildcard grant does not reach (ADR 0079).
+ *
+ * A manager's ladder carries `*:read:org` — "everything anybody here may read, across the
+ * organization" — which is the right default for tasks, documents and companies. Applied to the
+ * audit trail it silently means something else: every manager could read the whole
+ * organization's record of who did what, including "show me everything this account did", for
+ * people they do not manage.
+ *
+ * That is not an administration screen, it is the individual monitoring §29.5 forbids, arriving
+ * through a wildcard nobody thought about the day the trail became readable. `audit:read:org`
+ * sitting in the administrator's list *looked* like the control; it never was one, because the
+ * rung below already matched.
+ *
+ * So a grant must **name** these. Both the owner and the administrator do. An exception granted
+ * under ADR 0055 still works, because it names the resource type too — which is the right shape
+ * for this: a manager investigating a specific incident should be given the trail deliberately,
+ * by somebody, on a record, rather than have held it all along.
+ *
+ * Deliberately one entry. This is not a general "sensitive things" list — every addition takes a
+ * capability away from a role that has it today, and that is a decision per resource type, not a
+ * category anybody can extend by intuition.
+ */
+export const NEVER_BY_WILDCARD = new Set(['audit'])
+
 function checkHumanPermissions(actor: Actor, resourceType: string, verb: string, resource: Resource): Decision {
   const fromRole = ROLE_PERMISSIONS[actor.role]
   const grants = [...fromRole, ...actor.extraPermissions]
@@ -160,6 +185,7 @@ function checkHumanPermissions(actor: Actor, resourceType: string, verb: string,
     } catch {
       continue
     }
+    if (grant.resource === '*' && NEVER_BY_WILDCARD.has(resourceType)) continue
     if (grant.resource !== '*' && grant.resource !== resourceType) continue
     if (grant.action !== '*' && grant.action !== verb) continue
     if (!scopeSatisfied(grant.scope, actor, resource)) continue
@@ -301,6 +327,9 @@ function requiredRoleFor(resourceType: string, verb: string): string {
     if (
       grants.some((raw) => {
         const g = parsePermission(raw)
+        // The same wildcard rule the resolver applies, for the same reason ADR 0059 gives: a
+        // refusal that names a rung the reader is already standing on is worse than none.
+        if (g.resource === '*' && NEVER_BY_WILDCARD.has(resourceType)) return false
         return (g.resource === '*' || g.resource === resourceType) && (g.action === '*' || g.action === verb)
       })
     ) {

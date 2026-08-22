@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { can, parsePermission, ROLE_LADDER, ROLE_PERMISSIONS, type Actor } from '@superwork/auth'
+import {
+  can,
+  NEVER_BY_WILDCARD,
+  parsePermission,
+  ROLE_LADDER,
+  ROLE_PERMISSIONS,
+  type Actor,
+} from '@superwork/auth'
 import type { Role } from '@superwork/db'
 
 /**
@@ -113,8 +120,16 @@ describe('the role ladder', () => {
       expect(above.slice(0, below.length)).toEqual(below)
     }
     // The owner is the one rung stated as a wildcard rather than a list, so it is checked by
-    // behaviour above rather than by prefix here.
-    expect(ROLE_PERMISSIONS.owner).toEqual(['*:*:org'])
+    // behaviour above rather than by prefix here — plus the resource types a wildcard does not
+    // reach (ADR 0079), which it has to name like everybody else.
+    //
+    // Derived from the set rather than written out, because the failure this guards against is
+    // somebody carving out a second resource type and taking it away from the owner without
+    // noticing. The behaviour ladder above would catch it; this says why in one line.
+    expect(ROLE_PERMISSIONS.owner).toEqual([
+      '*:*:org',
+      ...[...NEVER_BY_WILDCARD].map((resource) => `${resource}:read:org`),
+    ])
   })
 
   it('says each permission once', () => {

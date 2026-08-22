@@ -1,5 +1,6 @@
 import { asJson, type ActorType, type TenantContext } from '@superwork/db'
-import { SENSITIVE_FIELDS } from '@superwork/auth'
+import { can, SENSITIVE_FIELDS, type Actor } from '@superwork/auth'
+import { PermissionError } from './errors.js'
 
 /**
  * `activities` is the human-facing timeline; `audit_logs` is the forensic record.
@@ -89,4 +90,110 @@ function buildDiff(
     }
   }
   return { diff: changed, redacted }
+}
+
+// ---------------------------------------------------------------------------
+// Reading it (ADR 0079)
+// ---------------------------------------------------------------------------
+
+/**
+ * One line of the forensic record.
+ *
+ * `diff` is already redacted — `buildDiff` replaces a sensitive field's value with `[redacted]`
+ * at write time and names the field in `redactedFields`, so the trail says a password changed
+ * without ever having held one. The reader surfaces the list rather than dropping it: "three
+ * fields not recorded" is a fact an auditor needs, and silence is not.
+ */
+export interface AuditEntry {
+  id: string
+  occurredAt: Date
+  actorType: ActorType
+  /** Who is answerable. An agent's run is attributed to the person it ran for. */
+  actorName: string | null
+  agentName: string | null
+  action: string
+  entityType: string
+  entityId: string | null
+  diff: Record<string, { from: unknown; to: unknown }>
+  redactedFields: string[]
+  /** Whether a password was re-entered within the five minutes before this (§4.1). */
+  steppedUp: boolean
+  agentRunId: string | null
+}
+
+export interface AuditFilter {
+  entityType?: string
+  entityId?: string
+  action?: string
+  /** One person's actions. The investigative axis, and the one §29.5 constrains — see below. */
+  principalUserId?: string
+  since?: Date
+  limit?: number
+}
+
+const SELECT_AUDIT = (ctx: TenantContext) => ctx.sql`
+  SELECT a.id, a.occurred_at AS "occurredAt", a.actor_type AS "actorType",
+         u.name AS "actorName", ag.name AS "agentName",
+         a.action, a.entity_type AS "entityType", a.entity_id AS "entityId",
+         a.diff, a.redacted_fields AS "redactedFields",
+         (a.stepped_up_at IS NOT NULL) AS "steppedUp",
+         a.agent_run_id AS "agentRunId"
+  FROM audit_logs a
+  LEFT JOIN users u ON u.id = a.principal_user_id
+  LEFT JOIN agents ag ON ag.id = a.actor_id AND a.actor_type = 'agent'`
+
+/**
+ * The forensic record, for somebody entitled to read it (§3.6, ADR 0079).
+ *
+ * `writeAudit` has been called from all over this product since Phase 0 and nothing has ever
+ * read the table. `audit:read:org` has been in the administrator's grant list just as long. An
+ * audit trail nobody can look at is not an audit trail; it is a table that grows.
+ *
+ * **It returns rows, and never a total.** Grouping these by person is one query away from a
+ * productivity measure, which §29.5 forbids by construction rather than by policy — so there is
+ * no aggregate keyed on the principal anywhere in this file, and
+ * `tests/security/audit-read.test.ts` reads the source and requires none. Filtering to one
+ * person is offered, because an account thought to be compromised cannot be investigated
+ * without it; counting what they did is a different question, and nobody has written it.
+ */
+export async function readAuditLog(
+  ctx: TenantContext,
+  actor: Actor,
+  filter: AuditFilter = {},
+): Promise<AuditEntry[]> {
+  const decision = can(actor, 'audit:read', { type: 'audit', organizationId: ctx.organizationId })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const sql = ctx.sql
+  return sql<AuditEntry[]>`
+    ${SELECT_AUDIT(ctx)}
+    WHERE a.organization_id = ${ctx.organizationId}
+      ${filter.entityType ? sql`AND a.entity_type = ${filter.entityType}` : sql``}
+      ${filter.entityId ? sql`AND a.entity_id = ${filter.entityId}` : sql``}
+      ${filter.action ? sql`AND a.action = ${filter.action}` : sql``}
+      ${filter.principalUserId ? sql`AND a.principal_user_id = ${filter.principalUserId}` : sql``}
+      ${filter.since ? sql`AND a.occurred_at >= ${filter.since}` : sql``}
+    ORDER BY a.occurred_at DESC
+    LIMIT ${Math.min(filter.limit ?? 100, 500)}`
+}
+
+/**
+ * Your own trail, on your own record (§29.3).
+ *
+ * The rule is that nothing about a person reaches their manager that the person has not already
+ * seen. An administrator can now read what you did, so this is what makes that true rather than
+ * a promise: the same rows, from the same table, on the screen that already answers "what is
+ * known about me".
+ *
+ * Self only, like `personalRecord` — the parameter is the caller's own id and there is no
+ * supported way to ask for somebody else's. Reading your own trail needs no permission, because
+ * `audit:read` is the right to read *everybody's*, and requiring it here would mean a member
+ * could never see what the product had recorded about them.
+ */
+export async function myAuditTrail(ctx: TenantContext, actor: Actor, limit = 50): Promise<AuditEntry[]> {
+  return ctx.sql<AuditEntry[]>`
+    ${SELECT_AUDIT(ctx)}
+    WHERE a.organization_id = ${ctx.organizationId} AND a.principal_user_id = ${actor.userId}
+    ORDER BY a.occurred_at DESC
+    LIMIT ${Math.min(limit, 200)}`
 }

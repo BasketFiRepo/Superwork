@@ -2997,6 +2997,53 @@ try {
     .count()
   ok('The check puts the demo back', cleaned === 0)
 
+  // ---- An audit log somebody can read (ADR 0079) ---------------------------
+  // Deliberately last, and deliberately after the delete above: the strongest thing this beat
+  // can say is not "the screen renders rows" but "the thing I just did is on the record".
+  await page.goto(`${BASE}/settings/audit`)
+  await page.waitForSelector('[data-testid="audit-log"]', { timeout: 15_000 })
+  const auditText = await page.locator('[data-testid="audit-log"]').innerText()
+  ok('An administrator can read the trail', (await page.locator('[data-testid="audit-entry"]').count()) > 0)
+  ok('And the delete this check just made is on it', /document\.deleted/.test(auditText))
+  // Not asserted here: the redaction chip. Nothing in the demo changes a sensitive field, so a
+  // count on it would pass whatever the page did — which is worse than no check at all. Redaction
+  // is proven in `tests/security/audit-read.test.ts` against a row written for the purpose.
+  ok('And every line names who is answerable for it',
+    !/^\s*$/.test(auditText) && /confirmed|—/.test(auditText))
+  ok('And the screen says what it does not keep',
+    /how much they did is a measure Superwork does not keep/i.test(auditText))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/audit-log.png`, fullPage: true })
+
+  // §29.3 — the person sees the same rows about themselves, without holding audit:read.
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="my-trail"]', { timeout: 15_000 })
+  const mineCount = await page.locator('[data-testid="my-trail-row"]').count()
+  ok('And a person can read their own trail on their own record', mineCount > 0, `${mineCount} rows`)
+
+  // A manager is not an administrator. The refusal is the feature.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'sarah@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(`${BASE}/settings/audit`)
+  await page.waitForSelector('[data-testid="audit-denied"], [data-testid="audit-log"]', { timeout: 15_000 })
+  const managerDenied = await page.locator('[data-testid="audit-denied"]').count()
+  ok('And a manager is refused, however much of the trail is about her team', managerDenied === 1)
+  const managerRefusal = await page.locator('[data-testid="audit-denied"]').innerText().catch(() => '')
+  // ADR 0059's rule, on the rung that nearly kept this: the refusal must name a level above the
+  // one she is on. `*:read:org` used to match `audit:read`, so she was never refused at all.
+  ok('And the refusal names a rung above her own, not the one she holds',
+    /Admin access/i.test(managerRefusal), managerRefusal.slice(0, 70))
+  // Her own record still opens — the section is there whether or not the demo has recorded
+  // anything she did. Not asserting a row count: Sarah has no audit lines of her own in the
+  // seed, so a `> 0` here would be asserting the fixture rather than the split.
+  await page.goto(`${BASE}/me`)
+  await page.waitForSelector('[data-testid="my-trail"]', { timeout: 15_000 })
+  ok('While her own record still answers, without her holding audit:read',
+    (await page.locator('[data-testid="my-trail-explainer"]').count()) === 1)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/audit-denied.png`, fullPage: true })
+
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
   // Named, not hidden: if this number starts climbing, or names a screen it never named before,
   // somebody should read ADR 0058 again rather than shrug at a green run.
