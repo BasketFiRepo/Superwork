@@ -21,6 +21,8 @@ export interface DecisionRow {
   confirmedAt: string | null
   confirmedByName: string | null
   fromAgentRun: boolean
+  /** The point in the meeting the decision was read out of (ADR 0078). */
+  decidedAt: string
   canConfirm: boolean
   refusal: string | null
 }
@@ -82,6 +84,10 @@ export function MeetingDecisions({ decisions }: { decisions: DecisionRow[] }) {
           <thead>
             <tr>
               <th>Decision</th>
+              {/* Everything on this panel happened in one meeting, so the useful half of the
+                  moment is the time — which is the meeting's start plus the offset of the line
+                  the decision was read out of (ADR 0078). */}
+              <th style={{ width: 80 }}>Said at</th>
               <th style={{ width: 100 }}>Status</th>
               <th style={{ width: 100 }}>Read as</th>
               <th style={{ width: 260 }}>Stood behind by</th>
@@ -91,6 +97,9 @@ export function MeetingDecisions({ decisions }: { decisions: DecisionRow[] }) {
             {decisions.map((decision) => (
               <tr key={decision.id} data-testid="decision-row">
                 <td className="small">{decision.summary}</td>
+                <td className="small mono muted" data-testid="decision-said-at">
+                  {decision.decidedAt.slice(11, 16)}
+                </td>
                 <td>
                   <span className={decision.status === 'deferred' ? 'chip chip-attention' : 'chip chip-positive'}>
                     {decision.status}

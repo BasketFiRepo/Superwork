@@ -129,6 +129,9 @@ export default async function MeetingsPage() {
               <thead>
                 <tr>
                   <th>Decision</th>
+                  {/* The column the table has always been ordered by, shown for the first time —
+                      and, until now, holding the moment the summarizer ran (ADR 0078). */}
+                  <th style={{ width: 110 }}>Decided</th>
                   <th style={{ width: 110 }}>Status</th>
                   <th style={{ width: 170 }}>From</th>
                   <th style={{ width: 180 }}>Stood behind by</th>
@@ -138,6 +141,9 @@ export default async function MeetingsPage() {
                 {decisions.map((d) => (
                   <tr key={d.id}>
                     <td className="small">{d.summary}</td>
+                    <td className="small mono muted" data-testid="decision-when">
+                      {d.decidedAt.toISOString().slice(0, 10)}
+                    </td>
                     <td>
                       <span className={d.status === 'deferred' ? 'chip chip-attention' : 'chip chip-positive'}>
                         {d.status}

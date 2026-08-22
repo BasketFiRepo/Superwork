@@ -253,12 +253,32 @@ try {
   await page.goto(`${BASE}/meetings`)
   await page.waitForSelector('[data-testid="meeting-row"]', { timeout: 15_000 })
   ok('Meetings list renders', (await page.locator('[data-testid="meeting-row"]').count()) > 0)
+
+  // The column the decision log has always been ordered by, shown for the first time.
+  const decidedDates = await page.locator('[data-testid="decision-when"]').allInnerTexts()
+  ok('The decision log says when each one was decided', decidedDates.length > 0,
+    decidedDates.slice(0, 3).join(', '))
+  ok('And reads newest first, by the day it was decided rather than the day it was filed',
+    [...decidedDates].sort().reverse().join() === decidedDates.join(),
+    decidedDates.join(', ').slice(0, 60))
+
   const recorded = page.locator('[data-testid="meeting-row"]', { hasText: 'attached' }).first()
   ok('At least one meeting has a transcript', (await recorded.count()) > 0)
   await recorded.locator('a').first().click()
   await page.waitForSelector('[data-testid="transcript-segment"]', { timeout: 15_000 })
   const anchors = await page.locator('[data-testid="segment-anchor"]').count()
   ok('The transcript renders with timestamp anchors', anchors > 0, `${anchors} anchors`)
+
+  // When it was actually decided (ADR 0078). `decisions.decided_at` was `DEFAULT now()` and
+  // nothing ever set it, so it held the moment the summarizer ran — while being the ORDER BY of
+  // the decision log and both of the table's indexes.
+  await page.waitForSelector('[data-testid="decision-said-at"]', { timeout: 15_000 })
+  const saidAt = await page.locator('[data-testid="decision-said-at"]').first().innerText()
+  ok('A decision says the minute of the meeting it was said in', /^\d{2}:\d{2}$/.test(saidAt.trim()), saidAt)
+  // The demo's meetings all start at 09:30, and every decision is anchored to a line minutes
+  // into the room — so a decision timed exactly at the start would be the fallback, not the sum.
+  ok('And it is a moment inside the meeting rather than the moment the row was written',
+    saidAt.trim() > '09:30', saidAt)
 
   // Decisions somebody stood behind (ADR 0065). `decisions.confirmed_at` had been rendered as
   // a "Confirmed" column since Phase 1 and written by nothing, while the panel told people to
