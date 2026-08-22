@@ -108,6 +108,10 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
           ownerName: data.agent.ownerName,
           publishedByName: data.agent.publishedByName,
           publishedAt: data.agent.publishedAt ? data.agent.publishedAt.toISOString() : null,
+          budget: data.agent.budget,
+          budgetSetByName: data.agent.budgetSetByName,
+          budgetSetAt: data.agent.budgetSetAt ? data.agent.budgetSetAt.toISOString() : null,
+          budgetReason: data.agent.budgetReason,
         }}
         certification={{
           state: data.certification.state,

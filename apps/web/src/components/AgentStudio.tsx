@@ -81,6 +81,10 @@ export function AgentStudio({
 }: {
   agent: {
     agentId: string
+    budget: Record<string, number>
+    budgetSetByName: string | null
+    budgetSetAt: string | null
+    budgetReason: string | null
     name: string
     status: string
     currentVersion: number
@@ -121,6 +125,13 @@ export function AgentStudio({
   const [simulation, setSimulation] = useState<SimulationSummary | null>(simulations[0] ?? null)
 
   const stepUp = useStepUp()
+  const [budgetSteps, setBudgetSteps] = useState(String(agent.budget.maxSteps ?? ''))
+  const [budgetToolCalls, setBudgetToolCalls] = useState(String(agent.budget.maxToolCalls ?? ''))
+  const [budgetSpend, setBudgetSpend] = useState(String(agent.budget.maxCostCents ?? ''))
+  const [budgetSeconds, setBudgetSeconds] = useState(
+    agent.budget.maxWallClockMs ? String(Math.round(agent.budget.maxWallClockMs / 1000)) : '',
+  )
+  const [budgetReason, setBudgetReason] = useState('')
   const [recertNote, setRecertNote] = useState('')
   const dirty = JSON.stringify(draft) !== JSON.stringify(snapshot)
   const open = changes.find((change) => change.status === 'awaiting_approval') ?? null
@@ -198,6 +209,35 @@ export function AgentStudio({
     if (result) {
       setRecertNote('')
       setNote(`${agent.name} is confirmed on version ${agent.currentVersion}.`)
+      router.refresh()
+    }
+  }
+
+  /**
+   * What this agent may do on one run (ADR 0077). `call` already routes through `stepUp.run`,
+   * so loosening asks for a password without this needing to know which direction it is —
+   * the repository decides that, and the prompt appears when it says so.
+   */
+  async function saveBudget() {
+    if (budgetReason.trim().length < 8) return
+    const numeric = (value: string): number | null => {
+      const parsed = Number(value.trim())
+      return value.trim() === '' || !Number.isFinite(parsed) ? null : Math.trunc(parsed)
+    }
+    const result = await call(
+      `/api/agents/${agent.agentId}/budget`,
+      {
+        maxSteps: numeric(budgetSteps),
+        maxToolCalls: numeric(budgetToolCalls),
+        maxCostCents: numeric(budgetSpend),
+        maxWallClockMs: numeric(budgetSeconds) === null ? null : numeric(budgetSeconds)! * 1000,
+        reason: budgetReason.trim(),
+      },
+      'budget',
+    )
+    if (result) {
+      setBudgetReason('')
+      setNote(`${agent.name} runs under the limits you set.`)
       router.refresh()
     }
   }
@@ -320,6 +360,73 @@ export function AgentStudio({
               {busy === 'recertify' ? 'Saving…' : `Confirm version ${agent.currentVersion}`}
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* `agents.budget` has existed since migration 0006 and nothing consulted it, so every
+          agent in every organization ran on the product's own numbers (ADR 0077). */}
+      <section className="panel" data-testid="agent-budget">
+        <div className="panel-header">
+          <h2>What one run may do</h2>
+          <span className="small muted">Blank means the product&rsquo;s own limit</span>
+        </div>
+        <div className="panel-body stack stack-4">
+          <p className="small secondary prose" style={{ margin: 0 }} data-testid="budget-explainer">
+            A run stops when it reaches one of these and says which one it was — it never quietly
+            carries on. You can tighten any of them; raising one asks for your password, because it
+            lets the agent do more with nobody watching, and none can go above what Superwork
+            allows.
+          </p>
+
+          <div className="row wrap" style={{ gap: 'var(--s-5)' }}>
+            <label className="stack stack-2" style={{ flex: '0 0 130px' }}>
+              <span className="micro">Steps</span>
+              <input className="input" id="budget-steps" inputMode="numeric" placeholder="24"
+                value={budgetSteps} onChange={(event) => setBudgetSteps(event.target.value)} />
+            </label>
+            <label className="stack stack-2" style={{ flex: '0 0 130px' }}>
+              <span className="micro">Tool calls</span>
+              <input className="input" id="budget-tool-calls" inputMode="numeric" placeholder="40"
+                value={budgetToolCalls} onChange={(event) => setBudgetToolCalls(event.target.value)} />
+            </label>
+            <label className="stack stack-2" style={{ flex: '0 0 150px' }}>
+              <span className="micro">Spend, in cents</span>
+              <input className="input" id="budget-spend" inputMode="numeric" placeholder="50"
+                value={budgetSpend} onChange={(event) => setBudgetSpend(event.target.value)} />
+            </label>
+            <label className="stack stack-2" style={{ flex: '0 0 150px' }}>
+              <span className="micro">Seconds</span>
+              <input className="input" id="budget-seconds" inputMode="numeric" placeholder="120"
+                value={budgetSeconds} onChange={(event) => setBudgetSeconds(event.target.value)} />
+            </label>
+          </div>
+
+          <label className="stack stack-2">
+            <span className="micro">Why</span>
+            <input className="input" id="budget-reason" value={budgetReason}
+              placeholder="It only ever reads the inbox, so a long run means it is stuck."
+              onChange={(event) => setBudgetReason(event.target.value)} />
+          </label>
+
+          <div className="row-tight">
+            <button className="btn btn-primary btn-sm" data-testid="budget-confirm"
+              disabled={busy !== null || budgetReason.trim().length < 8} onClick={saveBudget}>
+              {busy === 'budget' ? 'Saving…' : 'Set the limits'}
+            </button>
+          </div>
+
+          <p className="small muted" style={{ margin: 0 }} data-testid="budget-attribution">
+            {agent.budgetSetByName && agent.budgetSetAt ? (
+              <>
+                Set by {agent.budgetSetByName} on {agent.budgetSetAt.slice(0, 10)} —{' '}
+                &ldquo;{agent.budgetReason}&rdquo;
+              </>
+            ) : (
+              /* Not blank. "Nobody has chosen these" is the fact, and it was the true one for
+                 every agent in every organization until now. */
+              <>Nobody has set these, so this agent runs on Superwork&rsquo;s own limits.</>
+            )}
+          </p>
         </div>
       </section>
 

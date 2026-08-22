@@ -1023,6 +1023,40 @@ try {
   ok('And it lands, naming who read it, when, and which version', recertified,
     recertified ? (await page.locator('[data-testid="recertification-summary"]').innerText()).slice(0, 70) : 'not recorded')
 
+  // ---- What one run may do (ADR 0077) --------------------------------------
+  // `agents.budget` has existed since migration 0006 and nothing consulted it, so every agent in
+  // every organization ran on the product's own numbers — and the only thing that ever wrote the
+  // column wrote four keys from a vocabulary `RunBudget` does not have.
+  const budgetText = await page.locator('[data-testid="agent-budget"]').innerText()
+  ok('An agent says what one of its runs may do',
+    /steps/i.test(budgetText) && /tool calls/i.test(budgetText))
+  ok('And that a run stops on one rather than quietly carrying on',
+    /never quietly carries on/i.test(
+      await page.locator('[data-testid="budget-explainer"]').innerText(),
+    ))
+  ok('Nothing is limited without a reason',
+    await page.locator('[data-testid="budget-confirm"]').isDisabled())
+
+  await page.fill('#budget-steps', '6')
+  await page.fill('#budget-reason', 'It only ever reads, so a long run means it is stuck.')
+  await page.locator('[data-testid="budget-confirm"]').click()
+  // Tightening asks for no password, which is the claim. Waited for by the attribution line,
+  // because the fields keep whatever was typed either way.
+  const budgetLanded = await page
+    .waitForFunction(
+      () => /means it is stuck/.test(
+        document.querySelector('[data-testid="budget-attribution"]')?.textContent ?? '',
+      ),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Tightening one lands without asking for a password, and names who decided', budgetLanded,
+    (await page.locator('[data-testid="budget-attribution"]').innerText()).slice(0, 70))
+  ok('And no password was asked for, because deciding it may do less only narrows',
+    (await page.locator('[data-testid="step-up"]').count()) === 0)
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/agent-budget.png`, fullPage: true })
+
   // The inventory that fetched this column for twenty increments and showed it nowhere.
   await page.goto(`${BASE}/settings/ai-governance`)
   await page.waitForSelector('[data-testid="agent-certification"]', { timeout: 15_000 })

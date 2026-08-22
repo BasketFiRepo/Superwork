@@ -57,6 +57,10 @@ export const STEP_UP_ACTIONS = {
   // about itself. Narrowing never asks: making a stronger promise is the direction that should be
   // easy (ADR 0074).
   'settings.widen_data_regions': 'widening where this company’s data may be kept',
+  // Letting an agent do more on a single run — more steps, more tool calls, more spend, more
+  // time with nobody watching. Tightening never asks: deciding an agent may do less is the
+  // direction that should be easy (ADR 0077).
+  'agent.budget': 'letting an agent do more on a single run',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS

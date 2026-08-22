@@ -1,6 +1,7 @@
 import type { AgentMode, Sensitivity, TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
+import { DEFAULT_RUN_BUDGET } from '@superwork/config'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { assertSteppedUp } from '../step-up.js'
 import { certificationState, DEFAULT_RECERTIFICATION_DAYS } from '../agent-recertification.js'
@@ -33,7 +34,11 @@ export interface AgentPersona {
   dataScopes: string[]
   maxSensitivity: Sensitivity
   scheduleCron: string | null
-  budget: Record<string, unknown>
+  /** What this agent has been tightened to, beneath the product default (ADR 0077). */
+  budget: Record<string, number>
+  budgetSetByName: string | null
+  budgetSetAt: Date | null
+  budgetReason: string | null
   escalationUserId: string | null
   autopilotDailyActionCap: number
   autopilotWeeklyCostCapCents: number
@@ -76,7 +81,9 @@ const SELECT_AGENT = (ctx: TenantContext) => ctx.sql`
          d.name AS "scopeDepartmentName", a.mode::text AS mode, a.status::text AS status,
          a.tool_grants AS "toolGrants", a.data_scopes AS "dataScopes",
          a.max_sensitivity::text AS "maxSensitivity", a.schedule_cron AS "scheduleCron",
-         a.budget, a.escalation_user_id AS "escalationUserId",
+         a.budget, b.name AS "budgetSetByName", a.budget_set_at AS "budgetSetAt",
+         a.budget_reason AS "budgetReason",
+         a.escalation_user_id AS "escalationUserId",
          a.autopilot_daily_action_cap AS "autopilotDailyActionCap",
          a.autopilot_weekly_cost_cap_cents AS "autopilotWeeklyCostCapCents",
          a.autopilot_paused_until AS "autopilotPausedUntil", a.digest_day AS "digestDay",
@@ -92,6 +99,7 @@ const SELECT_AGENT = (ctx: TenantContext) => ctx.sql`
   LEFT JOIN users o ON o.id = a.owner_user_id
   LEFT JOIN users p ON p.id = a.published_by
   LEFT JOIN users r ON r.id = a.recertified_by
+  LEFT JOIN users b ON b.id = a.budget_set_by
   LEFT JOIN departments d ON d.id = a.scope_department_id`
 
 function guard(actor: Actor, ctx: TenantContext, action: string, departmentId: string | null = null): void {
@@ -633,6 +641,103 @@ export async function recertifyAgent(
     summary:
       `${actor.displayName} confirmed ${agent.name} may still do what it does, on version ` +
       `${agent.publishedVersion}. ${note}`,
+  })
+
+  return getAgent(ctx, actor, input.agentId)
+}
+
+/**
+ * What this agent may spend on a single run (§5.5, ADR 0077).
+ *
+ * `agents.budget` has existed since 0006 and nothing has ever consulted it, so every agent in
+ * every organization ran on `DEFAULT_RUN_BUDGET` — a product constant — while the column that
+ * exists to say otherwise was read into the persona and dropped.
+ *
+ * The direction rule, unchanged since 0044. **Tightening asks for a reason and nothing else**:
+ * deciding an agent may do less is the direction that should be easy, and a control that
+ * interrogated somebody for making a stronger limit would be the wrong way round. **Loosening
+ * asks for a password**, because it widens what runs with nobody watching — the same lever
+ * `workflow.throttle` pulls for the same act. Above the product default is refused outright,
+ * whatever proof is offered: an organization may tighten, never exceed.
+ *
+ * An empty object is not "no budget". It is "the product's own", which is what every agent has
+ * had all along, and clearing one is a loosening like any other.
+ */
+export const AGENT_BUDGET_KEYS = ['maxSteps', 'maxToolCalls', 'maxCostCents', 'maxWallClockMs'] as const
+export type AgentBudgetKey = (typeof AGENT_BUDGET_KEYS)[number]
+
+export async function setAgentBudget(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { agentId: string; budget: Partial<Record<AgentBudgetKey, number>>; reason: string },
+): Promise<AgentPersona> {
+  const agent = await getAgent(ctx, actor, input.agentId)
+  guard(actor, ctx, 'agent:update', agent.scopeDepartmentId)
+
+  const reason = input.reason?.trim() ?? ''
+  if (reason.length < 8) {
+    throw new ValidationError(
+      'Say why. A run that stops half way through is read as a fault unless somebody wrote down that it was a choice.',
+    )
+  }
+
+  const wanted: Record<string, number> = {}
+  for (const [key, value] of Object.entries(input.budget)) {
+    if (value === null || value === undefined) continue
+    if (!(AGENT_BUDGET_KEYS as readonly string[]).includes(key)) {
+      throw new ValidationError(`A run budget has no setting called "${key}".`)
+    }
+    if (!Number.isInteger(value) || value < 1) {
+      throw new ValidationError(
+        `${key} has to be a whole number of at least 1 — an agent that may do nothing is switched off, not limited.`,
+      )
+    }
+    const ceiling = DEFAULT_RUN_BUDGET[key as AgentBudgetKey]
+    if (value > ceiling) {
+      throw new ValidationError(
+        `${key} cannot be raised above the product limit of ${ceiling}. An organization may tighten what an ` +
+          `agent may do on one run, never exceed it — that ceiling is a safety decision rather than a setting.`,
+      )
+    }
+    wanted[key] = value
+  }
+
+  // Widening is anything this agent may now do more of than it could a moment ago, including
+  // dropping a limit altogether and falling back to the product's own.
+  const before = agent.budget ?? {}
+  const loosening = AGENT_BUDGET_KEYS.some((key) => {
+    const had = before[key] ?? DEFAULT_RUN_BUDGET[key]
+    const now = wanted[key] ?? DEFAULT_RUN_BUDGET[key]
+    return now > had
+  })
+  if (loosening) assertSteppedUp(actor, 'agent.budget')
+
+  await ctx.sql`
+    UPDATE agents
+    SET budget = ${ctx.sql.json(asJson(wanted))},
+        budget_set_by = ${actor.userId},
+        budget_set_at = now(),
+        budget_reason = ${reason}
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.agentId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'agent.budget_set',
+    entityType: 'agent',
+    entityId: input.agentId,
+    before: { budget: before },
+    after: { budget: wanted, reason, loosened: loosening },
+  })
+  await writeActivity(ctx, {
+    actorType: actor.type,
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'limited',
+    entityType: 'agent',
+    entityId: input.agentId,
+    entityLabel: agent.name,
+    summary: `${actor.displayName} set what ${agent.name} may do on one run. ${reason}`,
   })
 
   return getAgent(ctx, actor, input.agentId)
