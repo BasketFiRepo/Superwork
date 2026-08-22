@@ -128,6 +128,7 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
               confirmedAt: d.confirmedAt ? d.confirmedAt.toISOString() : null,
               confirmedByName: d.confirmedByName,
               fromAgentRun: d.fromAgentRun,
+              decidedAt: d.decidedAt.toISOString(),
               canConfirm: data.confirmable[d.id]?.allow ?? false,
               refusal: data.confirmable[d.id]?.reason ?? null,
             }))}

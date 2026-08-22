@@ -39,6 +39,14 @@ export interface SeedMeeting {
     rationale?: string
     status?: 'decided' | 'deferred' | 'reversed'
     confidence: number
+    /**
+     * The sentence the decision was read out of. It is the citation anchor, and — since
+     * ADR 0078 — what the decision's own timestamp is computed from: the meeting's start plus
+     * that line's offset into the recording. The seed used to anchor every decision to the
+     * *first* segment of its meeting and date it at the meeting's end, so the log's citations
+     * pointed at somebody saying hello.
+     */
+    excerpt: string
   }
   /**
    * Promises made out loud in the room, which is where most of them are made. Seeded from the
@@ -86,6 +94,7 @@ export const SEED_MEETINGS: SeedMeeting[] = [
       rationale: 'Their account manager has changed again and nobody has a name for the new one.',
       status: 'deferred',
       confidence: 0.78,
+      excerpt: 'Let us park that for now and come back to it next week when we have the Q4 numbers.',
     },
   },
   {
@@ -114,6 +123,7 @@ export const SEED_MEETINGS: SeedMeeting[] = [
       summary: 'Quality owns the evidence pack for the May Kestrel audit.',
       rationale: 'The open finding is pre-cool logs rather than mapping certificates.',
       confidence: 0.88,
+      excerpt: 'Agreed that Quality owns the evidence pack for the May audit. Nina, that is yours.',
     },
   },
   {
@@ -158,6 +168,7 @@ export const SEED_MEETINGS: SeedMeeting[] = [
       summary: 'Price Glasgow with a banded waiting charge rather than a flat hourly rate.',
       rationale: 'Belmont’s DC holds vehicles three hours routinely, so two free hours does not work for them.',
       confidence: 0.84,
+      excerpt: 'We agreed we will go with a banded waiting charge rather than a flat hourly rate',
     },
   },
   {
@@ -239,6 +250,7 @@ export const SEED_MEETINGS: SeedMeeting[] = [
         'Confirm the Immingham retraining by the end of next week, the Gothenburg inbound window by Wednesday, and answer the pre-cool question in writing this week.',
       rationale: 'Halden will not release the goods until the pre-cool answer is in writing.',
       confidence: 0.86,
+      excerpt: 'We agreed then: retraining confirmed by end of next week, Gothenburg window by Wednesday, and the written pre-cool answer this week.',
     },
   },
   {

@@ -1047,11 +1047,23 @@ async function seedMeetings(
             ${ctx.organizationId},
             ${meeting.projectKey ? projectIds.get(meeting.projectKey)! : null},
             ${meetingId}, ${meeting.decision.summary}, ${meeting.decision.rationale ?? null},
-            ${userIds.get(meeting.organizerKey)!}, ${endsAt}, ${meeting.decision.status ?? 'decided'},
+            ${userIds.get(meeting.organizerKey)!},
+            -- The moment it was said, not the moment the row was written and not the end of the
+            -- meeting: the meeting's start plus the offset of the line it came out of (ADR 0078).
+            (SELECT ${startsAt}::timestamptz + make_interval(secs => seg.starts_at_seconds)
+               FROM transcript_segments seg
+               JOIN transcripts tr ON tr.id = seg.transcript_id
+              WHERE seg.organization_id = ${ctx.organizationId} AND tr.meeting_id = ${meetingId}
+                AND position(${meeting.decision.excerpt} in seg.text) > 0
+              LIMIT 1),
+            ${meeting.decision.status ?? 'decided'},
+            -- Anchored to the line the decision was read out of. It used to be the *first*
+            -- segment of the meeting, so every citation pointed at somebody saying hello.
             (SELECT seg.id FROM transcript_segments seg
               JOIN transcripts tr ON tr.id = seg.transcript_id
               WHERE seg.organization_id = ${ctx.organizationId} AND tr.meeting_id = ${meetingId}
-              ORDER BY seg.starts_at_seconds LIMIT 1),
+                AND position(${meeting.decision.excerpt} in seg.text) > 0
+              LIMIT 1),
             ${meeting.decision.confidence},
             (SELECT id FROM agent_runs WHERE organization_id = ${ctx.organizationId}
               ORDER BY created_at LIMIT 1),

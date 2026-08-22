@@ -567,6 +567,48 @@ export interface RecordDecisionInput {
   sourceSegmentId?: string | null
   confidence?: number
   agentRunId?: string | null
+  /**
+   * When it was decided, if the caller knows better than the transcript does. Left out by the
+   * summarizer, which is the only caller — it is `whenItWasSaid` that knows (ADR 0078).
+   */
+  decidedAt?: Date
+}
+
+/**
+ * When the decision was actually made (ADR 0078).
+ *
+ * `decided_at` defaulted to `now()` — the moment the summarizer ran — while being the `ORDER BY`
+ * of the decision log and both of the table's indexes. So a meeting summarised a week late
+ * produced decisions that sorted above ones made yesterday.
+ *
+ * The answer was already in the data and had been since 0010. A decision carries the transcript
+ * segment it was read out of; a segment carries its offset into the recording; the meeting
+ * carries when it began. Nobody had written the addition.
+ *
+ * Three answers in order of how much they know: the line it was said on, the meeting it was said
+ * in, and — for a decision recorded outside any meeting — now, which is then the truth rather
+ * than a default standing in for one.
+ */
+async function whenItWasSaid(
+  ctx: TenantContext,
+  input: { meetingId?: string | null; sourceSegmentId?: string | null },
+): Promise<Date> {
+  if (input.sourceSegmentId) {
+    const [said] = await ctx.sql<{ at: Date }[]>`
+      SELECT m.starts_at + make_interval(secs => seg.starts_at_seconds) AS at
+      FROM transcript_segments seg
+      JOIN transcripts tr ON tr.id = seg.transcript_id
+      JOIN meetings m ON m.id = tr.meeting_id
+      WHERE seg.organization_id = ${ctx.organizationId} AND seg.id = ${input.sourceSegmentId}`
+    if (said) return said.at
+  }
+  if (input.meetingId) {
+    const [meeting] = await ctx.sql<{ at: Date }[]>`
+      SELECT starts_at AS at FROM meetings
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.meetingId}`
+    if (meeting) return meeting.at
+  }
+  return new Date()
 }
 
 export async function recordDecision(
@@ -582,14 +624,16 @@ export async function recordDecision(
   if (!decision.allow) throw new PermissionError(decision.reason)
   if (!input.summary.trim()) throw new ValidationError('A decision needs a summary.')
 
+  const decidedAt = input.decidedAt ?? (await whenItWasSaid(ctx, input))
+
   const [row] = await ctx.sql<{ id: string }[]>`
     INSERT INTO decisions (
       organization_id, project_id, meeting_id, summary, rationale, rejected_alternatives,
-      decided_by, status, source_segment_id, confidence, agent_run_id, created_by
+      decided_by, decided_at, status, source_segment_id, confidence, agent_run_id, created_by
     ) VALUES (
       ${ctx.organizationId}, ${input.projectId ?? null}, ${input.meetingId ?? null},
       ${input.summary.trim()}, ${input.rationale ?? null}, ${input.rejectedAlternatives ?? []},
-      ${input.decidedBy ?? actor.userId}, ${input.status ?? 'decided'},
+      ${input.decidedBy ?? actor.userId}, ${decidedAt}, ${input.status ?? 'decided'},
       ${input.sourceSegmentId ?? null}, ${input.confidence ?? null}, ${input.agentRunId ?? null}, ${ctx.userId}
     ) RETURNING id`
 
