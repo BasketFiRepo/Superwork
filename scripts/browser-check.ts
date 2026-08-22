@@ -921,7 +921,8 @@ try {
   ok('Nothing is confirmed with nothing written on it',
     await page.locator('[data-testid="recertify-confirm"]').isDisabled())
 
-  await page.fill('[data-testid="recertify-note"]', 'Read the tools and the clearance; both still fit what it does.')
+  const recertNote = 'Read the tools and the clearance; both still fit what it does.'
+  await page.fill('[data-testid="recertify-note"]', recertNote)
   expectingRefusal = true
   await page.locator('[data-testid="recertify-confirm"]').click()
   // Re-attesting a capability is the same weight as granting one, so it asks for the password.
@@ -934,16 +935,29 @@ try {
     await page.locator('[data-testid="step-up-confirm"]').click()
   }
   expectingRefusal = false
-  // Asserted against today's date rather than the chip: the first agent in the list is already
-  // confirmed in the demo, so "it says confirmed" would have passed without the click.
-  const today = new Date().toISOString().slice(0, 10)
+  // Asserted against a fresh date and this beat's own note, rather than against the chip: the
+  // first agent in the list is already confirmed in the demo, so "it says confirmed" would have
+  // passed without the click. The demo's last reading is twelve days old, so a date from today
+  // could only have come from this click.
+  //
+  // The date is computed **in the page, at every poll**, and yesterday is accepted too. It used
+  // to be computed once in this process, and that failed in CI at 00:00:21 UTC: the string was
+  // built at 23:59:5x and the server stamped `now()` after midnight, so the check spent twenty
+  // seconds waiting for a day that had ended. §26.5 forbids computing "today" in server local
+  // time; this was the same mistake between two clocks in two processes, and a frozen date
+  // cannot be right on both sides of a midnight the walk may cross either way.
   const recertified = await page
     .waitForFunction(
-      (stamp) =>
-        (document.querySelector('[data-testid="recertification-summary"]')?.textContent ?? '').includes(
-          stamp as string,
-        ),
-      today,
+      // No named inner function in here: this body is serialised and evaluated in the browser,
+      // and esbuild rewrites a named arrow into `__name(...)` — a helper that exists in the
+      // check's own bundle and nowhere in the page. The console-error beat at the end caught it.
+      (note) => {
+        const text = document.querySelector('[data-testid="recertification-summary"]')?.textContent ?? ''
+        const today = new Date().toISOString().slice(0, 10)
+        const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+        return text.includes(note as string) && (text.includes(today) || text.includes(yesterday))
+      },
+      recertNote,
       { timeout: 20_000 },
     )
     .then(() => true, () => false)
