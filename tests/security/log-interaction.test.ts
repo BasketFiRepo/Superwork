@@ -65,7 +65,7 @@ describe('a person can log what was said', () => {
       }),
     )
 
-    const rows = await withTenant(session, (ctx) => listInteractions(ctx, companyId, 10))
+    const rows = await withTenant(session, async (ctx) => listInteractions(ctx, await loadActor(ctx), companyId, 10))
     expect(rows).toHaveLength(1)
     expect(rows[0]!.kind).toBe('call')
     expect(rows[0]!.summary).toContain('reefer handover')
@@ -98,7 +98,7 @@ describe('a person can log what was said', () => {
         occurredAt: when,
       }),
     )
-    const rows = await withTenant(session, (ctx) => listInteractions(ctx, companyId, 10))
+    const rows = await withTenant(session, async (ctx) => listInteractions(ctx, await loadActor(ctx), companyId, 10))
     const meeting = rows.find((row) => row.kind === 'meeting')!
     expect(Math.abs(meeting.occurredAt.getTime() - when.getTime())).toBeLessThan(2000)
 

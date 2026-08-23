@@ -104,7 +104,9 @@ const ADMIN = compose(MANAGER, [
 
 /** Role baselines. Attributes refine these; they never widen them. */
 export const ROLE_PERMISSIONS: Record<Role, string[]> = {
-  owner: ['*:*:org'],
+  // `audit` is named because a wildcard does not reach it — see `NEVER_BY_WILDCARD` in
+  // `policy.ts`. The owner holds everything, but they hold it by having said so.
+  owner: ['*:*:org', 'audit:read:org'],
   admin: ADMIN,
   manager: MANAGER,
   member: MEMBER,

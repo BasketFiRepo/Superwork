@@ -1,6 +1,6 @@
 import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
-import { personalRecord, sharedWith } from '@superwork/core'
+import { myAuditTrail, personalRecord, sharedWith } from '@superwork/core'
 import { mfaStatus } from '@superwork/auth'
 import { PersonalExportButton } from '@/components/PersonalExportButton'
 import { SecondFactor } from '@/components/SecondFactor'
@@ -18,8 +18,12 @@ export default async function MePage() {
   const session = await requireSession()
   // Their own factor, on their own record. Nobody else's is readable from here (ADR 0043).
   const factor = await mfaStatus(session.userId)
-  const { record, shares } = await withActor(session, async (ctx, actor) => ({
+  const { record, shares, trail } = await withActor(session, async (ctx, actor) => ({
     record: await personalRecord(ctx, actor, actor.userId),
+    // The audit trail an administrator can now read is the same trail you can read about
+    // yourself. §29.3 says nothing about a person reaches their manager that the person has
+    // not already seen, and this is what makes that true rather than a promise (ADR 0079).
+    trail: await myAuditTrail(ctx, actor, 50),
     // The other half of "what is known about you": what you were *given*, and by whom.
     shares: await sharedWith(ctx, actor, actor.userId),
   }))
@@ -264,6 +268,50 @@ export default async function MePage() {
                       {disclosure.summary}
                       {disclosure.authorizationNote ? (
                         <span className="small muted"> — authorized by {disclosure.authorizedByName}: {disclosure.authorizationNote}</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel" data-testid="my-trail">
+        <div className="panel-header">
+          <h2>What you did, as the record has it</h2>
+          <span className="small muted">The same rows an administrator can read</span>
+        </div>
+        <p className="small muted" style={{ margin: 0, padding: '0 var(--s-5)' }} data-testid="my-trail-explainer">
+          Superwork keeps a forensic record of changes, and an administrator may read it. This is
+          that record, about you — so nothing in it can reach anybody without your being able to
+          see the same thing. It is append-only: neither you nor an administrator can edit or
+          delete a line of it.
+        </p>
+        {trail.length === 0 ? (
+          <div className="empty small secondary">Nothing of yours has been recorded yet.</div>
+        ) : (
+          <div className="panel-body-flush table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ width: 150 }}>When</th>
+                  <th style={{ width: 200 }}>What you did</th>
+                  <th>To what</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trail.map((entry) => (
+                  <tr key={entry.id} data-testid="my-trail-row">
+                    <td className="small mono muted">
+                      {entry.occurredAt.toISOString().slice(0, 16).replace('T', ' ')}
+                    </td>
+                    <td className="small mono">{entry.action}</td>
+                    <td className="small secondary">
+                      {entry.entityType}
+                      {entry.agentName ? (
+                        <span className="small muted"> · by {entry.agentName} on your behalf</span>
                       ) : null}
                     </td>
                   </tr>
