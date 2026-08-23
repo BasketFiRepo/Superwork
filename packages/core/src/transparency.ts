@@ -113,6 +113,8 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
       conversations: string
       commitments: string
       meetings: string
+      meetings_attended: string
+      meetings_absent: string
       transcript_lines: string
       activities: string
       runs: string
@@ -132,6 +134,14 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
         WHERE organization_id = ${org} AND deleted_at IS NULL AND owner_user_id = ${userId})::text AS commitments,
       (SELECT count(*) FROM meeting_participants
         WHERE organization_id = ${org} AND deleted_at IS NULL AND user_id = ${userId})::text AS meetings,
+      -- Attendance, separately from the list, because they are different facts about you and
+      -- this screen had been showing the first under the name of the second (ADR 0081).
+      (SELECT count(*) FROM meeting_participants
+        WHERE organization_id = ${org} AND deleted_at IS NULL AND user_id = ${userId}
+          AND attended)::text AS meetings_attended,
+      (SELECT count(*) FROM meeting_participants
+        WHERE organization_id = ${org} AND deleted_at IS NULL AND user_id = ${userId}
+          AND attended IS FALSE)::text AS meetings_absent,
       (SELECT count(*) FROM transcript_segments
         WHERE organization_id = ${org} AND deleted_at IS NULL AND speaker_user_id = ${userId})::text AS transcript_lines,
       (SELECT count(*) FROM activities
@@ -146,7 +156,8 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
         WHERE organization_id = ${org} AND deleted_at IS NULL AND owner_id = ${userId})::text AS documents`
 
   const row = counts ?? {
-    tasks: '0', conversations: '0', commitments: '0', meetings: '0', transcript_lines: '0',
+    tasks: '0', conversations: '0', commitments: '0', meetings: '0',
+    meetings_attended: '0', meetings_absent: '0', transcript_lines: '0',
     activities: '0', runs: '0', briefings: '0', notes: '0', documents: '0',
   }
 
@@ -176,11 +187,28 @@ export async function personalRecord(ctx: TenantContext, actor: Actor, userId: s
       route: '/commitments',
     },
     {
+      /**
+       * This row said "Meetings you attended" and counted every meeting somebody had put your
+       * name on (ADR 0081). Nothing in the product could write `attended`, so the number was
+       * your invitations wearing the word attendance — on the one screen whose whole purpose is
+       * telling you accurately what is held about you.
+       */
       key: 'meetings',
-      label: 'Meetings you attended',
-      description: 'Attendance, and the lines you spoke where a transcript was recorded with consent.',
+      label: 'Meetings you were on the list for',
+      description: 'Being on the list is not the same as being in the room; attendance is the row below.',
       count: Number(row.meetings),
       visibility: 'Attendees, and whoever can see the meeting.',
+      route: '/meetings',
+    },
+    {
+      key: 'meetings_attended',
+      label: 'Meetings recorded as attended',
+      description:
+        Number(row.meetings_absent) > 0
+          ? `Somebody records who was in the room after a meeting happens. ${row.meetings_absent} say you were not there; the rest say nothing either way.`
+          : 'Somebody records who was in the room after a meeting happens. Where nothing is recorded, nothing is claimed.',
+      count: Number(row.meetings_attended),
+      visibility: 'Attendees, and whoever can see the meeting. Never counted up about you anywhere else.',
       route: '/meetings',
     },
     {

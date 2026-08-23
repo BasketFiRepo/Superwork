@@ -25,6 +25,15 @@ export interface SeedMeeting {
   companyKey?: string
   organizerKey: string
   participantKeys: string[]
+  /**
+   * Who was on the list and not in the room (ADR 0081).
+   *
+   * The seed used to say everybody attended every meeting that had happened, which made a
+   * demo where the column has nothing to show — and said `attended = false` about every
+   * future meeting, which is an accusation rather than a blank. A missed meeting is ordinary
+   * and the product has to be able to hold one.
+   */
+  absentKeys?: string[]
   externalParticipants?: { name: string; companyKey: string }[]
   agenda: { item: string; source?: string }[]
   segments?: SeedSegment[]
@@ -135,6 +144,9 @@ export const SEED_MEETINGS: SeedMeeting[] = [
     durationMinutes: 45,
     organizerKey: 'david',
     participantKeys: ['david', 'sarah', 'priya', 'lena', 'nina', 'ruth'],
+    // Ruth was on the list and did not make it, which is why the escalation contact carried
+    // over again: the one person who could have named it was not in the room.
+    absentKeys: ['ruth'],
     agenda: [
       { item: 'Halden excursion 2026-014' },
       { item: 'Coldstore escalation contact', source: 'carried over' },

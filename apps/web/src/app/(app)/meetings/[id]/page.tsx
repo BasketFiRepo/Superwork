@@ -1,6 +1,7 @@
 import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
+import { can } from '@superwork/auth'
 import {
   confirmability,
   consentState,
@@ -14,6 +15,7 @@ import {
 } from '@superwork/core'
 import { MeetingSummaryPanel } from '@/components/MeetingSummaryPanel'
 import { MeetingDecisions } from '@/components/MeetingDecisions'
+import { MeetingAttendance } from '@/components/MeetingAttendance'
 
 export const dynamic = 'force-dynamic'
 
@@ -28,6 +30,15 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
       return {
         meeting,
         participants: await listParticipants(ctx, id),
+        // The same question `setAttendance` asks, so the panel offers what the repository will
+        // accept and names what would work when it will not (ADR 0065).
+        recordAttendance: can(actor, 'project:update', {
+          type: 'project',
+          id: meeting.id,
+          organizationId: ctx.organizationId,
+          ownerId: meeting.organizerId,
+          riskTier: 'low',
+        }),
         segments: await listSegments(ctx, id),
         decisions,
         // The same question the repository asks, so the panel offers what it will accept —
@@ -111,6 +122,22 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
             </div>
           </section>
         ) : null}
+
+        <MeetingAttendance
+          meetingId={id}
+          canRecord={data.recordAttendance.allow}
+          refusal={data.recordAttendance.allow ? null : data.recordAttendance.reason}
+          hasStarted={data.meeting.startsAt.getTime() <= Date.now()}
+          participants={data.participants.map((p) => ({
+            id: p.id,
+            displayName: p.displayName,
+            role: p.role,
+            isExternal: p.isExternal,
+            attended: p.attended,
+            attendedSetByName: p.attendedSetByName,
+            attendedSetAt: p.attendedSetAt ? p.attendedSetAt.toISOString() : null,
+          }))}
+        />
 
         <MeetingSummaryPanel
           meetingId={id}

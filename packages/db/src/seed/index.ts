@@ -952,15 +952,32 @@ async function seedMeetings(
     const meetingId = row!.id
     count += 1
 
+    /**
+     * Attendance, only for a meeting that has actually started (ADR 0081).
+     *
+     * `daysAgo > 0` was standing in for "has happened", and for the occurrence dated today it
+     * produced `attended = false` about a room that may not have opened yet — which the
+     * database now refuses outright, and rightly: *did not attend* and *not recorded* are
+     * different facts and only one of them is about a person's conduct.
+     */
+    const hasHappened = startsAt.getTime() <= now
+    const recordedBy = userIds.get(meeting.organizerKey)!
+    const attendanceOf = (key: string): boolean | null =>
+      hasHappened ? !(meeting.absentKeys ?? []).includes(key) : null
+
     for (const key of meeting.participantKeys) {
       const [person] = await ctx.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${userIds.get(key)!}`
+      const attended = attendanceOf(key)
       await ctx.sql`
         INSERT INTO meeting_participants (
-          organization_id, meeting_id, user_id, display_name, role, attended, consented_at, is_demo, created_by
+          organization_id, meeting_id, user_id, display_name, role, attended,
+          attended_set_by, attended_set_at, consented_at, is_demo, created_by
         ) VALUES (
           ${ctx.organizationId}, ${meetingId}, ${userIds.get(key)!}, ${person!.name},
           ${key === meeting.organizerKey ? 'organizer' : 'attendee'},
-          ${meeting.daysAgo > 0}, ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
+          ${attended},
+          ${attended === null ? null : recordedBy}, ${attended === null ? null : endsAt},
+          ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
         )`
     }
     const outsidersInTheRoom: string[] = []
@@ -970,12 +987,17 @@ async function seedMeetings(
         WHERE organization_id = ${ctx.organizationId} AND company_id = ${companyIds.get(external.companyKey)!}
         LIMIT 1`
       if (contact) outsidersInTheRoom.push(contact.id)
+      const attendedExternal = hasHappened ? true : null
       await ctx.sql`
         INSERT INTO meeting_participants (
-          organization_id, meeting_id, contact_id, display_name, role, attended, consented_at, is_demo, created_by
+          organization_id, meeting_id, contact_id, display_name, role, attended,
+          attended_set_by, attended_set_at, consented_at, is_demo, created_by
         ) VALUES (
           ${ctx.organizationId}, ${meetingId}, ${contact?.id ?? null}, ${external.name}, 'external',
-          ${meeting.daysAgo > 0}, ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
+          ${attendedExternal},
+          ${attendedExternal === null ? null : recordedBy},
+          ${attendedExternal === null ? null : endsAt},
+          ${meeting.segments ? startsAt : null}, true, ${ctx.userId}
         )`
     }
 
