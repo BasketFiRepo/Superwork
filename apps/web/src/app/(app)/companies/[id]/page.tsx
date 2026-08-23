@@ -28,7 +28,12 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
       async (ctx, actor) => ({
         view: await relationship360(ctx, actor, id),
         contacts: await listContacts(ctx, actor, { companyId: id }),
-        interactions: await listInteractions(ctx, id, 10),
+        // Refused for a viewer, whose read of the company does not reach what was said on the
+        // calls (ADR 0080). The company still renders — the notes panel says why it cannot.
+        interactions: await listInteractions(ctx, actor, id, 10).catch((error: unknown) => {
+          if (error instanceof PermissionError) return error.message
+          throw error
+        }),
         shares: await listShares(ctx, actor, 'company', id),
         relations: shareableRelations(actor, 'company', id, ctx.organizationId),
         teams: await listTeams(ctx, actor).catch(() => []),
@@ -243,7 +248,11 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
               contacts={contacts.map((contact) => ({ id: contact.id, name: contact.name }))}
               canLog={canLog}
             />
-            {interactions.length === 0 ? (
+            {typeof interactions === 'string' ? (
+              <div className="empty small secondary" data-testid="interactions-denied">
+                {interactions}
+              </div>
+            ) : interactions.length === 0 ? (
               <div className="empty small secondary">Nothing logged yet.</div>
             ) : (
               <div className="panel-body stack stack-3">

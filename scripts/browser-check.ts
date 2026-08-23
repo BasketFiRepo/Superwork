@@ -3044,6 +3044,45 @@ try {
     (await page.locator('[data-testid="my-trail-explainer"]').count()) === 1)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/audit-denied.png`, fullPage: true })
 
+  // ---- Two narrower grants (ADR 0080) --------------------------------------
+  // Ellie Nakamura is the demo's board observer: a viewer. She may see that Northwind has these
+  // customers. Until now she could also read every note about what was said to them, because
+  // reading the timeline rode in on the read of the company.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'ellie@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  ok('A viewer can sign in', !page.url().includes('/login'), page.url())
+
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('[data-testid="company-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="company-row"] a').first().click()
+  // Not `h1`: the companies list has one too, so waiting on it resolves before the click has
+  // navigated anywhere and reads the previous screen. The URL is the thing that changes.
+  await page.waitForURL(/\/companies\/[0-9a-f-]{36}/, { timeout: 15_000 })
+  const viewerCompany = await page.locator('body').innerText()
+  ok('And still sees the company itself, which is the grant she does hold',
+    /Recent interactions/i.test(viewerCompany))
+  const notesRefusal = await page.locator('[data-testid="interactions-denied"]').innerText().catch(() => '')
+  ok('But not what was said on the calls', notesRefusal.length > 0, notesRefusal.slice(0, 64))
+  ok('And the refusal is about the notes, not the company',
+    /note/i.test(notesRefusal) && !/company/i.test(notesRefusal))
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/viewer-notes-denied.png`, fullPage: true })
+
+  // A member does see them — otherwise the beat above would pass with the panel simply broken.
+  await page.goto(`${BASE}/login`)
+  await page.fill('input[name="email"]', 'nina@northwind.example')
+  await page.fill('input[name="password"]', 'superwork')
+  await page.click('button[type="submit"]')
+  await page.waitForURL(/\/(today|briefing|agent)?$/, { timeout: 15_000 }).catch(() => undefined)
+  await page.goto(`${BASE}/companies`)
+  await page.waitForSelector('[data-testid="company-row"]', { timeout: 15_000 })
+  await page.locator('[data-testid="company-row"] a').first().click()
+  await page.waitForURL(/\/companies\/[0-9a-f-]{36}/, { timeout: 15_000 })
+  ok('While a member reads the same timeline',
+    (await page.locator('[data-testid="interactions-denied"]').count()) === 0)
+
   ok('No console errors on any screen', errors.length === 0, errors.slice(0, 3).join(' | '))
   // Named, not hidden: if this number starts climbing, or names a screen it never named before,
   // somebody should read ADR 0058 again rather than shrug at a green run.

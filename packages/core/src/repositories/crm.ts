@@ -718,11 +718,28 @@ export async function logInteraction(
   return row!.id
 }
 
+/**
+ * The notes on a company's timeline (ADR 0080).
+ *
+ * This took an actor for the first time in the increment that added the permission detector, and
+ * the reason it had never needed one is the interesting part: it was the only read in this file
+ * without one, and it looked safe because the page calls `getCompany` first, which does check.
+ *
+ * But `company:read:org` is a grant a **viewer** holds, and `note:read:org` starts at member. The
+ * ladder draws a line between "you may see that we have this customer" and "you may read what was
+ * said on the calls", and the demo's viewer is a board observer — exactly the person that line was
+ * drawn for. Reading the notes rode in on the read of the company, so the narrower grant was never
+ * asked about, and had never once been evaluated in the life of the product.
+ */
 export async function listInteractions(
   ctx: TenantContext,
+  actor: Actor,
   companyId: string,
   limit = 25,
 ): Promise<{ id: string; kind: string; summary: string; occurredAt: Date; userName: string | null }[]> {
+  const decision = can(actor, 'note:read', { type: 'note', organizationId: ctx.organizationId })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
   return ctx.sql`
     SELECT i.id, i.kind, i.summary, i.occurred_at AS "occurredAt", u.name AS "userName"
     FROM interactions i LEFT JOIN users u ON u.id = i.user_id

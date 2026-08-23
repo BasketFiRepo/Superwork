@@ -29,6 +29,16 @@ export interface TaskView {
   blockedReason: string | null
   createdByActorType: string
   createdByAgentRunId: string | null
+  /**
+   * Who wrote it down. Read only by the completion check (ADR 0080), because the policy's `own`
+   * scope means owner *or* assignee *or* creator, and a member who raised a task they are not
+   * assigned is inside that word.
+   *
+   * Deliberately not added to the `task:update` check beside it. That check has never resolved
+   * `own` through the creator, and starting now would widen who may edit a task rather than
+   * narrow it — the direction that asks for a reason nobody has given.
+   */
+  createdBy: string | null
   aiConfidence: number | null
   /** Set while this occurrence is the open one in a repeating series (ADR 0041). */
   recurrenceRule: string | null
@@ -55,6 +65,7 @@ const SELECT_TASK = (ctx: TenantContext) => ctx.sql`
          t.due_at AS "dueAt", t.waiting_on AS "waitingOn", t.blocked_reason AS "blockedReason",
          t.created_by_actor_type AS "createdByActorType",
          t.created_by_agent_run_id AS "createdByAgentRunId",
+         t.created_by AS "createdBy",
          t.ai_confidence AS "aiConfidence", t.recurrence_rule AS "recurrenceRule",
          t.milestone_id AS "milestoneId", ms.name AS "milestoneName",
          ms.due_on::text AS "milestoneDueOn", ms.status AS "milestoneStatus",
@@ -345,8 +356,33 @@ export async function updateTask(ctx: TenantContext, actor: Actor, input: Update
   if (status === 'waiting' && !waitingOn) throw new ValidationError('A waiting task must name who or what it is waiting on.')
   if (status === 'blocked' && !blockedReason) throw new ValidationError('A blocked task must state why it is blocked.')
 
-  // A dependency that can be walked past is a comment. This is where it stops being one.
+  /**
+   * Closing somebody's work is not the same act as editing it (ADR 0080).
+   *
+   * `task:complete:own` has been in the member's grant list since the ladder was built and was
+   * never checked once: completion arrived as `status = 'completed'` through an ordinary update,
+   * so `task:update:team` answered for it. A member could mark a teammate's task done — stopping
+   * its nudges, closing the commitment behind it and changing what the briefing says about
+   * somebody else's week — while the ladder said they could only complete their own.
+   *
+   * Checked on the transition, not on the state: re-saving an already-completed task is an edit.
+   * A manager still passes on `task:*:department`, so this narrows exactly one rung, which is
+   * the rung the ladder always described.
+   */
   if (status === 'completed' && before.status !== 'completed') {
+    const closing = can(actor, 'task:complete', {
+      type: 'task',
+      id: before.id,
+      organizationId: ctx.organizationId,
+      assigneeId: before.assigneeId,
+      createdBy: before.createdBy,
+      departmentId: before.departmentId,
+      teamIds: before.teamId ? [before.teamId] : [],
+      riskTier: 'low',
+    })
+    if (!closing.allow) throw new PermissionError(closing.reason)
+
+    // A dependency that can be walked past is a comment. This is where it stops being one.
     const waiting = await unfinishedPrerequisites(ctx, input.id)
     if (waiting.length > 0) {
       throw new ValidationError(

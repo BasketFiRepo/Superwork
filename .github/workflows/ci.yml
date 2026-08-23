@@ -98,6 +98,12 @@ jobs:
       - name: No product code writes a column a constraint pins
         run: pnpm check:columns
 
+      # The same question one layer up: which permissions does the ladder grant that nothing
+      # ever checks? It cannot fail a build — an unchecked grant is work to schedule, not a
+      # break — but it prints the queue where somebody reading a failed run will see it.
+      - name: Which permissions nothing checks
+        run: pnpm check:permissions
+
       - name: Agent evals — the adversarial pack must pass at 100%
         run: |
           pnpm db:bootstrap

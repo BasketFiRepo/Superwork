@@ -680,7 +680,7 @@ try {
       summary: 'Rang about the reefer handover — happy with 14:00 from Monday.',
     })
     const [after] = await listCompanies(ctx, actor, { search: 'Loop Interaction Co' })
-    const timeline = await listInteractions(ctx, company.id, 10)
+    const timeline = await listInteractions(ctx, actor, company.id, 10)
 
     const future = await logInteraction(ctx, actor, {
       companyId: company.id,
