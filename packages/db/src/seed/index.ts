@@ -390,9 +390,14 @@ export async function seedDemoOrganization(): Promise<SeedResult> {
   await sql`
     INSERT INTO monitoring_policies (organization_id, jurisdiction_profile, created_by)
     VALUES (${organizationId}, 'strict', ${ownerUserId})`
+  // A period with an end, because a subscription that never ends is one the renewal sweep never
+  // reaches and a screen that says "does not renew" about a plan somebody is paying for (ADR 0086).
+  // Dated from today so the demo shows a renewal in the future rather than one already overdue.
   await sql`
-    INSERT INTO subscriptions (organization_id, tier, seats_purchased, ai_spend_cap_cents, created_by)
-    VALUES (${organizationId}, 'business', 25, 250000, ${ownerUserId})`
+    INSERT INTO subscriptions (organization_id, tier, seats_purchased, ai_spend_cap_cents,
+                               period_start, period_end, created_by)
+    VALUES (${organizationId}, 'business', 25, 250000,
+            now(), now() + interval '30 days', ${ownerUserId})`
 
   // Reporting lines, including one dotted line so matrix rollups are exercised.
   const reports: [string, string, string][] = [

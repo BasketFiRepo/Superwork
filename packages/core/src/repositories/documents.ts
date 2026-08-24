@@ -15,6 +15,7 @@ import { classifyContent } from '../retrieval/classify.js'
 import { recordIngestion } from '../retrieval/ingestion-queue.js'
 import { holdsCoveringDocument } from '../legal-hold.js'
 import { assertSteppedUp } from '../step-up.js'
+import { planAllowance } from '../subscription.js'
 
 export interface DocumentView {
   id: string
@@ -406,6 +407,12 @@ export async function uploadDocument(
     )
   }
 
+  // What the plan allows (ADR 0086). `documents_indexed` had a number on every tier and no reader,
+  // so the ceiling on company memory was the same on the free plan as on enterprise. Asked before
+  // the row is written rather than during ingest: a document that is refused should not first exist.
+  const room = await planAllowance(ctx, 'document')
+  if (!room.allow) throw new ValidationError(room.reason)
+
   const [created] = await ctx.sql<{ id: string }[]>`
     INSERT INTO documents (
       organization_id, title, doc_type, source, company_id, project_id, space_id,
@@ -696,6 +703,11 @@ export async function attachFile(
   }
   const fileName = input.fileName.trim().replace(/[\r\n]/g, '').slice(0, 200)
   if (!fileName) throw new ValidationError('Give the file a name.')
+
+  // And what the plan allows in bytes (ADR 0086), asked before anything is stored — a file
+  // refused after `put` is an object nothing references and nothing will ever remove.
+  const room = await planAllowance(ctx, 'storage', input.body.byteLength)
+  if (!room.allow) throw new ValidationError(room.reason)
 
   const key = keyFor(ctx.organizationId, input.body)
   const stored = await store.put(key, input.body, contentType)

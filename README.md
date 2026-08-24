@@ -635,9 +635,10 @@ bug report.
   built-in defaults rather than to *no limit* — and the screen states which it used.
 - **An organization may tighten, never widen.** A limit a tenant can raise on its own is not
   a limit. Same rule as an approval policy, for the same reason.
-- **Changing the plan is not a setting.** No self-serve tier control, because what a company
-  pays for is a commercial agreement, and a button that appeared to change it would be a
-  fake integration.
+- **Changing the plan was not a setting** — and was not anything else either, which is what
+  the section below is about. The rule that survives is the narrower one: a tenant tightens
+  what it may spend inside a plan, and moving the ceiling is a different act with a different
+  price, a different permission and a different question asked of the person doing it.
 - **The tenant cannot rewrite the plans themselves** — `plan_limits` is not a tenant table
   and the application role has no write grant on it. That was already true; it is now
   asserted, because it is what makes the tightening rule mean anything.
@@ -647,6 +648,63 @@ bug report.
   The refusal does the arithmetic.
 
 **Settings → Usage and cost.** See ADR 0030.
+
+## A plan somebody can change
+
+ADR 0030 resolved the plan into one answer and left it there. Sixteen releases later, four
+columns told the rest of the story: `tier` and `seats_purchased` were written by the seed and
+nothing else, and `status` and `period_end` were written by **nothing at all** while the billing
+screen read both out. An organization was on the plan the seed gave it, permanently — and
+`seatCheck` went on refusing the twenty-sixth invitation with *"or buy more seats"* at a screen
+with nowhere to buy one. The same failure ADR 0030 fixed, one level up.
+
+Underneath that, a worse one. `agent_runs_per_month`, `documents_indexed`, `storage_gb`,
+`workflow_runs_per_month` and `autopilot_allowed` were resolved from the catalogue, printed on the
+screen, and **enforced nowhere** — so every tier allowed what every other tier allowed, and a free
+organization ran agents unattended. A plan you cannot change is a broken control; a plan whose
+limits stop nothing is theatre. Neither half is worth building alone.
+
+**Superwork does not take the payment.** It holds the consequence of one and asks a
+`BillingProvider` the three questions only a billing system can answer — what would this cost, did
+it go through, did the period renew. `BILLING_MODE` has been in the environment schema since Phase
+0 and was read by nothing; it chooses the implementation now. In `mock` the answers are
+deterministic and local, and every figure from them is badged **Simulated** on the screen. The
+mock's per-seat rates are not prices: nobody agreed them, and the badge is how the screen says so.
+
+- **The preview says what stops working**, not only what starts. Both catalogue rows are compared
+  on every axis in both directions, and what the organization is already past is named with the
+  arithmetic: *"4,120 documents are indexed and this plan allows 100. Nothing is deleted — nothing
+  more can be indexed until you are under it."*
+- **Nothing deactivates anybody to make a plan fit.** Fewer seats than there are people is refused
+  with what is using them, counting invitations nobody has accepted, and the decision stays with a
+  person.
+- **An upgrade is refused while a payment is outstanding**; a downgrade and a cancellation are not.
+  Trapping a company on a plan it cannot pay for is the opposite of what that state is for.
+- **Cancelling ends the plan at the end of the period already paid for**, not today, and nothing is
+  deleted when it does — the organization moves to Free and everything already here stays readable.
+- **It is the owner's**, not an administrator's. `tests/security/permission-grants.test.ts` has used
+  *"an admin may read billing and not change it"* as its example of a capability an admin cannot
+  mint since ADR 0055; a first draft granted it to `admin` and that test said no. Reading what an
+  upgrade would cost stays with the admin, because making somebody commit to find out the price is
+  how a product generates accidental purchases.
+- **It asks for a password in both directions**, alone among the actions that ask. Every other one
+  has a safe direction; spending the company's money and stopping its service are both things a
+  lifted cookie must not do. Only a person can step up, so an API key with a wildcard cannot change
+  a plan whatever it has been granted.
+- **The limits are counted from the rows, and each is the kind it actually is.** Documents and bytes
+  are a stock — how much may be held; runs are a flow — how many may be started this month. Counted
+  per month, a stock would let somebody index a million documents in twelve batches. Counted from
+  `usage_records`, every limit would quietly rise when retention pruned the meter.
+- **A dry run is not counted.** Activation is refused until one has passed, and charging the plan
+  for the safety step teaches people to skip it.
+- **`plan_limits` deliberately gains no writer.** It has no `organization_id` — one row per tier,
+  shared by every tenant — so a write from inside one organization would reprice all of them.
+- **The period is swept hourly by the worker**, and each of the four endings is written down and
+  told to the owner: renewed, declined, ended, released. A declined payment retries in a week, not
+  on the next pass. Enforcement does not wait for the sweep: a limit that is off whenever the worker
+  is, is not a limit.
+
+**Settings → Usage and cost.** See ADR 0086.
 
 ## What people said when they threw an insight away
 
@@ -1900,6 +1958,11 @@ marked **Simulated**, while everything around it — review, permissions, previe
 audit — is real. Every other provider ships as a simulated implementation too, and
 connecting one says so on the row.
 
+**No money moves.** A plan change is permissioned, previewed, stepped up, audited and enforced
+here; the payment is a `BillingProvider`'s, and under `BILLING_MODE=mock` no card is held, nothing
+is charged, and the figures on the plan screen are locally generated and badged **Simulated**. The
+per-seat rates in the mock are not prices anybody agreed.
+
 **The scale budgets are measured below the scale they target.** The harness prints the scale
 it actually reached beside the scale the target assumes, rather than rounding the difference
 away. They are evidence about query shape, not a 100,000-user result.
@@ -1949,13 +2012,14 @@ away. They are evidence about query shape, not a 100,000-user result.
   stays restricted either way. For a space this is load-bearing: adding the first name to a
   document with no list *removes everybody else*, so syncing a space share across a shelf
   would silently restrict every document on it.
-- Knowledge spaces are read, shared and filed into, but not authored. There is one seeded
-  space and no way to create a second from the interface.
+- Knowledge spaces are created, read, shared, filed into and archived. What a space still has
+  no notion of is a hierarchy: shelves do not contain shelves.
 - An approval routed to a role is visible to everybody who holds it, and approvals carry no
   department — so a department-scoped decider currently sees the whole queue. Narrowing that
   needs a department on the approval, which is a schema change and a separate decision.
-- `approvals.delegated_to` is still a column nothing writes. Handing an approval to a named
-  person for a period is a real feature and is not the one that was built.
+- An approval can be handed to a named person for a period, and `approvals.delegated_to` is
+  written by the product that does it (ADR 0082). What is still not expressible is a standing
+  delegation — "everything of mine, while I am away" — which is a rule rather than a handover.
 - Nothing walks *down* the reporting chain. There is no "my reports' overdue work" query,
   and adding one would be the §29.5 prohibition wearing a different name.
 - The jurisdiction history covers a profile and a consultation, not `legal_entities.data_region`.
@@ -1978,17 +2042,17 @@ away. They are evidence about query shape, not a 100,000-user result.
 - Four of the ten feature flags — `reports`, `autopilot`, `chat_presence`, `public_api` —
   are read by nothing. They are listed on the Features screen as inert rather than given a
   switch, because a control that changes nothing is worse than an absent one.
-- Two tables are dead schema that nothing reads *or* writes: `email_accounts` and `events`.
-  They are left in place rather than dropped, and listed here so nobody has to rediscover
-  them; neither has a live reader, so neither is silently affecting behaviour. `email_accounts`
-  is where connecting a real mailbox would start. (`agent_messages`, `ingestion_jobs`,
-  `saved_views` and `task_watchers` were on this list and have since been built — ADRs 0037,
-  0038 and 0040.)
+- One table is dead schema that nothing reads *or* writes: `events`. It is left in place rather
+  than dropped, and listed here so nobody has to rediscover it; it has no live reader, so it is
+  not silently affecting behaviour. (`agent_messages`, `ingestion_jobs`, `saved_views`,
+  `task_watchers` and `email_accounts` were on this list and have since been built — ADRs 0037,
+  0038, 0040 and 0084.)
 - The demo organization ships with no feature-flag overrides, because seeding one would mean
   turning a feature off in the demo.
-- Only the spend caps and seats stop anything. `plan_limits.agent_runs_per_month`,
-  `documents_indexed`, `storage_gb` and `workflow_runs_per_month` are resolved and displayed
-  but enforced nowhere — naming that is better than four more half-checks.
+- The plan is a price list, not a per-tenant setting. `plan_limits` has no `organization_id`,
+  so its nine columns have no product writer and never will: a tenant that could write the
+  catalogue would reprice every other tenant in the installation. The column detector reports
+  them, correctly, as columns nothing in the product writes; this is the answer (ADR 0086).
 - Members can be invited and listed but not edited from the Members screen. Changing a role
   or deactivating somebody still lives in Identity, with the directory sync.
 

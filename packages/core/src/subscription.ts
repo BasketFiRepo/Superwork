@@ -52,6 +52,14 @@ export interface SubscriptionView {
   capsReason: string | null
   capsSetByName: string | null
   capsSetAt: Date | null
+  /** Who last changed the plan itself, when and why — the same shape the caps use (ADR 0086). */
+  planChangeReason: string | null
+  planChangedByName: string | null
+  planChangedAt: Date | null
+  /** What the billing system called the last change. Recorded and shown, never parsed. */
+  providerReference: string | null
+  /** What the plan's limits are being measured against, so a screen can show where it is. */
+  usage: PlanUsage
   limits: EffectiveLimits
   /**
    * The plan's own caps, before this organization tightened anything — so a screen can show
@@ -72,6 +80,10 @@ interface Row {
   capsReason: string | null
   capsSetByName: string | null
   capsSetAt: Date | null
+  planChangeReason: string | null
+  planChangedByName: string | null
+  planChangedAt: Date | null
+  providerReference: string | null
 }
 
 /**
@@ -142,7 +154,10 @@ export async function subscription(ctx: TenantContext, actor: Actor): Promise<Su
   const row = await subscriptionRow(ctx)
   const limits = await effectiveLimits(ctx)
   const plan = await planLimitsFor(ctx)
-  const seatsUsed = await seatsInUse(ctx)
+  // One read of what the limits are measured against, used for both the seat line and the four
+  // limits the plan now actually stops (ADR 0086).
+  const usage = await planUsage(ctx)
+  const seatsUsed = usage.seatsUsed
   const seatsPurchased = row?.seatsPurchased ?? limits.seats ?? 0
 
   return {
@@ -157,6 +172,11 @@ export async function subscription(ctx: TenantContext, actor: Actor): Promise<Su
     capsReason: row?.capsReason ?? null,
     capsSetByName: row?.capsSetByName ?? null,
     capsSetAt: row?.capsSetAt ?? null,
+    planChangeReason: row?.planChangeReason ?? null,
+    planChangedByName: row?.planChangedByName ?? null,
+    planChangedAt: row?.planChangedAt ?? null,
+    providerReference: row?.providerReference ?? null,
+    usage,
     limits,
     planCaps: {
       aiSpendCapCents: plan.aiSpendCapCents,
@@ -302,9 +322,12 @@ async function subscriptionRow(ctx: TenantContext): Promise<Row | null> {
            s.ai_spend_cap_cents AS "aiSpendCapCents",
            s.per_user_daily_cap_cents AS "perUserDailyCapCents",
            s.period_start AS "periodStart", s.period_end AS "periodEnd",
-           s.caps_reason AS "capsReason", u.name AS "capsSetByName", s.caps_set_at AS "capsSetAt"
+           s.caps_reason AS "capsReason", u.name AS "capsSetByName", s.caps_set_at AS "capsSetAt",
+           s.plan_change_reason AS "planChangeReason", p.name AS "planChangedByName",
+           s.plan_changed_at AS "planChangedAt", s.provider_reference AS "providerReference"
     FROM subscriptions s
     LEFT JOIN users u ON u.id = s.caps_set_by
+    LEFT JOIN users p ON p.id = s.plan_changed_by
     WHERE s.organization_id = ${ctx.organizationId} AND s.deleted_at IS NULL`
   return row ?? null
 }
@@ -313,4 +336,196 @@ async function organizationTier(ctx: TenantContext): Promise<PlanTier> {
   const [row] = await ctx.sql<{ tier: PlanTier }[]>`
     SELECT plan_tier AS tier FROM organizations WHERE id = ${ctx.organizationId}`
   return row?.tier ?? 'free'
+}
+
+/**
+ * What the plan's limits are being measured against, right now (ADR 0086).
+ *
+ * Four of these numbers had a limit on the plan, a row in `plan_limits`, a line on the billing
+ * screen — and no reader anywhere. `agent_runs_per_month`, `documents_indexed`, `storage_gb` and
+ * `workflow_runs_per_month` were resolved, displayed, and enforced by nothing, so every tier
+ * allowed exactly what every other tier allowed and changing plan changed nothing but a word.
+ *
+ * Two are a **stock** and two are a **flow**, and the difference is not cosmetic: documents and
+ * bytes are what the organization is holding at this moment, so the limit says how much may be
+ * held; runs are what it did this month, so the limit says how many may be started. Counting a
+ * stock per month would let somebody index a million documents in twelve batches.
+ *
+ * Counted from the rows themselves rather than from `usage_records`, because retention deletes
+ * usage records on a schedule (§21) and a limit that quietly rises when the meter is pruned is
+ * not a limit.
+ */
+export interface PlanUsage {
+  seatsUsed: number
+  agentRunsThisMonth: number
+  workflowRunsThisMonth: number
+  documentsIndexed: number
+  storageBytes: number
+}
+
+export async function planUsage(ctx: TenantContext): Promise<PlanUsage> {
+  const [row] = await ctx.sql<
+    {
+      agentRuns: string
+      workflowRuns: string
+      documents: string
+      storageBytes: string
+    }[]
+  >`
+    SELECT
+      (SELECT count(*) FROM agent_runs
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+          AND created_at >= date_trunc('month', now()))::text AS "agentRuns",
+      -- A dry run is excluded on purpose. Activation is refused until one has passed (ADR 0012),
+      -- so charging the plan for the safety step teaches people to skip it.
+      (SELECT count(*) FROM workflow_runs
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+          AND simulated = false AND started_at >= date_trunc('month', now()))::text AS "workflowRuns",
+      (SELECT count(*) FROM documents
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+          AND index_status = 'indexed')::text AS "documents",
+      (SELECT coalesce(sum(file_bytes), 0) FROM documents
+        WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+          AND storage_key IS NOT NULL)::text AS "storageBytes"`
+
+  return {
+    seatsUsed: await seatsInUse(ctx),
+    agentRunsThisMonth: Number(row?.agentRuns ?? 0),
+    workflowRunsThisMonth: Number(row?.workflowRuns ?? 0),
+    documentsIndexed: Number(row?.documents ?? 0),
+    storageBytes: Number(row?.storageBytes ?? 0),
+  }
+}
+
+/** The things a plan actually stops. One name per limit, so a refusal can be traced to a row. */
+export type PlanAllowanceUnit = 'agent_run' | 'workflow_run' | 'document' | 'storage'
+
+export interface PlanAllowance {
+  allow: boolean
+  reason: string
+  used: number
+  limit: number | null
+}
+
+const BYTES_PER_GB = 1024 * 1024 * 1024
+
+/**
+ * Whether the plan allows one more of something, and what to say when it does not.
+ *
+ * The refusal names the arithmetic and the way out, the same shape `seatCheck` takes: a limit
+ * quoted without the number it was measured against is a support ticket.
+ *
+ * It also answers for the *subscription*, not only the plan. A period that has ended on a plan
+ * somebody cancelled stops new work here rather than waiting for the worker's renewal sweep to
+ * write the change — a read that depends on a sweep having run is a limit that is off whenever
+ * the worker is.
+ */
+export async function planAllowance(
+  ctx: TenantContext,
+  unit: PlanAllowanceUnit,
+  add = 1,
+  now = new Date(),
+): Promise<PlanAllowance> {
+  const row = await subscriptionRow(ctx)
+  const limits = await effectiveLimits(ctx)
+
+  if (row && row.status === 'cancelled' && row.periodEnd && row.periodEnd.getTime() <= now.getTime()) {
+    return {
+      allow: false,
+      used: 0,
+      limit: 0,
+      reason:
+        `This organization's plan ended on ${row.periodEnd.toISOString().slice(0, 10)}. Nothing has been ` +
+        'deleted and everything already here can still be read — starting new work needs a plan, in ' +
+        'Settings → Billing.',
+    }
+  }
+  if (row && row.status === 'past_due') {
+    return {
+      allow: false,
+      used: 0,
+      limit: 0,
+      reason:
+        'The last payment for this plan did not go through, so new work is stopped rather than run ' +
+        'up on an unpaid account. Nothing has been deleted. Settings → Billing says what failed.',
+    }
+  }
+
+  const [limit, what, remedy] = ({
+    agent_run: [
+      limits.agentRunsPerMonth,
+      'agent runs a month',
+      'The count resets on the first of the month, or a larger plan raises it.',
+    ],
+    workflow_run: [
+      limits.workflowRunsPerMonth,
+      'workflow runs a month',
+      'The count resets on the first of the month, or a larger plan raises it. Dry runs are not counted.',
+    ],
+    document: [
+      limits.documentsIndexed,
+      'documents indexed',
+      'Delete a document that is no longer true, or move to a larger plan.',
+    ],
+    storage: [
+      limits.storageGb === null ? null : limits.storageGb * BYTES_PER_GB,
+      'of files kept',
+      'Delete a document that carries a file, or move to a larger plan.',
+    ],
+  } as Record<PlanAllowanceUnit, [number | null, string, string]>)[unit]
+
+  // A plan with no limit on this is not asked what the count is. This runs on the way into every
+  // agent run, so counting the other three to answer about one would put three queries on the
+  // §26.9 budgets to reach an answer nothing was going to read.
+  if (limit === null) return { allow: true, reason: `This plan has no limit on ${what}.`, used: 0, limit }
+  const used = await usedFor(ctx, unit)
+
+  // Bytes are read out as bytes; everything else is a count. A limit quoted in a unit nobody
+  // thinks in is one nobody can act on.
+  const measure = unit === 'storage' ? formatBytes : (value: number) => value.toLocaleString('en-GB')
+
+  if (used + add <= limit) {
+    return { allow: true, reason: `${measure(used + add)} of ${measure(limit)} ${what}.`, used, limit }
+  }
+  return {
+    allow: false,
+    used,
+    limit,
+    reason:
+      `The ${limits.tier} plan allows ${measure(limit)} ${what}, and this organization is at ` +
+      `${measure(used)}. ${remedy}`,
+  }
+}
+
+/** One number, for the one limit being asked about. `planUsage` is the whole picture, for a screen. */
+async function usedFor(ctx: TenantContext, unit: PlanAllowanceUnit): Promise<number> {
+  if (unit === 'agent_run') {
+    const [row] = await ctx.sql<{ used: string }[]>`
+      SELECT count(*)::text AS used FROM agent_runs
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND created_at >= date_trunc('month', now())`
+    return Number(row?.used ?? 0)
+  }
+  if (unit === 'workflow_run') {
+    const [row] = await ctx.sql<{ used: string }[]>`
+      SELECT count(*)::text AS used FROM workflow_runs
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+        AND simulated = false AND started_at >= date_trunc('month', now())`
+    return Number(row?.used ?? 0)
+  }
+  if (unit === 'document') {
+    const [row] = await ctx.sql<{ used: string }[]>`
+      SELECT count(*)::text AS used FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND index_status = 'indexed'`
+    return Number(row?.used ?? 0)
+  }
+  const [row] = await ctx.sql<{ used: string }[]>`
+    SELECT coalesce(sum(file_bytes), 0)::text AS used FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL AND storage_key IS NOT NULL`
+  return Number(row?.used ?? 0)
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= BYTES_PER_GB) return `${(bytes / BYTES_PER_GB).toFixed(1)}GB`
+  return `${Math.round(bytes / 1024 / 1024)}MB`
 }

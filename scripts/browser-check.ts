@@ -2183,6 +2183,53 @@ try {
     .then(() => true, () => false)
   ok('And clearing it puts the plan’s own limit back', capCleared)
 
+  // ---- A plan somebody can change (ADR 0086) ------------------------------
+  //
+  // Nothing here commits. A committed change would move the demo organization off `business`,
+  // and the phase 5 loop reads that tier back — the walk asserts what the screen says *before*
+  // the button, which is the half that was missing rather than the half that was wrong.
+  await page.waitForSelector('[data-testid="plan-change"]', { timeout: 15_000 })
+  const planOptions = await page.locator('[data-testid="plan-option"]').count()
+  ok('Every plan is on the screen, with what each one allows', planOptions === 4, `${planOptions} plans`)
+
+  await page.locator('[data-testid="plan-option"]', { hasText: 'enterprise' }).locator('input[type=radio]').check()
+  await page.waitForFunction(
+    () => /Simulated/.test(document.querySelector('[data-testid="plan-quote"]')?.textContent ?? ''),
+    undefined,
+    { timeout: 20_000 },
+  )
+  ok('A price is shown before anything is committed, and says it is simulated',
+    /Simulated/.test(await page.locator('[data-testid="plan-quote"]').innerText()))
+  ok('And an upgrade says what it adds',
+    (await page.locator('[data-testid="plan-gains"]').innerText()).length > 40)
+
+  await page.locator('[data-testid="plan-option"]', { hasText: 'free' }).locator('input[type=radio]').check()
+  const lostByDowngrading = await page
+    .waitForFunction(
+      () => /down from|Nothing is deleted/i.test(document.querySelector('[data-testid="plan-losses"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('A downgrade says what would stop working, not only what it saves', lostByDowngrading)
+
+  // Twenty-five people do not fit on three seats, and the screen does the arithmetic rather
+  // than letting the server refuse it after somebody has committed to it.
+  const blocked = await page
+    .waitForFunction(
+      () => /seats are in use|includes at most/i.test(document.querySelector('[data-testid="plan-blockers"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And it refuses to sell fewer seats than there are people, with the arithmetic', blocked)
+  ok('So the button that would commit it is not available',
+    await page.locator('[data-testid="plan-change-start"]').isDisabled())
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/plan-change.png`, fullPage: true })
+
+  // Back to the plan the demo is on, so nothing downstream reads a half-made choice.
+  await page.locator('[data-testid="plan-option"]', { hasText: 'business' }).locator('input[type=radio]').check()
+
   // ---- Adding a person to the organization --------------------------------
   await page.goto(`${BASE}/settings/members`)
   await page.waitForSelector('[data-testid="members"]', { timeout: 15_000 })

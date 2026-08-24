@@ -162,3 +162,74 @@ export interface IdentityProvider extends Provider {
   /** Verifies an assertion without trusting anything the browser supplied. */
   verifyAssertion(assertion: string): Promise<{ email: string; externalId: string } | null>
 }
+
+// ---------------------------------------------------------------------------
+// What the company pays for (§19, ADR 0086)
+// ---------------------------------------------------------------------------
+
+/**
+ * The billing system, which is not this one.
+ *
+ * Superwork holds no card and takes no payment. What it holds is the *consequence* of a payment —
+ * a tier, a seat count, a period and a status — and those had no writer at all, so an organization
+ * was on whatever plan the seed said for ever.
+ *
+ * Three questions, and they are exactly the three a billing system owns and this product cannot
+ * answer on its own: what would this cost, did it go through, and did the period renew. Everything
+ * around them — who may ask, the seat arithmetic, what stops working, the audit record — is
+ * Superwork's and is real whichever implementation answers.
+ *
+ * `BILLING_MODE` has been in the environment schema since Phase 0 and was read by nothing. It
+ * chooses between these implementations now.
+ */
+export interface PlanQuote {
+  tier: string
+  seats: number
+  /** What the period would cost, in the organization's own currency. */
+  amountCents: number
+  currency: string
+  /** How long the period the quote buys is, so the renewal date is the provider's and not ours. */
+  periodDays: number
+  /** One line a person can read, shown beside the figure rather than instead of it. */
+  description: string
+}
+
+export interface PlanCommitted {
+  /** What the billing system called this. Recorded, shown, and never parsed. */
+  reference: string
+  periodStart: Date
+  periodEnd: Date
+  /** `trialing` is a provider's answer, not a state Superwork puts an organization into. */
+  status: 'active' | 'trialing'
+}
+
+export interface PlanRenewal {
+  paid: boolean
+  reference: string | null
+  periodStart: Date
+  periodEnd: Date
+  /** Present only when `paid` is false, and shown to the organization as-is. */
+  declineReason?: string
+}
+
+export interface BillingProvider extends Provider {
+  quote(input: { tier: string; seats: number; currency: string }): Promise<PlanQuote>
+  /**
+   * Takes the money, or says it could not. `idempotencyKey` is the same promise it is on an
+   * email: the same key must never be charged twice.
+   */
+  commit(input: {
+    tier: string
+    seats: number
+    currency: string
+    idempotencyKey: string
+  }): Promise<PlanCommitted>
+  /** Asked once a period has ended, per subscription. Never asked for a plan that costs nothing. */
+  renew(input: {
+    tier: string
+    seats: number
+    currency: string
+    reference: string | null
+    idempotencyKey: string
+  }): Promise<PlanRenewal>
+}

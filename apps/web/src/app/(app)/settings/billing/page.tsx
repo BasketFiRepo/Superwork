@@ -1,14 +1,17 @@
+import { can } from '@superwork/auth'
 import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
 import {
   ledgerReport,
   parseMonthKey,
+  planCatalogue,
   shiftMonth,
   spendSnapshot,
   subscription,
   PermissionError,
 } from '@superwork/core'
 import { PlanCaps } from '@/components/PlanCaps'
+import { PlanChange } from '@/components/PlanChange'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,6 +36,8 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         api: { calls: number; keys: number; errors: number }
         tier: string
         plan: Awaited<ReturnType<typeof subscription>>
+        catalogue: Awaited<ReturnType<typeof planCatalogue>>
+        mayChange: boolean
       }
     | null = null
   let denied: string | null = null
@@ -80,6 +85,15 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         },
         tier,
         plan: await subscription(ctx, actor),
+        catalogue: await planCatalogue(ctx),
+        // Reading what a plan costs is the admin's; committing the company to one is the owner's
+        // (ADR 0086). The panel is shown either way with the preview working, because a screen
+        // that hides the price teaches people to ask for an upgrade to find out what it costs.
+        mayChange: can(actor, 'billing:update', {
+          type: 'billing',
+          organizationId: ctx.organizationId,
+          riskTier: 'high',
+        }).allow,
       }
     })
   } catch (error) {
@@ -128,6 +142,9 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
                 perUserDailySpendCapCents: data.plan.limits.perUserDailySpendCapCents,
                 seats: data.plan.limits.seats,
                 agentRunsPerMonth: data.plan.limits.agentRunsPerMonth,
+                documentsIndexed: data.plan.limits.documentsIndexed,
+                storageGb: data.plan.limits.storageGb,
+                workflowRunsPerMonth: data.plan.limits.workflowRunsPerMonth,
                 autopilotAllowed: data.plan.limits.autopilotAllowed,
                 tightened: data.plan.limits.tightened,
                 source: data.plan.limits.source,
@@ -135,7 +152,31 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
               // Resolved the same way as the limits, not read from the config constant —
               // that constant is exactly what this work stopped trusting.
               planCaps: data.plan.planCaps,
+              usage: data.plan.usage,
             }}
+          />
+
+          <PlanChange
+            mayChange={data.mayChange}
+            plan={{
+              tier: data.plan.tier,
+              status: data.plan.status,
+              seatsPurchased: data.plan.seatsPurchased,
+              periodEnd: data.plan.periodEnd ? data.plan.periodEnd.toISOString() : null,
+              planChangeReason: data.plan.planChangeReason,
+              planChangedByName: data.plan.planChangedByName,
+              providerReference: data.plan.providerReference,
+            }}
+            catalogue={data.catalogue.map((row) => ({
+              tier: row.tier,
+              seats: row.seats,
+              agentRunsPerMonth: row.agentRunsPerMonth,
+              documentsIndexed: row.documentsIndexed,
+              storageGb: row.storageGb,
+              workflowRunsPerMonth: row.workflowRunsPerMonth,
+              aiSpendCapCents: row.aiSpendCapCents,
+              autopilotAllowed: row.autopilotAllowed,
+            }))}
           />
 
           <section className="panel">
