@@ -17,6 +17,9 @@ export async function POST(request: Request) {
       updateIdentitySettings(ctx, actor, {
         ssoEnabled: Boolean(body.ssoEnabled),
         ssoProvider: body.ssoProvider ?? null,
+        // Where the directory publishes the key that signs an assertion (ADR 0087). The
+        // repository refuses anything that is not https, and refuses to enable SSO without one.
+        ssoMetadataUrl: body.ssoMetadataUrl ?? null,
         verifiedDomains: Array.isArray(body.verifiedDomains) ? body.verifiedDomains.map(String) : [],
         jitProvisioning: Boolean(body.jitProvisioning),
         defaultRole: (body.defaultRole ?? 'member') as Role,

@@ -6,6 +6,7 @@ import type { DirectoryUser } from '@superwork/integrations'
 import { PermissionError, ValidationError } from '../errors.js'
 import { assertSteppedUp } from '../step-up.js'
 import { writeAudit } from '../audit.js'
+import { isPrivateHost } from './custom-tools.js'
 
 /**
  * Identity and residency (§23).
@@ -84,6 +85,8 @@ export async function updateIdentitySettings(
   input: {
     ssoEnabled: boolean
     ssoProvider?: string | null
+    /** Where the directory publishes the key that signs its assertions (ADR 0087). */
+    ssoMetadataUrl?: string | null
     verifiedDomains: string[]
     jitProvisioning: boolean
     defaultRole: Role
@@ -91,6 +94,19 @@ export async function updateIdentitySettings(
   },
 ): Promise<IdentitySettings & { scimToken?: string }> {
   guard(ctx, actor, 'settings:update')
+
+  // Where the assertions come from (ADR 0087). An assertion is a claim signed by somebody, and
+  // this is where that somebody's signing key is published — so single sign-on that is *on* with
+  // no metadata URL is a claim with no source behind it. The database says the same thing, because
+  // a pair like this is exactly the kind that drifts when only one half is checked.
+  const metadataUrl = input.ssoMetadataUrl?.trim() || null
+  if (metadataUrl !== null) assertMetadataUrl(metadataUrl)
+  if (input.ssoEnabled && metadataUrl === null) {
+    throw new ValidationError(
+      'Single sign-on needs the directory’s metadata URL — it is where the key that signs an ' +
+        'assertion is published. Without one, Superwork would be trusting whatever arrived.',
+    )
+  }
 
   if (input.jitProvisioning && input.verifiedDomains.length === 0) {
     throw new ValidationError(
@@ -116,15 +132,16 @@ export async function updateIdentitySettings(
 
   await ctx.sql`
     INSERT INTO identity_settings (
-      organization_id, sso_enabled, sso_provider, verified_domains, jit_provisioning,
-      default_role, scim_enabled, scim_token_hash, scim_token_prefix, created_by
+      organization_id, sso_enabled, sso_provider, sso_metadata_url, verified_domains,
+      jit_provisioning, default_role, scim_enabled, scim_token_hash, scim_token_prefix, created_by
     ) VALUES (
-      ${ctx.organizationId}, ${input.ssoEnabled}, ${input.ssoProvider ?? null},
+      ${ctx.organizationId}, ${input.ssoEnabled}, ${input.ssoProvider ?? null}, ${metadataUrl},
       ${input.verifiedDomains}, ${input.jitProvisioning}, ${input.defaultRole}::sw_role,
       ${input.scimEnabled}, ${scimHash}, ${scimPrefix}, ${ctx.userId}
     )
     ON CONFLICT (organization_id) WHERE deleted_at IS NULL
     DO UPDATE SET sso_enabled = EXCLUDED.sso_enabled, sso_provider = EXCLUDED.sso_provider,
+                  sso_metadata_url = EXCLUDED.sso_metadata_url,
                   verified_domains = EXCLUDED.verified_domains,
                   jit_provisioning = EXCLUDED.jit_provisioning,
                   default_role = EXCLUDED.default_role, scim_enabled = EXCLUDED.scim_enabled,
@@ -139,6 +156,7 @@ export async function updateIdentitySettings(
     entityId: null,
     after: {
       sso: input.ssoEnabled,
+      ssoMetadataUrl: metadataUrl,
       scim: input.scimEnabled,
       jit: input.jitProvisioning,
       domains: input.verifiedDomains.join(', '),
@@ -148,6 +166,31 @@ export async function updateIdentitySettings(
 
   const settings = await identitySettings(ctx, actor)
   return scimToken ? { ...settings, scimToken } : settings
+}
+
+/**
+ * The metadata URL, checked the way a custom tool's host is (ADR 0050).
+ *
+ * `https` only, because the document it points at is what decides whose signature to trust, and a
+ * plaintext one can be rewritten in transit by exactly the person who benefits. No private or
+ * link-local address, for the same reason a tool may not name one: a URL the server fetches is a
+ * request somebody else chose the destination of.
+ */
+export function assertMetadataUrl(value: string): void {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new ValidationError(`"${value}" is not a URL. Give the address the directory publishes its metadata at.`)
+  }
+  if (url.protocol !== 'https:') {
+    throw new ValidationError('The metadata URL must be https. What it points at decides whose signature to trust.')
+  }
+  if (isPrivateHost(url.hostname.toLowerCase())) {
+    throw new ValidationError(
+      `Superwork will not fetch metadata from ${url.hostname} — it is a private or link-local address.`,
+    )
+  }
 }
 
 export interface DirectoryPlan {

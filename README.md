@@ -706,6 +706,42 @@ mock's per-seat rates are not prices: nobody agreed them, and the badge is how t
 
 **Settings → Usage and cost.** See ADR 0086.
 
+## Somebody who signed in with the directory
+
+The detector reported `identity_settings.sso_metadata_url` as read and never written, which reads
+like a field missing from a form. The next question down said otherwise: *what would read it if
+something did?* `IdentityProvider.verifyAssertion()` has been on the contract since Phase 3, has a
+mock, and **had no consumer** — so there was no sign-in with the directory anywhere in Superwork,
+and the cluster around it decided nothing. "Allow signing in with the directory" was a switch with
+no sign-in to allow; "Create people on first sign-in" had no first sign-in; and the metadata URL had
+no writer because nothing would have read one.
+
+- **An assertion says who, never what.** The directory is a mirror (§23): the role comes from the
+  membership somebody already has, or from `default_role` for somebody arriving, and never from
+  anything the assertion carried.
+- **Four refusals.** The organization has not turned it on; the domain is not one it verified;
+  they are not a member and it does not create people on first sign-in; or **their membership was
+  deactivated** — named separately, because a sign-in that quietly reactivated somebody would undo
+  a leaving, and an inactive row exists precisely to say the two apart.
+- **Enabled means sourced.** SSO cannot be turned on without the directory's metadata URL — the
+  place the key that signs an assertion is published — in the repository *and* in a `CHECK`, because
+  a pair like that is the kind where one half gets set and the result reads as working. The URL is
+  checked the way a custom tool's host is: https only, and never a private or link-local address.
+  Nothing fetches it in `mock` mode, and the screen says so.
+- **The pre-tenant role gains one read and one write.** `superwork_auth` may read identity settings,
+  and may insert a membership whose policy is the guarantee: never an owner, never an admin, never
+  already inactive. The repository refuses to store either role as a default, so the rule is stated
+  twice on purpose — the file can be edited, the policy holds anyway, and a test writes `admin` into
+  the row behind the repository's back to prove it.
+- **The second factor is still asked for.** An assertion proves the first thing. Session-minting
+  moved into one `startSession`, so what follows a password and what follows an assertion are
+  identical because they are the same code.
+- **The screen offers it only where somebody accepts it.** Turn it on and a way in appears on the
+  sign-in page; turn it off and it goes. A button for a sign-in nobody accepts is the control this
+  product refuses to render.
+
+**Settings → Identity**, and the sign-in screen. See ADR 0087.
+
 ## What people said when they threw an insight away
 
 The card has asked *why* since Phase 3 — not useful, wrong, already handled, not my job —
@@ -1957,6 +1993,12 @@ disabled with the reason named; nothing in the interface pretends to work.
 marked **Simulated**, while everything around it — review, permissions, previews, approvals,
 audit — is real. Every other provider ships as a simulated implementation too, and
 connecting one says so on the row.
+
+**No assertion is parsed here.** Signing in with the directory calls `verifyAssertion` and nothing
+else: what an assertion *is* belongs to the provider, so the simulated one takes `mock-sso:` and an
+address while a real one would take a signed SAML response. Nothing fetches the metadata URL in
+`mock` mode either — what it does here is make "single sign-on is on" a claim with a named source,
+and refuse the switch without one.
 
 **No money moves.** A plan change is permissioned, previewed, stepped up, audited and enforced
 here; the payment is a `BillingProvider`'s, and under `BILLING_MODE=mock` no card is held, nothing

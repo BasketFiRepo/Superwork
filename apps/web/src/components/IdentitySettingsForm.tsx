@@ -7,6 +7,7 @@ import { useStepUp } from './StepUp'
 interface Settings {
   ssoEnabled: boolean
   ssoProvider: string | null
+  ssoMetadataUrl: string | null
   verifiedDomains: string[]
   jitProvisioning: boolean
   defaultRole: string
@@ -153,7 +154,11 @@ export function IdentitySettingsForm({
   return (
     <div className="stack stack-8">
       {note ? <div className="banner banner-accent">{note}</div> : null}
-      {error ? <div className="banner banner-critical">{error}</div> : null}
+      {error ? (
+        <div className="banner banner-critical" role="alert" data-testid="identity-error">
+          {error}
+        </div>
+      ) : null}
       {scimToken ? (
         <div className="banner banner-accent stack stack-2">
           <strong>SCIM token — copy it now, it is not shown again.</strong>
@@ -177,6 +182,37 @@ export function IdentitySettingsForm({
             />
             <span className="small">Allow signing in with the directory</span>
           </label>
+          {/*
+            The two fields that make that switch mean something (ADR 0087). Until this, `sso_enabled`
+            was a switch with no sign-in to allow and `sso_metadata_url` had no writer at all —
+            because nothing in the product had ever called `verifyAssertion`.
+          */}
+          <div className="row wrap" style={{ gap: 'var(--s-6)' }}>
+            <label className="stack stack-1" style={{ flex: '0 0 180px' }}>
+              <span className="micro">Directory</span>
+              <input
+                className="input"
+                data-testid="sso-provider"
+                value={form.ssoProvider ?? ''}
+                placeholder="Okta"
+                onChange={(event) => setForm({ ...form, ssoProvider: event.target.value || null })}
+              />
+            </label>
+            <label className="stack stack-1" style={{ flex: '1 1 280px' }}>
+              <span className="micro">Metadata URL</span>
+              <input
+                className="input"
+                data-testid="sso-metadata-url"
+                value={form.ssoMetadataUrl ?? ''}
+                placeholder="https://example.okta.com/app/exk1/sso/saml/metadata"
+                onChange={(event) => setForm({ ...form, ssoMetadataUrl: event.target.value || null })}
+              />
+              <span className="small muted">
+                Where the directory publishes the key that signs an assertion. Single sign-on cannot
+                be turned on without one: Superwork would be trusting whatever arrived.
+              </span>
+            </label>
+          </div>
           <label className="stack stack-1">
             <span className="micro">Verified domains — comma separated</span>
             <input className="input" value={domains} onChange={(event) => setDomains(event.target.value)} />

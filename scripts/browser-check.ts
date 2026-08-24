@@ -1463,6 +1463,56 @@ try {
     /Set by/.test(await page.locator('[data-testid="residency-attribution"]').innerText()))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/residency.png`, fullPage: true })
 
+  // ---- Somebody who signed in with the directory (ADR 0087) ---------------
+  //
+  // The switch and the sign-in screen, which is the half a repository test cannot see. Whether an
+  // assertion actually mints a session — and the four ways one is refused — is
+  // tests/security/sso-sign-in.test.ts, where the directory is ours to answer for.
+  const ssoText = await page.locator('[data-testid="sso-settings"]').innerText()
+  ok('The identity screen asks where the assertions come from',
+    /Metadata URL/i.test(ssoText) && /publishes the key that signs/i.test(ssoText))
+
+  await page.locator('[data-testid="sso-settings"] input[type=checkbox]').first().check()
+  // A refusal this walk is asking for, so the response listener does not count its 400 as a
+  // screen that broke — the same flag the residency beat above sets for the same reason.
+  expectingRefusal = true
+  await page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' }).click()
+  const refusedWithoutMetadata = await page
+    .waitForFunction(
+      () => /metadata URL/i.test(document.querySelector('[data-testid="identity-error"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Turning single sign-on on without one is refused, saying why', refusedWithoutMetadata)
+  expectingRefusal = false
+
+  await page.fill('[data-testid="sso-provider"]', 'Okta')
+  await page.fill('[data-testid="sso-metadata-url"]', 'https://northwind.okta.example/app/exk1/sso/saml/metadata')
+  await page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' }).click()
+  await page.waitForTimeout(1500)
+
+  // The switch is a decision, and the way to see that is that the sign-in screen changes.
+  const signInPage = await browser.newPage()
+  await signInPage.goto(`${BASE}/login`)
+  ok('With it on, the sign-in screen offers the directory',
+    (await signInPage.locator('[data-testid="sso-sign-in"]').count()) === 1)
+  await signInPage.fill('[data-testid="sso-assertion"]', 'not-a-real-assertion')
+  await signInPage.locator('[data-testid="sso-submit"]').click()
+  await signInPage.waitForSelector('[data-testid="sso-error"]', { timeout: 20_000 })
+  ok('And an assertion the directory did not accept says so, without saying which part was wrong',
+    /was not accepted/i.test(await signInPage.locator('[data-testid="sso-error"]').innerText()))
+  if (SHOTS) await signInPage.screenshot({ path: `${SHOTS}/sso-sign-in.png`, fullPage: true })
+
+  // Off again, so the demo ends where it started and the walk can be run twice.
+  await page.locator('[data-testid="sso-settings"] input[type=checkbox]').first().uncheck()
+  await page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' }).click()
+  await page.waitForTimeout(1500)
+  await signInPage.goto(`${BASE}/login`)
+  ok('With it off, the screen offers no way in that nobody accepts',
+    (await signInPage.locator('[data-testid="sso-sign-in"]').count()) === 0)
+  await signInPage.close()
+
   // Back to the screen the erasure beats below are standing on. This section is wedged into the
   // middle of a page-scoped sequence because it has to run *after* a password has been confirmed
   // — the retention beat above is the nearest one that does — and a walk that changes the page
