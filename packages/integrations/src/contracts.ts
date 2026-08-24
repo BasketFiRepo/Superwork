@@ -77,10 +77,21 @@ export interface CalendarProvider extends Provider {
 export interface StorageProvider extends Provider {
   put(key: string, body: Buffer, contentType: string): Promise<{ key: string; bytes: number }>
   get(key: string): Promise<Buffer>
-  /** Signed, time-limited, never a public bucket. */
-  signedUrl(key: string, expiresInSeconds: number): Promise<string>
   remove(key: string): Promise<void>
 }
+
+/*
+ * `signedUrl(key, expiresInSeconds)` was declared here and is gone (ADR 0085).
+ *
+ * A signed URL grants access to whoever holds it. That is a capability this product's permission
+ * model deliberately does not have: a link that works on possession can be forwarded, logged by a
+ * proxy, or sit in a browser history after the person's clearance changed. Files are streamed
+ * through a route that asks `can()` on every request instead, which is the same question the
+ * document itself is behind.
+ *
+ * It was never implemented, so nothing is lost by saying so. A real provider that needs to offload
+ * bytes can add it back — behind a permission check, with an expiry measured in seconds.
+ */
 
 export interface ChatProvider extends Provider {
   /** Identity mapping is resolved by SSO subject or verified email, never display name. */

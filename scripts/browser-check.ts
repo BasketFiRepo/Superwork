@@ -2930,6 +2930,20 @@ try {
   await page.waitForSelector('[data-testid="document-row"]', { timeout: 15_000 })
   const documentsBefore = await page.locator('[data-testid="document-row"]').count()
   await page.locator('[data-testid="document-row"] a').first().click()
+  // ---- A file somebody attached (ADR 0085) --------------------------------
+  // `StorageProvider` was declared since Phase 2 with no implementation at all, so every document
+  // was markdown somebody had pasted in and `documents.storage_key` sat empty.
+  await page.waitForSelector('[data-testid="document-file"]', { timeout: 15_000 })
+  const filePanel = await page.locator('[data-testid="document-file"]').innerText()
+  ok('A document says whether the original is kept behind it',
+    /nothing attached/i.test(filePanel) || /Download/i.test(filePanel),
+    filePanel.replace(/\s+/g, ' ').slice(0, 60))
+  ok('And that a file is behind the clearance the document is behind',
+    /behind exactly the clearance this document is behind/i.test(filePanel) ||
+      /Download/i.test(filePanel))
+  ok('And says what it will keep, rather than filtering what it will not',
+    /Anything a browser would run is refused rather than filtered/i.test(filePanel))
+
   await page.waitForSelector('[data-testid="delete-document"]', { timeout: 15_000 })
   await page.locator('[data-testid="delete-document"]').click()
   await page.waitForSelector('[data-testid="delete-document-panel"]', { timeout: 15_000 })

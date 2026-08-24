@@ -6,8 +6,10 @@ import type {
   FinanceProvider,
   IdentityProvider,
   RuntimeMode,
+  StorageProvider,
 } from './contracts.js'
 import { MockEmailProvider } from './mock/email.js'
+import { MockStorageProvider } from './mock/storage.js'
 import { FetchHttpTransport, MockHttpTransport, type HttpTransport } from './http.js'
 import {
   MockChatProvider,
@@ -19,6 +21,7 @@ import {
 export * from './contracts.js'
 export * from './http.js'
 export { MockEmailProvider } from './mock/email.js'
+export { MockStorageProvider, storageKeyFor } from './mock/storage.js'
 export {
   MockChatProvider,
   MockCrmProvider,
@@ -45,6 +48,10 @@ function resolve<T>(capability: Capability, fallback: () => T): T {
 
 export function emailProvider(): EmailProvider {
   return resolve('email', () => new MockEmailProvider())
+}
+
+export function storageProvider(): StorageProvider {
+  return resolve('storage', () => new MockStorageProvider())
 }
 
 export function chatProvider(): ChatProvider {

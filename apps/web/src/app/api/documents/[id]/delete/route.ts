@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { deleteDocument } from '@superwork/core'
+import { storageProvider } from '@superwork/integrations'
 import { errorResponse } from '@/lib/errors'
 import { requireSession, withActor } from '@/lib/session'
 
@@ -22,7 +23,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
   try {
     const removed = await withActor(session, (ctx, actor) =>
-      deleteDocument(ctx, actor, { documentId: id, reason: parsed.data.reason }),
+      // The store goes in so §25.13 reaches the bytes: a deletion that removed only the index
+      // to what somebody asked to be rid of is not a deletion (ADR 0085).
+      deleteDocument(ctx, actor, { documentId: id, reason: parsed.data.reason }, storageProvider()),
     )
     return NextResponse.json({ removed })
   } catch (error) {

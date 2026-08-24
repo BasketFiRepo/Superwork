@@ -1,12 +1,15 @@
 import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { requireSession, withActor } from '@/lib/session'
+import { can } from '@superwork/auth'
 import {
+  ATTACHABLE_TYPES,
   documentAudience,
   documentIngestions,
   getDocumentBody,
   listShares,
   listTeams,
+  MAX_ATTACHMENT_BYTES,
   NotFoundError,
   PermissionError,
   shareableRelations,
@@ -17,6 +20,7 @@ import { DocumentAudience } from '@/components/DocumentAudience'
 import { DocumentIndexing } from '@/components/DocumentIndexing'
 import { DocumentTerm } from '@/components/DocumentTerm'
 import { DocumentClassification } from '@/components/DocumentClassification'
+import { DocumentFile } from '@/components/DocumentFile'
 import { ShareObject } from '@/components/ShareObject'
 import { TeamScope } from '@/components/TeamScope'
 
@@ -27,7 +31,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   const { id } = await params
 
   try {
-    const { document, body, audience, people, departments, shares, teams, relations, scope, indexing } = await withActor(session, async (ctx, actor) => {
+    const { document, body, audience, people, departments, shares, teams, relations, scope, indexing, attach } = await withActor(session, async (ctx, actor) => {
       const loaded = await getDocumentBody(ctx, actor, id)
       return {
         ...loaded,
@@ -39,6 +43,16 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
         // Retrieval filters passages by `d.team_id`, and nothing in the product could set it
         // until now — so a guest's assistant found nothing either (ADR 0064).
         scope: await teamScope(ctx, actor, 'document', id),
+        // The same question `attachFile` asks, so the control offers what the repository will
+        // accept and names what would work when it will not (ADR 0065).
+        attach: can(actor, 'document:update', {
+          type: 'document',
+          id: loaded.document.id,
+          organizationId: ctx.organizationId,
+          ownerId: loaded.document.ownerId,
+          sensitivity: loaded.document.sensitivity,
+          riskTier: 'low',
+        }),
         people: await ctx.sql<{ id: string; name: string }[]>`
           SELECT u.id, u.name FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
@@ -122,6 +136,17 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
           }))}
           people={people}
           teams={teams.map((team) => ({ id: team.id, name: team.name }))}
+        />
+
+        <DocumentFile
+          documentId={document.id}
+          fileName={document.fileName}
+          contentType={document.mimeType}
+          bytes={document.fileBytes}
+          canAttach={attach.allow}
+          refusal={attach.allow ? null : attach.reason}
+          attachable={Object.keys(ATTACHABLE_TYPES)}
+          maxBytes={MAX_ATTACHMENT_BYTES}
         />
 
         <DocumentClassification
