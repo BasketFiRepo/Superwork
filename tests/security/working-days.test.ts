@@ -273,10 +273,27 @@ describe('nobody is chased on a day they do not work', () => {
  * a hardcoded one would pass this year and fail next.
  */
 describe('a department can name a day of its own', () => {
-  /** A date roughly `days` ahead that the UK calendar already treats as a working day. */
+  /**
+   * A date roughly `days` ahead that the UK calendar treats as a working day — **and whose
+   * following day is one too.**
+   *
+   * The second half is the whole point, and it was missing. Three assertions below say what
+   * happens on the day *after* a closed one: that `nextWorkingDay` returns it, that `worksOn`
+   * calls it a working day, that a held reminder lands on it. All three are only meaningful
+   * if that day is a working day to begin with — and when this ran on a date where the offset
+   * landed on a Friday, `+1` was a Saturday and the calendar was right to say so.
+   *
+   * A test whose answer depends on the day it is run is one that agrees with you most of the
+   * time, which is worse than one that never does.
+   */
   function workingDayAhead(days: number): string {
     let date = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10)
-    while (!isWorkingDay('uk-england-wales', date)) date = addCalendarDays(date, 1)
+    while (
+      !isWorkingDay('uk-england-wales', date) ||
+      !isWorkingDay('uk-england-wales', addCalendarDays(date, 1))
+    ) {
+      date = addCalendarDays(date, 1)
+    }
     return date
   }
 
