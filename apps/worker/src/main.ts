@@ -11,6 +11,7 @@ import {
   openLaddersForDueWork,
   runIngestionJobs,
   sweepFollowUps,
+  sweepSnoozedInsights,
   writeActivity,
 } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
@@ -277,6 +278,12 @@ async function main(): Promise<void> {
                   `[follow-ups] ${org.id}: ${followUps.surfaced} surfaced, ` +
                     `${followUps.closedByReply} closed because they replied`,
                 )
+              }
+              // And the insights somebody put off until now come back (ADR 0083). Same pass,
+              // same reason: a snooze that never ends is a dismissal that lies about itself.
+              const snoozes = await sweepSnoozedInsights(ctx)
+              if (snoozes.returned > 0) {
+                console.log(`[insights] ${org.id}: ${snoozes.returned} came back off snooze`)
               }
               return deliverDueNudges(ctx)
             },

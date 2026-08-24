@@ -630,6 +630,51 @@ try {
     ok('A watcher that has found something carries a verdict from what people said',
       /not enough ratings to judge|worth having|muted|late|wrong people/i.test(judged),
       judged.split('\n')[0] ?? '')
+
+    // ---- An insight you can put off, and one you can finish (ADR 0083) ----
+    // `snoozed_until` had no writer, `'snoozed'` had no control, and nothing would have brought
+    // one back. Until "Done" existed the only way to close an insight the watcher got *right*
+    // was Dismiss, which is a verdict on the watcher and can auto-mute it.
+    ok('An insight can be finished without saying the watcher was wrong',
+      (await page.locator('[data-testid="insight-resolve"]').count()) > 0)
+
+    await page.locator('[data-testid="insight-snooze-open"]').first().click()
+    await page.waitForSelector('[data-testid="insight-snooze"]', { timeout: 15_000 })
+    const snoozePanel = await page.locator('[data-testid="insight-snooze"]').first().innerText()
+    ok('Putting one off says when it comes back and that it judges nothing',
+      /comes back to this list on the day/i.test(snoozePanel) &&
+        /that is what dismissing is for/i.test(snoozePanel),
+      snoozePanel.replace(/\s+/g, ' ').slice(0, 70))
+
+    await page.locator('[data-testid="insight-snooze-choice"]').first().click()
+    const deferred = await page
+      .waitForFunction(
+        () => document.querySelector('[data-testid="insights-deferred"]') !== null,
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('And it moves to a list of its own rather than to the closed one', deferred)
+    if (deferred) {
+      const row = await page.locator('[data-testid="insight-deferred-row"]').first().innerText()
+      ok('Which says the day it comes back and who put it off',
+        /\d{4}-\d{2}-\d{2}/.test(row) && /Maya/i.test(row),
+        row.replace(/\s+/g, ' ').slice(0, 70))
+    }
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/insight-snooze.png`, fullPage: true })
+
+    // Bring it back, which is what puts the demo back — and the control the second run of this
+    // check is what argued for. Without it a snooze sits for up to a month and the next run has
+    // nothing to act on, because the watchers dedupe against the insight that is still there.
+    await page.locator('[data-testid="insight-bring-back"]').first().click()
+    const backOnTheList = await page
+      .waitForFunction(
+        () => document.querySelector('[data-testid="insights-deferred"]') === null,
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('And it can be brought back before its date, which puts the demo back', backOnTheList)
   }
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/watchers.png`, fullPage: true })
 

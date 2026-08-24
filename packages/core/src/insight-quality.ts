@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from './errors.js'
 import { writeAudit } from './audit.js'
+import { notify } from './notify.js'
 
 /**
  * What people think of what the watchers found (§9.2).
@@ -177,7 +178,12 @@ export interface FeedbackInput {
   insightId: string
   helpful: boolean
   reason?: FeedbackReason | null
-  status?: 'acknowledged' | 'in_progress' | 'resolved' | 'dismissed' | 'snoozed'
+  /**
+   * `'snoozed'` is not here on purpose (ADR 0083). Putting one off needs a date, and a status
+   * with no date is a snooze nothing will ever bring back — so it goes through `snoozeInsight`,
+   * which is the only thing that can set both. The database refuses the pair coming apart.
+   */
+  status?: 'acknowledged' | 'in_progress' | 'resolved' | 'dismissed'
 }
 
 /**
@@ -263,4 +269,186 @@ export async function recordInsightFeedback(
       ...(input.status ? { status: input.status } : {}),
     },
   })
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Not now (ADR 0083)
+
+/** How long a snooze may run. Beyond this it is a dismissal wearing a date. */
+export const MAX_SNOOZE_DAYS = 30
+
+export interface SnoozeInput {
+  insightId: string
+  until: Date
+  reason?: string | null
+}
+
+/**
+ * Putting an insight off until a date (ADR 0083).
+ *
+ * `insights.snoozed_until` has existed since migration 0006 and nothing has ever written it,
+ * `'snoozed'` had no control, and nothing would have brought one back if it did. A snooze that
+ * never ends is a dismissal that lies about itself — and it lies in the direction that matters,
+ * because dismissal is the signal `watcherQuality` is built on.
+ *
+ * Needs `insight:update`, the same as dismissing: both take the card off everybody's screen.
+ * No reason is required — dismissal demands one because it is a verdict on the watcher, and
+ * making people write an essay to say "not this week" points them at the dismiss button instead.
+ */
+export async function snoozeInsight(ctx: TenantContext, actor: Actor, input: SnoozeInput): Promise<void> {
+  const [insight] = await ctx.sql<{ id: string; assignedTo: string | null; status: string; title: string }[]>`
+    SELECT id, assigned_to AS "assignedTo", status, title FROM insights
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.insightId} AND deleted_at IS NULL`
+  if (!insight) throw new NotFoundError()
+
+  const resource = {
+    type: 'insight',
+    id: insight.id,
+    organizationId: ctx.organizationId,
+    assigneeId: insight.assignedTo,
+    ownerId: insight.assignedTo,
+    riskTier: 'low' as const,
+  }
+  const decision = can(actor, 'insight:update', resource)
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  // Work already under way is not something to defer — you either finish it or say it is not
+  // happening. Offering snooze there would turn `in_progress` into a place things go to be
+  // forgotten with a date attached.
+  if (!['new', 'acknowledged'].includes(insight.status)) {
+    throw new ValidationError(
+      `This insight is ${insight.status.replace(/_/g, ' ')}. Only one nobody has started can be put off.`,
+    )
+  }
+
+  const now = new Date()
+  if (input.until <= now) {
+    throw new ValidationError('Pick a date in the future — a snooze that has already ended is not one.')
+  }
+  const days = (input.until.getTime() - now.getTime()) / 86_400_000
+  if (days > MAX_SNOOZE_DAYS) {
+    throw new ValidationError(
+      `${MAX_SNOOZE_DAYS} days is the longest an insight can be put off. Past that it is a dismissal, and dismissing it says something the watcher can learn from.`,
+    )
+  }
+
+  await ctx.sql`
+    UPDATE insights
+       SET status = 'snoozed', snoozed_until = ${input.until}, snoozed_by = ${actor.userId},
+           snooze_reason = ${input.reason?.trim() || null}, updated_at = now(), version = version + 1
+     WHERE organization_id = ${ctx.organizationId} AND id = ${input.insightId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'insight.snoozed',
+    entityType: 'insight',
+    entityId: insight.id,
+    before: { status: insight.status },
+    after: { status: 'snoozed', until: input.until.toISOString(), reason: input.reason?.trim() || null },
+  })
+}
+
+/**
+ * Bringing one back before its date (ADR 0083).
+ *
+ * The other half of being able to put something off, and it was missing from the first draft —
+ * the browser check's second run is what found it, by snoozing the demo's only insight and then
+ * having nothing to act on. Every other deferral in this product can be undone: a delegation can
+ * be taken back, an attendance record can be unrecorded. A snooze you cannot cancel is a small
+ * trap, and the sweep that would eventually release it is up to a month away.
+ */
+export async function unsnoozeInsight(ctx: TenantContext, actor: Actor, insightId: string): Promise<void> {
+  const [insight] = await ctx.sql<{ id: string; assignedTo: string | null; status: string }[]>`
+    SELECT id, assigned_to AS "assignedTo", status FROM insights
+    WHERE organization_id = ${ctx.organizationId} AND id = ${insightId} AND deleted_at IS NULL`
+  if (!insight) throw new NotFoundError()
+
+  const decision = can(actor, 'insight:update', {
+    type: 'insight',
+    id: insight.id,
+    organizationId: ctx.organizationId,
+    assigneeId: insight.assignedTo,
+    ownerId: insight.assignedTo,
+    riskTier: 'low' as const,
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+  if (insight.status !== 'snoozed') throw new ValidationError('This insight has not been put off.')
+
+  // The same state the sweep returns it to, for the same reason: somebody had seen it.
+  await ctx.sql`
+    UPDATE insights
+       SET status = 'acknowledged', snoozed_until = NULL, snooze_reason = NULL,
+           updated_at = now(), version = version + 1
+     WHERE organization_id = ${ctx.organizationId} AND id = ${insightId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'insight.returned_early',
+    entityType: 'insight',
+    entityId: insight.id,
+    before: { status: 'snoozed' },
+    after: { status: 'acknowledged' },
+  })
+}
+
+export interface SnoozeSweep {
+  returned: number
+}
+
+/**
+ * Bringing back what was put off.
+ *
+ * Returns to `acknowledged` rather than `new`, and that is the honest state: somebody saw this
+ * one and decided when to look again. Sending it back to `new` would say nobody had ever read
+ * it, which is the sort of small lie a badge count is built on.
+ *
+ * No actor: this runs in the worker on every organization, the same shape as `sweepFollowUps`.
+ */
+export async function sweepSnoozedInsights(
+  ctx: TenantContext,
+  options: { now?: Date } = {},
+): Promise<SnoozeSweep> {
+  const now = options.now ?? new Date()
+
+  const due = await ctx.sql<{ id: string; title: string; assignedTo: string | null; snoozedBy: string | null }[]>`
+    UPDATE insights
+       SET status = 'acknowledged', snoozed_until = NULL, snooze_reason = NULL,
+           updated_at = now(), version = version + 1
+     WHERE organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+       AND status = 'snoozed' AND snoozed_until <= ${now}
+    RETURNING id, title, assigned_to AS "assignedTo", snoozed_by AS "snoozedBy"`
+
+  for (const insight of due) {
+    // Whoever put it off, or whoever it belongs to. Coming back silently would make a snooze
+    // indistinguishable from a dismissal for anybody not watching the list.
+    const tell = insight.snoozedBy ?? insight.assignedTo
+    if (tell) {
+      await notify(ctx, {
+        userId: tell,
+        type: 'insight_returned',
+        title: 'An insight you put off is back',
+        body: insight.title,
+        entityType: 'insight',
+        entityId: insight.id,
+        url: '/insights',
+        now,
+      })
+    }
+    await writeAudit(ctx, {
+      actorType: 'system',
+      action: 'insight.returned',
+      entityType: 'insight',
+      entityId: insight.id,
+      before: { status: 'snoozed' },
+      after: { status: 'acknowledged' },
+    })
+  }
+
+  // `snoozed_by` is deliberately left on the row. It is who last put it off, and clearing it
+  // would lose the answer to "why did this disappear for a fortnight?" — the column the snooze
+  // is over, `snoozed_until`, is the one that has to go.
+  return { returned: due.length }
 }

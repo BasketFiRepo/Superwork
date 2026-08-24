@@ -20,7 +20,21 @@ export interface InsightView {
   evidence: { claim: string }[]
   recommendedActions: { label: string; tool: string; args: Record<string, unknown> }[]
   createdAt: string
+  /** Set while this one is put off, and the date it comes back (ADR 0083). */
+  snoozedUntil?: string | null
+  snoozedByName?: string | null
 }
+
+/**
+ * How long you can put one off for, in the words people use about it. Capped at a month by the
+ * repository, because past that a deferral is a dismissal wearing a date — and dismissing says
+ * something the watcher can learn from.
+ */
+const SNOOZE_CHOICES = [
+  { label: 'Tomorrow', days: 1 },
+  { label: 'Next week', days: 7 },
+  { label: 'In a fortnight', days: 14 },
+] as const
 
 const DISMISS_REASONS = [
   { id: 'not_useful', label: 'Not useful' },
@@ -32,6 +46,7 @@ const DISMISS_REASONS = [
 export function InsightCard({ insight }: { insight: InsightView }) {
   const router = useRouter()
   const [asking, setAsking] = useState(false)
+  const [deferring, setDeferring] = useState(false)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   /** Set when a dismissal was refused for permission — the rating alone is still allowed. */
@@ -89,6 +104,25 @@ export function InsightCard({ insight }: { insight: InsightView }) {
       const body = await response.json().catch(() => ({ error: 'That could not be started.' }))
       setNote(body.error)
     }
+  }
+
+  async function snooze(days: number) {
+    setBusy(true)
+    setNote(null)
+    const until = new Date(Date.now() + days * 86_400_000)
+    const response = await fetch(`/api/insights/${insight.id}/snooze`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ until: until.toISOString() }),
+    })
+    setBusy(false)
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: 'That could not be read.' }))
+      setNote(body.error)
+      return
+    }
+    setDeferring(false)
+    router.refresh()
   }
 
   return (
@@ -161,6 +195,30 @@ export function InsightCard({ insight }: { insight: InsightView }) {
               </button>
             </div>
           </div>
+        ) : deferring ? (
+          <div className="stack stack-4" data-testid="insight-snooze">
+            <span className="micro">Put this off until when?</span>
+            <span className="small muted">
+              It comes back to this list on the day, and whoever put it off is told. Nothing is
+              said about the watcher either way — that is what dismissing is for.
+            </span>
+            <div className="row wrap">
+              {SNOOZE_CHOICES.map((choice) => (
+                <button
+                  key={choice.label}
+                  className="btn btn-sm"
+                  data-testid="insight-snooze-choice"
+                  disabled={busy}
+                  onClick={() => snooze(choice.days)}
+                >
+                  {choice.label}
+                </button>
+              ))}
+              <button className="btn btn-ghost btn-sm" onClick={() => setDeferring(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="row wrap">
             {insight.recommendedActions.map((action) => (
@@ -170,6 +228,27 @@ export function InsightCard({ insight }: { insight: InsightView }) {
             ))}
             <button className="btn btn-sm" disabled={busy} onClick={() => send({ helpful: true, status: 'acknowledged' })}>
               Acknowledge
+            </button>
+            {/*
+              Finishing one the watcher got right (ADR 0083). Until this existed the only way to
+              close it was Dismiss, which is a verdict on the watcher: it feeds `watcherQuality`
+              and can auto-mute one. People were being asked to slander a watcher for being useful.
+            */}
+            <button
+              className="btn btn-sm"
+              data-testid="insight-resolve"
+              disabled={busy}
+              onClick={() => send({ helpful: true, status: 'resolved' })}
+            >
+              Done
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              data-testid="insight-snooze-open"
+              disabled={busy}
+              onClick={() => setDeferring(true)}
+            >
+              Not now
             </button>
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setAsking(true)}>
               Dismiss
