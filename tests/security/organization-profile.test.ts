@@ -18,6 +18,7 @@ import {
   ValidationError,
 } from '@superwork/core'
 import { loadSystemPrompt, renderPrompt } from '@superwork/ai'
+import { DEFAULT_PLAN_LIMITS } from '@superwork/config'
 import { createTenant, destroyTenant, type TenantFixture } from '../helpers/fixtures.js'
 
 /**
@@ -182,9 +183,16 @@ describe('the currency is the one money is written in', () => {
     expect(inPounds.reason).toContain('£')
 
     // Put the shared plan row back: it is not this tenant's to keep changed.
+    //
+    // Restored from `DEFAULT_PLAN_LIMITS` rather than from a literal. It was `NULL` here, and the
+    // fixture tenant is on the free plan whose cap is £5 — so this test left every plan row it
+    // touched uncapped for everything that ran after it, in a table with no `organization_id` and
+    // therefore no tenant boundary to contain the damage (ADR 0086).
+    const [tenant] = await adminSql()<{ tier: 'free' | 'team' | 'business' | 'enterprise' }[]>`
+      SELECT plan_tier AS tier FROM organizations WHERE id = ${org.organizationId}`
     await adminSql()`
-      UPDATE plan_limits SET ai_spend_cap_cents = NULL
-      WHERE tier = (SELECT plan_tier FROM organizations WHERE id = ${org.organizationId})`
+      UPDATE plan_limits SET ai_spend_cap_cents = ${DEFAULT_PLAN_LIMITS[tenant!.tier].aiSpendCapCents}
+      WHERE tier = ${tenant!.tier}`
     await adminSql()`
       DELETE FROM usage_records WHERE organization_id = ${org.organizationId}`
   })

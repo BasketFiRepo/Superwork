@@ -92,7 +92,16 @@ const MANAGER = compose(MEMBER, [
   'insight:*:department', 'agent_run:read:department',
 ])
 
-/** A manager whose department is the organization, plus what only an administrator sees. */
+/**
+ * A manager whose department is the organization, plus what only an administrator sees.
+ *
+ * `billing:update` is deliberately not here (ADR 0086). An admin reads what the company is
+ * charged and does not change it: `tests/security/permission-grants.test.ts` has used that pair as
+ * its example of a capability an admin cannot mint since ADR 0055, and buying a larger plan is a
+ * commitment the person who signed for the organization makes. The owner reaches it the way they
+ * reach everything else — `*:*:org` — and no wildcard granted to a service can, because changing
+ * a plan also asks for a password and only a person has one.
+ */
 const ADMIN = compose(MANAGER, [
   'task:*:org', 'project:*:org', 'milestone:*:org', 'document:*:org', 'knowledge:*:org',
   'company:*:org', 'contact:*:org', 'conversation:*:org', 'note:*:org',

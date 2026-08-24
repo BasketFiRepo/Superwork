@@ -1,5 +1,6 @@
 import { env } from '@superwork/config'
 import type {
+  BillingProvider,
   ChatProvider,
   CrmProvider,
   EmailProvider,
@@ -8,6 +9,7 @@ import type {
   RuntimeMode,
   StorageProvider,
 } from './contracts.js'
+import { MockBillingProvider } from './mock/billing.js'
 import { MockEmailProvider } from './mock/email.js'
 import { MockStorageProvider } from './mock/storage.js'
 import { FetchHttpTransport, MockHttpTransport, type HttpTransport } from './http.js'
@@ -20,6 +22,7 @@ import {
 
 export * from './contracts.js'
 export * from './http.js'
+export { MockBillingProvider } from './mock/billing.js'
 export { MockEmailProvider } from './mock/email.js'
 export { MockStorageProvider, storageKeyFor } from './mock/storage.js'
 export {
@@ -38,7 +41,8 @@ export {
  * Slack is connected.
  */
 
-export type Capability = 'email' | 'calendar' | 'storage' | 'chat' | 'finance' | 'crm' | 'identity' | 'http'
+export type Capability =
+  | 'email' | 'calendar' | 'storage' | 'chat' | 'finance' | 'crm' | 'identity' | 'http' | 'billing'
 
 const overrides: Partial<Record<Capability, unknown>> = {}
 
@@ -52,6 +56,20 @@ export function emailProvider(): EmailProvider {
 
 export function storageProvider(): StorageProvider {
   return resolve('storage', () => new MockStorageProvider())
+}
+
+/**
+ * The billing system, which is not this one (ADR 0086). `BILLING_MODE` has been in the
+ * environment schema since Phase 0 and was read by nothing; it chooses here. Anything but `mock`
+ * needs an implementation a deployment supplies, so the default resolves to the simulated one and
+ * every figure it returns is badged as such.
+ */
+export function billingProvider(): BillingProvider {
+  return resolve('billing', () => new MockBillingProvider())
+}
+
+export function billingMode(): RuntimeMode {
+  return env().BILLING_MODE
 }
 
 export function chatProvider(): ChatProvider {
@@ -157,6 +175,13 @@ export function capabilityCatalogue(): CapabilityDescriptor[] {
       degradesTo: 'People sign in with a password and are invited by hand.',
       mode: 'mock',
       vendorHint: 'Okta · Entra ID · Google Workspace',
+    },
+    {
+      capability: 'billing',
+      label: 'Billing',
+      degradesTo: 'Plan changes are recorded and enforced here; no card is held and nothing is charged.',
+      mode: config.BILLING_MODE,
+      vendorHint: 'Stripe · Chargebee · an internal finance system',
     },
   ]
 }

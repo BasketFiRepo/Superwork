@@ -5,6 +5,8 @@ import { asAgent, can, killSwitchEngaged, loadActor, type Actor } from '@superwo
 import {
   BudgetError,
   checkSpendLimits,
+  effectiveLimits,
+  planAllowance,
   claimNextRun,
   createApproval,
   enqueueRun,
@@ -92,6 +94,13 @@ export async function startRun(session: RunSession, input: StartRunInput): Promi
       SELECT plan_tier, is_demo FROM organizations WHERE id = ${ctx.organizationId}`
     const spend = await checkSpendLimits(ctx, org?.plan_tier ?? 'free')
     if (!spend.allow) throw new BudgetError(spend.reason)
+
+    // What the plan allows, beside what the budget allows (ADR 0086). `agent_runs_per_month` had
+    // a number on every tier, a row in `plan_limits` and a line on the billing screen, and was
+    // enforced nowhere — so every plan allowed the same unlimited number of runs and moving plan
+    // moved a word. This is also where a cancelled or unpaid subscription stops new work.
+    const allowance = await planAllowance(ctx, 'agent_run')
+    if (!allowance.allow) throw new BudgetError(allowance.reason)
 
     // The agent is resolved before the budget rather than inside `insertRun`, because what this
     // run may spend is its own agent's business (ADR 0077). `agents.budget` has existed since
@@ -1304,6 +1313,18 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
       persona.unreadDigests >= 2
         ? `${persona.name} has written ${persona.unreadDigests} reports its owner has not read.`
         : null
+    // And whether the plan allows unattended work at all (ADR 0086). `plan_limits.autopilot_allowed`
+    // was shown on the billing screen as "allowed" or "not on this plan" and read by nothing, so an
+    // organization on the free plan ran agents unattended exactly as one paying for it did.
+    //
+    // Withheld rather than refused: this is the ceiling ADR 0068 already built. The agent goes on
+    // proposing and doing reversible things with a person in the loop, and the run's own timeline
+    // says which limit dropped it — an autopilot that silently became an assistant is worse than
+    // one that says why.
+    const plan = await effectiveLimits(ctx)
+    const notOnThisPlan = plan.autopilotAllowed
+      ? null
+      : `Unattended running is not on the ${plan.tier} plan, so ${persona.name} proposes and waits for a person.`
     return {
       agentId: persona.agentId,
       key: persona.key,
@@ -1315,7 +1336,7 @@ async function resolvePersona(ctx: TenantContext, key: string): Promise<RunPerso
       maxSensitivity: persona.maxSensitivity,
       autopilotDailyActionCap: persona.autopilotDailyActionCap,
       autopilotWeeklyCostCapCents: persona.autopilotWeeklyCostCapCents,
-      autopilotWithheldReason: certification.stale ? certification.summary : unread,
+      autopilotWithheldReason: certification.stale ? certification.summary : (notOnThisPlan ?? unread),
     }
   }
   // No row: the ad-hoc assistant, which is what a person gets when they type into the

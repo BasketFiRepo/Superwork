@@ -9,6 +9,7 @@ import {
   markFailed,
   markSendFailed,
   openLaddersForDueWork,
+  renewDueSubscriptions,
   runIngestionJobs,
   advanceMailboxCursor,
   fileInbound,
@@ -19,7 +20,7 @@ import {
   writeActivity,
 } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
-import { emailProvider } from '@superwork/integrations'
+import { billingProvider, emailProvider } from '@superwork/integrations'
 
 /**
  * Collecting what the connected mailboxes have (ADR 0084).
@@ -96,6 +97,12 @@ const SCHEDULE_MS = Number(process.env['WORKER_SCHEDULE_MS'] ?? 60_000)
 // less often lets data outlive its window by up to that interval, which is a promise broken
 // by a scheduling choice.
 const RETENTION_MS = Number(process.env['WORKER_RETENTION_MS'] ?? 24 * 60 * 60_000)
+/**
+ * Billing periods end on a date, so the sweep that notices is hourly rather than by the minute.
+ * A renewal an hour late is a renewal; a declined payment retried every minute is a merchant
+ * account under review (ADR 0086).
+ */
+const BILLING_MS = Number(process.env['WORKER_BILLING_MS'] ?? 60 * 60_000)
 /**
  * How long this process should live, for hosts that give it a slice rather than a machine.
  *
@@ -255,6 +262,7 @@ async function main(): Promise<void> {
   let lastNudgeRun = 0
   let lastScheduleSweep = 0
   let lastRetentionSweep = 0
+  let lastBillingSweep = 0
 
   while (!stopping) {
     const organizations = await activeOrganizations()
@@ -395,6 +403,26 @@ async function main(): Promise<void> {
           }
         } catch (error) {
           console.error(`[workflows] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+      }
+    }
+
+    // The billing period that ended (§19, ADR 0086). `subscriptions.period_end` was a column
+    // nothing wrote and nothing acted on, so a plan had no end and no renewal — the date on the
+    // billing screen was whatever the seed happened to leave. Whatever this decides is written
+    // down and the owner is told: a plan that quietly lapsed is the failure this prevents.
+    if (Date.now() - lastBillingSweep > BILLING_MS) {
+      lastBillingSweep = Date.now()
+      for (const org of organizations) {
+        if (!org.ownerId) continue
+        try {
+          const outcome = await withTenant(
+            { organizationId: org.id, userId: org.ownerId, timezone: org.timezone },
+            (ctx) => renewDueSubscriptions(ctx, billingProvider()),
+          )
+          if (outcome) console.log(`[billing] ${org.id}: ${outcome.action} — ${outcome.note}`)
+        } catch (error) {
+          console.error(`[billing] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
       }
     }

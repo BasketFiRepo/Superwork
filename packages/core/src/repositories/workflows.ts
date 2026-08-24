@@ -7,6 +7,7 @@ import { writeActivity, writeAudit } from '../audit.js'
 import { describeCron } from '../cron.js'
 import { startOfDay } from '../time.js'
 import { assertSteppedUp } from '../step-up.js'
+import { planAllowance } from '../subscription.js'
 import { setScheduleEnabled, upsertSchedule, type CatchUpPolicy, type ScheduleView } from './schedules.js'
 
 /**
@@ -326,6 +327,16 @@ export interface Capacity {
  * "what has it done today" would eventually disagree about the only thing that matters.
  */
 export async function checkCapacity(ctx: TenantContext, workflow: WorkflowView): Promise<Capacity> {
+  // What the plan allows, before what this workflow's own throttles allow (ADR 0086).
+  // `workflow_runs_per_month` had a number on every tier and no reader, so the free plan and the
+  // enterprise plan ran the same unlimited number of automations. It is asked first because it is
+  // the outer limit: a run the organization has not paid for is not held back by a throttle, and
+  // saying "still waiting for approvals" to somebody whose plan has run out is the wrong sentence.
+  const plan = await planAllowance(ctx, 'workflow_run')
+  if (!plan.allow) {
+    return { allow: false, remaining: 0, unfinished: 0, usedToday: 0, reason: `Skipped: ${plan.reason}` }
+  }
+
   const [busy] = await ctx.sql<{ count: number }[]>`
     SELECT count(*)::int AS count FROM workflow_runs
     WHERE organization_id = ${ctx.organizationId} AND workflow_id = ${workflow.id}

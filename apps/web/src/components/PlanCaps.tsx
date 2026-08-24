@@ -29,14 +29,27 @@ export interface PlanView {
     perUserDailySpendCapCents: number | null
     seats: number | null
     agentRunsPerMonth: number | null
+    documentsIndexed: number | null
+    storageGb: number | null
+    workflowRunsPerMonth: number | null
     autopilotAllowed: boolean
     tightened: boolean
     source: { tier: string; limits: string; aiSpendCap: string; perUserDailyCap: string }
   }
   planCaps: { aiSpendCapCents: number | null; perUserDailySpendCapCents: number | null }
+  /** What each limit is measured against. Shown because the plan now stops these (ADR 0086). */
+  usage: {
+    agentRunsThisMonth: number
+    workflowRunsThisMonth: number
+    documentsIndexed: number
+    storageBytes: number
+  }
 }
 
 const money = (cents: number | null) => (cents === null ? 'no limit' : `£${(cents / 100).toFixed(2)}`)
+const limit = (value: number | null) => (value === null ? 'no limit' : value.toLocaleString('en-GB'))
+const gigabytes = (bytes: number) =>
+  bytes >= 1024 * 1024 * 1024 ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB` : `${Math.round(bytes / 1024 / 1024)}MB`
 
 export function PlanCaps({ plan }: { plan: PlanView }) {
   const router = useRouter()
@@ -141,6 +154,47 @@ export function PlanCaps({ plan }: { plan: PlanView }) {
               </td>
             </tr>
             <tr data-testid="plan-row">
+              <td>Agent runs this month</td>
+              <td className="num">
+                {plan.usage.agentRunsThisMonth.toLocaleString('en-GB')}
+                {plan.limits.agentRunsPerMonth === null ? '' : ` / ${plan.limits.agentRunsPerMonth.toLocaleString('en-GB')}`}
+              </td>
+              <td className="num secondary">{limit(plan.limits.agentRunsPerMonth)}</td>
+              <td className="small secondary">
+                At the limit a run is refused rather than queued, and the count resets on the first
+                of the month.
+              </td>
+            </tr>
+            <tr data-testid="plan-row">
+              <td>Workflow runs this month</td>
+              <td className="num">
+                {plan.usage.workflowRunsThisMonth.toLocaleString('en-GB')}
+                {plan.limits.workflowRunsPerMonth === null
+                  ? ''
+                  : ` / ${plan.limits.workflowRunsPerMonth.toLocaleString('en-GB')}`}
+              </td>
+              <td className="num secondary">{limit(plan.limits.workflowRunsPerMonth)}</td>
+              <td className="small secondary">Dry runs are not counted: they are what activation requires.</td>
+            </tr>
+            <tr data-testid="plan-row">
+              <td>Documents indexed</td>
+              <td className="num">
+                {plan.usage.documentsIndexed.toLocaleString('en-GB')}
+                {plan.limits.documentsIndexed === null ? '' : ` / ${plan.limits.documentsIndexed.toLocaleString('en-GB')}`}
+              </td>
+              <td className="num secondary">{limit(plan.limits.documentsIndexed)}</td>
+              <td className="small secondary">What is held, not what was added this month.</td>
+            </tr>
+            <tr data-testid="plan-row">
+              <td>Files kept</td>
+              <td className="num">
+                {gigabytes(plan.usage.storageBytes)}
+                {plan.limits.storageGb === null ? '' : ` / ${plan.limits.storageGb}GB`}
+              </td>
+              <td className="num secondary">{plan.limits.storageGb === null ? 'no limit' : `${plan.limits.storageGb}GB`}</td>
+              <td className="small secondary">The bytes behind documents. Deleting a document takes them with it.</td>
+            </tr>
+            <tr data-testid="plan-row">
               <td>Autopilot</td>
               <td>
                 <span className={plan.limits.autopilotAllowed ? 'chip chip-positive' : 'chip'}>
@@ -148,7 +202,10 @@ export function PlanCaps({ plan }: { plan: PlanView }) {
                 </span>
               </td>
               <td className="secondary">—</td>
-              <td className="small secondary">Set by the plan, not by a switch here.</td>
+              <td className="small secondary">
+                Set by the plan, not by a switch here. Where it is not allowed, an agent asked to run
+                unattended proposes instead and says so on the run.
+              </td>
             </tr>
           </tbody>
         </table>

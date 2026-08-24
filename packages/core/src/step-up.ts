@@ -61,6 +61,11 @@ export const STEP_UP_ACTIONS = {
   // time with nobody watching. Tightening never asks: deciding an agent may do less is the
   // direction that should be easy (ADR 0077).
   'agent.budget': 'letting an agent do more on a single run',
+  // The one with no safe direction (ADR 0086). Every other action here asks in one direction and
+  // not the other, because one of the two only ever narrows. Buying a larger plan spends the
+  // company's money and cancelling stops its service, so both are asked: a lifted cookie must not
+  // be able to do either on somebody's behalf.
+  'billing.change': 'changing what this company pays for',
 } as const
 
 export type StepUpAction = keyof typeof STEP_UP_ACTIONS
