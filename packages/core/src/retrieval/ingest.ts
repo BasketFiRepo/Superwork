@@ -271,8 +271,36 @@ async function verifyIndex(
  * Deleting a document must delete its chunks, embeddings and derived memories —
  * otherwise you have a compliance hole and a hallucination source (§25.13).
  */
-export async function purgeDocument(ctx: TenantContext, documentId: string): Promise<void> {
+export async function purgeDocument(
+  ctx: TenantContext,
+  documentId: string,
+  /**
+   * How to remove the stored bytes (ADR 0085). Passed in rather than imported so `@superwork/core`
+   * does not depend on `@superwork/integrations`, the same shape `attachFile` takes.
+   *
+   * §25.13 says deleting a document deletes its chunks, embeddings and memories. A file behind it
+   * is the same rule: leaving the bytes in a bucket after the row is gone is a deletion that only
+   * removed the index to the thing somebody asked to be rid of.
+   */
+  store?: { remove(key: string): Promise<void> },
+): Promise<void> {
   const sql = ctx.sql
+
+  // Read the key before the row goes; after the DELETE there is nothing left to ask.
+  const [file] = await sql<{ key: string | null }[]>`
+    SELECT storage_key AS key FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND id = ${documentId}`
+  if (store && file?.key) {
+    // The bytes are keyed by content hash, so another document holding the same file would lose
+    // it too. Checked rather than assumed — a purge that quietly breaks a second document is a
+    // worse failure than one that leaves an orphan.
+    const [shared] = await sql<{ others: number }[]>`
+      SELECT count(*)::int AS others FROM documents
+      WHERE organization_id = ${ctx.organizationId} AND storage_key = ${file.key}
+        AND id <> ${documentId} AND deleted_at IS NULL`
+    if ((shared?.others ?? 0) === 0) await store.remove(file.key)
+  }
+
   await sql`DELETE FROM document_chunks WHERE organization_id = ${ctx.organizationId} AND document_id = ${documentId}`
   // The FK cascades, but the guarantee should not depend on a schema detail written two
   // migrations away: a purged document leaves no record that it was ever indexed.

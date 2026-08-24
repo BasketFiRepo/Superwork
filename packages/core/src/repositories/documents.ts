@@ -35,6 +35,10 @@ export interface DocumentView {
   spaceId: string | null
   spaceName: string | null
   chunkCount: number
+  /** The original behind the text, when somebody attached one (ADR 0085). */
+  mimeType: string
+  fileName: string | null
+  fileBytes: number | null
   /** Who decided the classification: the classifier, or a named person (ADR 0044). */
   sensitivitySource: 'auto' | 'human'
   /** What the classifier last read the content as, kept even when a person overrode it. */
@@ -53,6 +57,7 @@ export interface DocumentView {
 
 const SELECT_DOC = (ctx: TenantContext) => ctx.sql`
   SELECT d.id, d.title, d.doc_type AS "docType", d.sensitivity,
+         d.mime_type AS "mimeType", d.file_name AS "fileName", d.file_bytes AS "fileBytes",
          d.sensitivity_source AS "sensitivitySource", d.sensitivity_auto AS "sensitivityAuto",
          (SELECT name FROM users WHERE id = d.sensitivity_set_by) AS "sensitivitySetByName",
          d.sensitivity_set_at AS "sensitivitySetAt", d.sensitivity_reason AS "sensitivityReason",
@@ -522,7 +527,12 @@ export async function deleteDocument(
   ctx: TenantContext,
   actor: Actor,
   input: { documentId: string; reason: string },
-): Promise<{ title: string; chunks: number; citations: number; memories: number }> {
+  /**
+   * How to remove the stored bytes (ADR 0085). Optional so every existing caller keeps working,
+   * and passed by the API layer that has the provider — §25.13's rule now reaches the file.
+   */
+  store?: { remove(key: string): Promise<void> },
+): Promise<{ title: string; chunks: number; citations: number; memories: number; file: string | null }> {
   const document = await getDocument(ctx, actor, input.documentId)
   const decision = can(actor, 'document:delete', {
     type: 'document',
@@ -560,7 +570,11 @@ export async function deleteDocument(
           AND source_citation->>'documentId' = ${input.documentId}
           AND state <> 'forgotten') AS memories`
 
-  await purgeDocument(ctx, input.documentId)
+  const [attached] = await ctx.sql<{ fileName: string | null }[]>`
+    SELECT file_name AS "fileName" FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+
+  await purgeDocument(ctx, input.documentId, store)
 
   await writeAudit(ctx, {
     actorType: actor.type,
@@ -574,6 +588,7 @@ export async function deleteDocument(
       chunksRemoved: counts?.chunks ?? 0,
       citationsRemoved: counts?.citations ?? 0,
       memoriesForgotten: counts?.memories ?? 0,
+      fileRemoved: attached?.fileName ?? null,
     },
   })
   await writeActivity(ctx, {
@@ -594,5 +609,151 @@ export async function deleteDocument(
     chunks: counts?.chunks ?? 0,
     citations: counts?.citations ?? 0,
     memories: counts?.memories ?? 0,
+    file: attached?.fileName ?? null,
   }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// A file somebody attached (ADR 0085)
+
+/**
+ * What may be attached, and it is a list rather than a filter.
+ *
+ * An allowlist refuses what it does not know; a blocklist admits it. The difference matters most
+ * for the types a browser will happily execute — `text/html`, `image/svg+xml` — which is the same
+ * rule the product already keeps about never rendering untrusted HTML, applied one layer earlier.
+ */
+export const ATTACHABLE_TYPES: Record<string, string> = {
+  'application/pdf': 'PDF',
+  'text/plain': 'plain text',
+  'text/csv': 'CSV',
+  'image/png': 'PNG image',
+  'image/jpeg': 'JPEG image',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'spreadsheet',
+}
+
+/** Twenty megabytes. Larger than any contract and smaller than anything that belongs in a bucket. */
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+export interface AttachFileInput {
+  documentId: string
+  fileName: string
+  contentType: string
+  body: Buffer
+}
+
+export interface AttachedFile {
+  fileName: string
+  contentType: string
+  bytes: number
+}
+
+/**
+ * Putting bytes behind a document (ADR 0085).
+ *
+ * `StorageProvider` was declared with no implementation at all, so `documents.storage_key` and
+ * `documents.mime_type` sat empty and every document was markdown somebody had pasted in.
+ *
+ * Attaching is `document:update` on the document itself, not `document:create` — the document
+ * already exists and its classification already decides who may open it. A file inherits that
+ * clearance rather than carrying one of its own, because two sensitivities on one thing is two
+ * answers to "who may read this".
+ */
+export async function attachFile(
+  ctx: TenantContext,
+  actor: Actor,
+  input: AttachFileInput,
+  store: { put(key: string, body: Buffer, contentType: string): Promise<{ key: string; bytes: number }> },
+  keyFor: (organizationId: string, body: Buffer) => string,
+): Promise<AttachedFile> {
+  const document = await getDocument(ctx, actor, input.documentId)
+
+  const decision = can(actor, 'document:update', {
+    type: 'document',
+    id: document.id,
+    organizationId: ctx.organizationId,
+    ownerId: document.ownerId,
+    sensitivity: document.sensitivity,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const contentType = input.contentType.split(';')[0]!.trim().toLowerCase()
+  if (!(contentType in ATTACHABLE_TYPES)) {
+    throw new ValidationError(
+      `Superwork does not keep ${contentType || 'files of that type'}. It takes ` +
+        `${Object.values(ATTACHABLE_TYPES).join(', ')}.`,
+    )
+  }
+  if (input.body.byteLength === 0) throw new ValidationError('That file is empty.')
+  if (input.body.byteLength > MAX_ATTACHMENT_BYTES) {
+    throw new ValidationError(
+      `That file is ${(input.body.byteLength / 1024 / 1024).toFixed(1)}MB. The limit is ` +
+        `${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB.`,
+    )
+  }
+  const fileName = input.fileName.trim().replace(/[\r\n]/g, '').slice(0, 200)
+  if (!fileName) throw new ValidationError('Give the file a name.')
+
+  const key = keyFor(ctx.organizationId, input.body)
+  const stored = await store.put(key, input.body, contentType)
+
+  await ctx.sql`
+    UPDATE documents
+       SET storage_key = ${key}, mime_type = ${contentType}, file_bytes = ${stored.bytes},
+           file_name = ${fileName}, updated_at = now(), version = version + 1
+     WHERE organization_id = ${ctx.organizationId} AND id = ${input.documentId}`
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.file_attached',
+    entityType: 'document',
+    entityId: document.id,
+    after: { fileName, contentType, bytes: stored.bytes },
+  })
+
+  return { fileName, contentType, bytes: stored.bytes }
+}
+
+export interface StoredFile {
+  key: string
+  fileName: string
+  contentType: string
+  bytes: number
+}
+
+/**
+ * The file behind a document, for somebody entitled to the document.
+ *
+ * **Every fetch asks `can()` again.** There is no signed URL and no token: a link that works on
+ * possession can be forwarded, logged by a proxy, or opened out of a browser history after the
+ * person's clearance changed. `signedUrl` came off the `StorageProvider` contract for that reason.
+ * The file is behind exactly the question the document is behind, asked every time.
+ */
+export async function fileFor(ctx: TenantContext, actor: Actor, documentId: string): Promise<StoredFile> {
+  // Through the reader, so a document above this person's ceiling answers as though it is not
+  // here rather than refusing in a way that confirms it exists (§3.2).
+  const document = await getDocument(ctx, actor, documentId)
+
+  const [row] = await ctx.sql<
+    { key: string | null; fileName: string | null; contentType: string; bytes: number | null }[]
+  >`
+    SELECT storage_key AS key, file_name AS "fileName", mime_type AS "contentType", file_bytes AS bytes
+    FROM documents
+    WHERE organization_id = ${ctx.organizationId} AND id = ${documentId} AND deleted_at IS NULL`
+  if (!row?.key) throw new NotFoundError()
+
+  await writeAudit(ctx, {
+    actorType: actor.type,
+    actorId: actor.userId,
+    action: 'document.file_opened',
+    entityType: 'document',
+    entityId: document.id,
+    after: { fileName: row.fileName },
+  })
+
+  return { key: row.key, fileName: row.fileName!, contentType: row.contentType, bytes: row.bytes! }
 }
