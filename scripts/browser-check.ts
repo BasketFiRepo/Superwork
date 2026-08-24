@@ -1469,44 +1469,51 @@ try {
   // assertion actually mints a session — and the four ways one is refused — is
   // tests/security/sso-sign-in.test.ts, where the directory is ours to answer for.
   //
-  // On a screen of its own rather than the one the residency beats left behind. Every save on this
-  // page ends in `router.refresh()`, and a refresh that lands between ticking a box and pressing
-  // Save re-mounts the form from the server's values — taking the tick with it, so the save that
-  // followed asked for nothing and was not refused. That is what failed in CI and passed here: the
-  // race is won or lost on how quickly a refresh comes back.
+  // Everything here ticks a box and then *proves the application took the tick*, rather than
+  // trusting that it did. A checkbox is a DOM node before it is React state, and twice in CI the
+  // gap between the two ate a tick: once on a page that had not finished hydrating, once when the
+  // `router.refresh()` after the previous save re-mounted the form from the server's values. Both
+  // times the DOM said checked, the save posted the old state, and the server — correctly — did
+  // not refuse a save that asked for nothing. A walk that cannot tell that apart from a working
+  // switch is a walk that would have passed this feature with the switch unwired.
   await page.goto(`${BASE}/settings/identity`)
   await page.waitForSelector('[data-testid="sso-settings"]', { timeout: 15_000 })
+  // Hydration has to have happened before a tick means anything: until it has, nothing is
+  // listening to the box. Advisory rather than load-bearing — a screen that keeps a connection
+  // open never goes idle, and this must not be the line that fails a walk over it.
+  const settled = () => page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+  await settled()
   const ssoText = await page.locator('[data-testid="sso-settings"]').innerText()
   ok('The identity screen asks where the assertions come from',
     /Metadata URL/i.test(ssoText) && /publishes the key that signs/i.test(ssoText))
 
   const ssoToggle = page.locator('[data-testid="sso-settings"] input[type=checkbox]').first()
   const ssoSave = page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' })
-  await ssoToggle.check()
-  // Asserted rather than assumed, immediately before the click that depends on it: if a refresh
-  // ever takes the tick back again, this names that rather than timing out on a banner that was
-  // never going to appear.
-  ok('The switch can be turned on', await ssoToggle.isChecked())
+  const identityRefusal = page.locator('[data-testid="identity-error"]')
+
+  /** Ticks the box and saves, returning whatever refusal came back — empty when none did. */
+  const saveWithSsoOn = async (): Promise<string> => {
+    await ssoToggle.check()
+    await ssoSave.click()
+    return identityRefusal
+      .waitFor({ timeout: 8_000 })
+      .then(() => identityRefusal.innerText(), () => '')
+  }
 
   // A refusal this walk is asking for, so the response listener does not count its 400 as a
   // screen that broke — the same flag the residency beat above sets for the same reason.
   expectingRefusal = true
-  await ssoSave.click()
-  // Waits for *a* refusal and then reads it, rather than waiting for the words it expects. The
-  // difference matters when this fails: the first shape times out for twenty seconds and reports
-  // nothing, and the second says what the screen actually said.
-  const identityRefusal = page.locator('[data-testid="identity-error"]')
-  const identityRefusalText = await identityRefusal
-    .waitFor({ timeout: 20_000 })
-    .then(() => identityRefusal.innerText(), () => '')
+  let identityRefusalText = await saveWithSsoOn()
+  // A save that was not refused means the tick did not reach the state the button reads. Ticking
+  // again is the whole repair: by now the page is hydrated and nothing is refreshing under it.
+  for (let attempt = 0; attempt < 2 && !identityRefusalText; attempt++) {
+    await settled()
+    identityRefusalText = await saveWithSsoOn()
+  }
   ok('Turning single sign-on on without one is refused, saying why',
     /metadata URL/i.test(identityRefusalText),
     identityRefusalText.replace(/\s+/g, ' ').slice(0, 70) || 'the save was not refused at all')
   expectingRefusal = false
-
-  await page.fill('[data-testid="sso-provider"]', 'Okta')
-  await page.fill('[data-testid="sso-metadata-url"]', 'https://northwind.okta.example/app/exk1/sso/saml/metadata')
-  await ssoSave.click()
 
   // The switch is a decision, and the way to see that is that the sign-in screen changes. Polled
   // rather than slept on: the save has to reach the database before another page can read it, and
@@ -1520,7 +1527,25 @@ try {
     }
     return false
   }
-  ok('With it on, the sign-in screen offers the directory', await directoryPanel(1))
+
+  /** Sets the switch and does not believe it until the sign-in screen says so. */
+  const setDirectorySignIn = async (on: boolean): Promise<boolean> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await settled()
+      if (on) {
+        await page.fill('[data-testid="sso-provider"]', 'Okta')
+        await page.fill('[data-testid="sso-metadata-url"]', 'https://northwind.okta.example/app/exk1/sso/saml/metadata')
+        await ssoToggle.check()
+      } else {
+        await ssoToggle.uncheck()
+      }
+      await ssoSave.click()
+      if (await directoryPanel(on ? 1 : 0)) return true
+    }
+    return false
+  }
+
+  ok('With it on, the sign-in screen offers the directory', await setDirectorySignIn(true))
   await signInPage.fill('[data-testid="sso-assertion"]', 'not-a-real-assertion')
   await signInPage.locator('[data-testid="sso-submit"]').click()
   await signInPage.waitForSelector('[data-testid="sso-error"]', { timeout: 20_000 })
@@ -1529,10 +1554,7 @@ try {
   if (SHOTS) await signInPage.screenshot({ path: `${SHOTS}/sso-sign-in.png`, fullPage: true })
 
   // Off again, so the demo ends where it started and the walk can be run twice.
-  await ssoToggle.uncheck()
-  ok('The switch can be turned off again', !(await ssoToggle.isChecked()))
-  await ssoSave.click()
-  ok('With it off, the screen offers no way in that nobody accepts', await directoryPanel(0))
+  ok('With it off, the screen offers no way in that nobody accepts', await setDirectorySignIn(false))
   await signInPage.close()
 
   // Back to the screen the erasure beats below are standing on. This section is wedged into the
