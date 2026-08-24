@@ -106,18 +106,86 @@ export interface ParticipantView {
   userId: string | null
   contactId: string | null
   role: string
+  /** True, false, or null — and null is *not recorded*, which is not the same as absent. */
   attended: boolean | null
+  attendedSetByName: string | null
+  attendedSetAt: Date | null
   consentedAt: Date | null
   isExternal: boolean
 }
 
 export async function listParticipants(ctx: TenantContext, meetingId: string): Promise<ParticipantView[]> {
   return ctx.sql<ParticipantView[]>`
-    SELECT id, display_name AS "displayName", user_id AS "userId", contact_id AS "contactId",
-           role, attended, consented_at AS "consentedAt", (user_id IS NULL) AS "isExternal"
-    FROM meeting_participants
-    WHERE organization_id = ${ctx.organizationId} AND meeting_id = ${meetingId} AND deleted_at IS NULL
-    ORDER BY (user_id IS NULL), display_name`
+    SELECT mp.id, mp.display_name AS "displayName", mp.user_id AS "userId",
+           mp.contact_id AS "contactId", mp.role, mp.attended,
+           setter.name AS "attendedSetByName", mp.attended_set_at AS "attendedSetAt",
+           mp.consented_at AS "consentedAt", (mp.user_id IS NULL) AS "isExternal"
+    FROM meeting_participants mp
+    LEFT JOIN users setter ON setter.id = mp.attended_set_by
+    WHERE mp.organization_id = ${ctx.organizationId} AND mp.meeting_id = ${meetingId}
+      AND mp.deleted_at IS NULL
+    ORDER BY (mp.user_id IS NULL), mp.display_name`
+}
+
+/**
+ * Who was actually in the room (ADR 0081).
+ *
+ * `attended` has existed since 0010 and nothing but the seed has ever written it, while the
+ * personal record has been counting rows in this table and calling the number "Meetings you
+ * attended". This is the writer that makes that sentence true.
+ *
+ * **Three values, and the third one is not a gap.** `null` means nobody has recorded an answer;
+ * `false` means somebody says this person was not there. Collapsing them would turn silence into
+ * an accusation, which is exactly what the seed did to every meeting in the future.
+ *
+ * Gated on `project:update` rather than a read, because it writes a fact about somebody else. A
+ * viewer who may open the meeting may not say who was in it.
+ */
+export async function setAttendance(
+  ctx: TenantContext,
+  actor: Actor,
+  input: { meetingId: string; participantId: string; attended: boolean | null },
+): Promise<ParticipantView[]> {
+  const meeting = await getMeeting(ctx, actor, input.meetingId)
+
+  const decision = can(actor, 'project:update', {
+    type: 'project',
+    id: meeting.id,
+    organizationId: ctx.organizationId,
+    ownerId: meeting.organizerId,
+    riskTier: 'low',
+  })
+  if (!decision.allow) throw new PermissionError(decision.reason)
+
+  const [before] = await ctx.sql<{ displayName: string; attended: boolean | null }[]>`
+    SELECT display_name AS "displayName", attended FROM meeting_participants
+    WHERE organization_id = ${ctx.organizationId} AND meeting_id = ${input.meetingId}
+      AND id = ${input.participantId} AND deleted_at IS NULL`
+  if (!before) throw new NotFoundError()
+
+  // Clearing an answer clears who gave it. Leaving the name behind would attribute a record
+  // nobody is making any more — and the CHECK only requires a setter while there is an answer.
+  await ctx.sql`
+    UPDATE meeting_participants
+       SET attended = ${input.attended},
+           attended_set_by = ${input.attended === null ? null : ctx.userId},
+           attended_set_at = ${input.attended === null ? null : ctx.sql`now()`},
+           updated_at = now(),
+           version = version + 1
+     WHERE organization_id = ${ctx.organizationId} AND meeting_id = ${input.meetingId}
+       AND id = ${input.participantId}`
+
+  await writeAudit(ctx, {
+    actorType: 'user',
+    actorId: actor.userId,
+    action: 'meeting.attendance_recorded',
+    entityType: 'meeting',
+    entityId: input.meetingId,
+    before: { participant: before.displayName, attended: before.attended },
+    after: { participant: before.displayName, attended: input.attended },
+  })
+
+  return listParticipants(ctx, input.meetingId)
 }
 
 export interface CreateMeetingInput {

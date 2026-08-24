@@ -322,6 +322,80 @@ try {
     )
     .then(() => true, () => false)
   ok('And withdrawn again, which is what puts the demo back', withdrawn)
+
+  // ---- Who was actually in the room (ADR 0081) -----------------------------
+  // `meeting_participants.attended` had no writer, while the personal record counted rows in
+  // that table and called the number "Meetings you attended".
+  await page.waitForSelector('[data-testid="meeting-attendance"]', { timeout: 15_000 })
+  const attendance = page.locator('[data-testid="meeting-attendance"]')
+  ok('A meeting says who was in the room, not just who was on the list',
+    /Being on the list is not the same as being in the room/i.test(await attendance.innerText()))
+  ok('And says no count of it is kept about anybody',
+    /No count of this is kept about anybody/i.test(await attendance.innerText()))
+
+  const attendanceRows = await page.locator('[data-testid="attendance-row"]').count()
+  ok('Every participant has a row', attendanceRows > 0, `${attendanceRows} rows`)
+  const recordedNote = await page.locator('[data-testid="attendance-recorded"]').innerText()
+  ok('And the panel says how much of it anybody has answered', /recorded|Nobody has recorded/i.test(recordedNote),
+    recordedNote.slice(0, 50))
+
+  // Mark somebody absent, which is the state that carries a name because it is a claim.
+  const firstRow = page.locator('[data-testid="attendance-row"]').first()
+  await firstRow.locator('[data-testid="attendance-no"]').click()
+  const markedAbsent = await page
+    .waitForFunction(
+      () => {
+        const row = document.querySelector('[data-testid="attendance-row"]')
+        return row?.querySelector('[data-testid="attendance-no"]')?.getAttribute('aria-pressed') === 'true'
+      },
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('Somebody can be recorded as not having been there', markedAbsent)
+
+  // Waited for rather than read straight away: the optimistic answer lands before
+  // `router.refresh()` returns the stored one, and until it does the panel says "saving…"
+  // rather than attributing the new claim to whoever made the old one.
+  const named = await page
+    .waitForFunction(
+      () => /Maya/i.test(document.querySelector('[data-testid="attendance-row"]')?.textContent ?? ''),
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And the record carries the name of whoever said so', named,
+    (await firstRow.innerText()).replace(/\s+/g, ' ').slice(0, 70))
+
+  // Put it back to "not recorded", which is a different state from "was not there" — and is
+  // what puts the demo back.
+  await firstRow.locator('[data-testid="attendance-clear"]').click()
+  const unrecorded = await page
+    .waitForFunction(
+      () =>
+        document
+          .querySelector('[data-testid="attendance-row"]')
+          ?.querySelector('[data-testid="attendance-unrecorded"]') !== null,
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And unrecording it says nothing about them rather than saying they came', unrecorded)
+
+  // The demo seeds this meeting with everybody present, so putting it back means saying so
+  // again — not leaving it blank, which is a third and different state.
+  await firstRow.locator('[data-testid="attendance-yes"]').click()
+  const restored = await page
+    .waitForFunction(
+      () => {
+        const row = document.querySelector('[data-testid="attendance-row"]')
+        return row?.querySelector('[data-testid="attendance-yes"]')?.getAttribute('aria-pressed') === 'true'
+      },
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('The check puts the attendance back the way the demo had it', restored)
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/meeting.png`, fullPage: true })
 
   // The log itself, which said "not yet" in every row it would ever have.
@@ -647,6 +721,15 @@ try {
   ok('It lists disclosures', (await page.locator('[data-testid="disclosures"]').count()) === 1)
   const never = await page.locator('[data-testid="never-collected"]').innerText()
   ok('It states what is never collected', /productivity score/i.test(never) && /keystrokes/i.test(never))
+
+  // The sentence this whole increment was about (ADR 0081). This row said "Meetings you
+  // attended" and counted every meeting somebody had put your name on.
+  const trackedText = await page.locator('[data-testid="tracked"]').innerText()
+  ok('The record separates being on the list from being in the room',
+    /Meetings you were on the list for/i.test(trackedText) &&
+      /Meetings recorded as attended/i.test(trackedText))
+  ok('And does not call the first one attendance',
+    !/Meetings you attended/i.test(trackedText))
 
   const disclosuresBefore = await page.locator('[data-testid="disclosure-row"]').count()
   await page.locator('[data-testid="export-record"]').click()
