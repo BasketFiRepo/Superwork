@@ -47,6 +47,13 @@ export interface ApprovalCardView {
   }[]
   evidence: { claim: string; sourceType: string; documentId?: string | null; anchor?: string | null }[]
   decisionReason: string | null
+  /** Who it is waiting on now, when somebody handed it on (ADR 0082). */
+  delegatedToId: string | null
+  delegatedToName: string | null
+  delegatedByName: string | null
+  delegationReason: string | null
+  /** Colleagues this card could be handed to — the server has already filtered to those who could decide it. */
+  handOverTo: { id: string; name: string; role: string }[]
 }
 
 type Draft = Record<string, Record<string, string>>
@@ -55,6 +62,9 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
   const [rejecting, setRejecting] = useState(false)
+  const [handingOn, setHandingOn] = useState(false)
+  const [handTo, setHandTo] = useState('')
+  const [handReason, setHandReason] = useState('')
   const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -90,6 +100,33 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
 
   function set(stepId: string, arg: string, value: string) {
     setDraft((current) => ({ ...current, [stepId]: { ...current[stepId], [arg]: value } }))
+  }
+
+  async function handOver(toUserId: string | null) {
+    if (toUserId && handReason.trim().length < 8) {
+      setError('Say why you are handing this on — “on leave until Tuesday” is enough.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    const response = await fetch('/api/approval-delegation', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        approvalId: approval.id,
+        ...(toUserId ? { toUserId, reason: handReason.trim() } : {}),
+      }),
+    })
+    const payload = await response.json().catch(() => ({ error: 'That could not be read.' }))
+    setBusy(false)
+    if (!response.ok) {
+      setError(payload.error)
+      return
+    }
+    setHandingOn(false)
+    setHandTo('')
+    setHandReason('')
+    router.refresh()
   }
 
   async function decide(decision: 'approve' | 'approve_with_edits' | 'reject') {
@@ -245,8 +282,82 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
           </div>
         ) : null}
 
+        {approval.delegatedToName ? (
+          <div className="banner banner-accent" data-testid="approval-delegated">
+            <div className="stack stack-2">
+              <strong>Handed to {approval.delegatedToName}</strong>
+              <span className="small">
+                {approval.delegatedByName ? `${approval.delegatedByName} passed it on` : 'Passed on'}
+                {approval.delegationReason ? ` — ${approval.delegationReason}` : ''}
+              </span>
+              {/* Still decidable by whoever could decide it before. Handing it on names who
+                  should, never who may — so the card does not disable itself here. */}
+              {pending ? (
+                <div className="row">
+                  <button
+                    className="btn btn-ghost"
+                    data-testid="approval-reclaim"
+                    onClick={() => handOver(null)}
+                    disabled={busy}
+                  >
+                    Take it back
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         {pending ? (
-          rejecting ? (
+          handingOn ? (
+            <div className="stack stack-4" data-testid="approval-handover">
+              <label className="stack stack-2" htmlFor={`hand-${approval.id}`}>
+                <span className="micro">Who should decide this instead?</span>
+                <select
+                  className="input"
+                  id={`hand-${approval.id}`}
+                  data-testid="approval-handover-who"
+                  value={handTo}
+                  onChange={(event) => setHandTo(event.target.value)}
+                >
+                  <option value="">Choose somebody…</option>
+                  {approval.handOverTo.map((person) => (
+                    <option key={person.id} value={person.id}>
+                      {person.name} · {person.role}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="stack stack-2" htmlFor={`hand-why-${approval.id}`}>
+                <span className="micro">Why are you handing it on?</span>
+                <input
+                  className="input"
+                  id={`hand-why-${approval.id}`}
+                  data-testid="approval-handover-reason"
+                  value={handReason}
+                  onChange={(event) => setHandReason(event.target.value)}
+                  placeholder="On leave until Tuesday."
+                />
+              </label>
+              <p className="small muted" style={{ margin: 0 }} data-testid="approval-handover-note">
+                Only people who could already decide this are listed, and the person who asked for
+                it is not among them. Handing it on says who should decide, never who may.
+              </p>
+              <div className="row wrap">
+                <button
+                  className="btn btn-primary"
+                  data-testid="approval-handover-confirm"
+                  onClick={() => handOver(handTo)}
+                  disabled={busy || !handTo || handReason.trim().length < 8}
+                >
+                  {busy ? 'Working…' : 'Hand it on'}
+                </button>
+                <button className="btn btn-ghost" onClick={() => setHandingOn(false)} disabled={busy}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : rejecting ? (
             <div className="stack stack-4">
               <label className="stack stack-2">
                 <span className="micro">Why are you rejecting this?</span>
@@ -310,6 +421,16 @@ export function ApprovalCard({ approval }: { approval: ApprovalCardView }) {
                 <a className="btn btn-ghost" href={`/activity?run=${approval.agentRunId}`}>
                   See the full run
                 </a>
+              ) : null}
+              {approval.handOverTo.length > 0 && !approval.delegatedToId ? (
+                <button
+                  className="btn"
+                  data-testid="approval-handover-open"
+                  onClick={() => setHandingOn(true)}
+                  disabled={busy}
+                >
+                  Hand it on
+                </button>
               ) : null}
               <button
                 className="btn"

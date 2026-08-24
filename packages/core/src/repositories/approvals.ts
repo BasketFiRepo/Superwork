@@ -2,6 +2,7 @@ import { asJson, type ApprovalStatus, type RiskTier, type Role, type TenantConte
 import { can, grantedScope, type Actor } from '@superwork/auth'
 import { DEFAULT_SLA_HOURS, roleAtLeast } from '../approval-policy.js'
 import { managersOf } from '../org-chart.js'
+import { notify } from '../notify.js'
 
 const ROLES: Role[] = ['owner', 'admin', 'manager', 'member', 'viewer', 'guest', 'service']
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
@@ -87,6 +88,15 @@ export interface ApprovalView {
   edits: Record<string, unknown> | null
   decisionReason: string | null
   decidedAt: Date | null
+  /**
+   * Who it is waiting on now, when somebody handed it on (ADR 0082). The status stays
+   * `pending`, because nothing has been decided — this says who it moved to, not what happened.
+   */
+  delegatedToId: string | null
+  delegatedToName: string | null
+  delegatedByName: string | null
+  delegatedAt: Date | null
+  delegationReason: string | null
   createdAt: Date
   hoursWaiting: number
 }
@@ -189,13 +199,18 @@ const SELECT_APPROVAL = (ctx: TenantContext) => ctx.sql`
          a.policy_reason AS "policyReason", a.sla_hours AS "slaHours",
          a.expires_at AS "expiresAt", a.preview, a.evidence, a.edits,
          a.decision_reason AS "decisionReason", a.decided_at AS "decidedAt",
+         a.delegated_to AS "delegatedToId", d.name AS "delegatedToName",
+         db.name AS "delegatedByName", a.delegated_at AS "delegatedAt",
+         a.delegation_reason AS "delegationReason",
          a.created_at AS "createdAt",
          (EXTRACT(EPOCH FROM (now() - a.created_at)) / 3600)::numeric(10,2)::float8 AS "hoursWaiting"
   FROM approvals a
   LEFT JOIN users u ON u.id = a.requested_by_user_id
   LEFT JOIN agent_runs r ON r.id = a.agent_run_id
   LEFT JOIN agents ag ON ag.id = r.agent_id
-  LEFT JOIN approval_policies p ON p.id = a.policy_id`
+  LEFT JOIN approval_policies p ON p.id = a.policy_id
+  LEFT JOIN users d ON d.id = a.delegated_to
+  LEFT JOIN users db ON db.id = a.delegated_by`
 
 /**
  * Who may see an approval at all.
@@ -222,6 +237,10 @@ const VISIBLE_TO = (ctx: TenantContext, actor: Actor) => {
   return ctx.sql`(
     a.requested_by_user_id = ${actor.userId}
     OR a.approver_user_id = ${actor.userId}
+    -- Somebody it was handed to, which is its own way in (ADR 0082). Redundant today, because a
+    -- delegate has to be able to decide it and every decider already sees everything — and kept
+    -- because that is a property of the rung below, not of this predicate.
+    OR a.delegated_to = ${actor.userId}
     OR (a.approver_role IS NOT NULL AND a.approver_role = ANY(${satisfies}::sw_role[]))
     ${decider ? ctx.sql`OR true` : ctx.sql``}
   )`
@@ -354,6 +373,220 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
   )
 
   return getApproval(ctx, actor, input.approvalId)
+}
+
+/**
+ * Handing an approval to somebody else (ADR 0082).
+ *
+ * `approvals.delegated_to` has existed since migration 0005 with no writer and no reader, while
+ * the product already knew the card was ageing — `ApprovalView` computes `hoursWaiting` and had
+ * nothing to offer but waiting longer.
+ *
+ * **Delegation names who should decide. It never widens who may.** That is the whole security
+ * shape of it: a hand-off that granted authority would be a permission-transfer mechanism with a
+ * friendly button on it, and this codebase already refuses one of those in `assertEditsAreOffered`.
+ * So the delegate has to be somebody who could have decided it before being handed it — every
+ * rule `decideApproval` applies is applied here to *them*, in advance, so the refusal arrives
+ * when the hand-off is attempted rather than when they try to act on it.
+ *
+ * The delegator is held to the same bar. You cannot pass on a decision you could not have made,
+ * which is the ceiling this build has now drawn four times: an organization may tighten, never
+ * exceed.
+ */
+export interface DelegateInput {
+  approvalId: string
+  toUserId: string
+  reason: string
+}
+
+export async function delegateApproval(
+  ctx: TenantContext,
+  actor: Actor,
+  input: DelegateInput,
+): Promise<ApprovalView> {
+  const approval = await getApproval(ctx, actor, input.approvalId)
+  if (approval.status !== 'pending') {
+    throw new ValidationError(
+      `This approval was already ${approval.status.replace(/_/g, ' ')}. There is nothing left to hand on.`,
+    )
+  }
+
+  // What you may hand on is what you could have decided. Same two gates `decideApproval` opens
+  // with, in the same order, so the two can never drift into disagreeing about who is entitled.
+  if (grantedScope(actor, 'approval:decide', 'approval') === null) {
+    const decision = can(actor, 'approval:decide', {
+      type: 'approval',
+      id: approval.id,
+      organizationId: ctx.organizationId,
+      ownerId: approval.approverUserId,
+    })
+    throw new PermissionError(
+      `${decision.reason} You can only hand on an approval you could have decided yourself.`,
+    )
+  }
+  if (approval.approverRole && !roleAtLeast(actor.role, approval.approverRole)) {
+    throw new PermissionError(
+      `This approval needs a ${approval.approverRole} to decide it, so it is not yours to hand on. Yours is ${actor.role}.`,
+    )
+  }
+
+  const reason = input.reason?.trim() ?? ''
+  if (reason.length < 8) {
+    throw new ValidationError(
+      'Say why you are handing this on — "on leave until Tuesday" is enough. An approval that moved with no reason is the shape of one moved to find a friendlier answer.',
+    )
+  }
+
+  const [delegate] = await ctx.sql<{ name: string; role: Role }[]>`
+    SELECT u.name, m.role FROM memberships m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.organization_id = ${ctx.organizationId} AND m.user_id = ${input.toUserId}
+      AND m.deleted_at IS NULL AND m.status = 'active'`
+  if (!delegate) throw new ValidationError('That person is not an active member of this organization.')
+
+  if (input.toUserId === actor.userId) {
+    throw new ValidationError('It is already yours. Handing it to yourself changes nothing.')
+  }
+
+  // The route around §11.3 that nobody would notice: hand the card to the requester, and the
+  // self-approval rule is satisfied by the delegator's name while the requester clears their own
+  // request. The database refuses this too — belt and braces, because the refusal that reaches a
+  // person should say what it says here rather than name a constraint.
+  if (approval.requestedByActorType === 'user' && approval.requestedByUserId === input.toUserId) {
+    throw new PermissionError(
+      `${delegate.name} asked for this. Handing it back to them is self-approval by another route.`,
+    )
+  }
+
+  // And they must be able to decide it. Delegation names who should, never who may.
+  if (grantedScope({ ...actor, role: delegate.role }, 'approval:decide', 'approval') === null) {
+    throw new PermissionError(
+      `${delegate.name} cannot decide approvals, so handing this to them would leave it undecidable. Delegation moves who should decide, never who may.`,
+    )
+  }
+  if (approval.approverRole && !roleAtLeast(delegate.role, approval.approverRole)) {
+    throw new PermissionError(
+      `${approval.policyName ? `The “${approval.policyName}” policy` : 'This organization'} requires a ${approval.approverRole} to decide this, and ${delegate.name} is a ${delegate.role}.`,
+    )
+  }
+
+  await ctx.sql`
+    UPDATE approvals
+       SET delegated_to = ${input.toUserId}, delegated_by = ${actor.userId},
+           delegated_at = now(), delegation_reason = ${reason}
+     WHERE organization_id = ${ctx.organizationId} AND id = ${input.approvalId}`
+
+  await writeActivity(ctx, {
+    actorType: 'user',
+    actorUserId: actor.userId,
+    actorLabel: actor.displayName,
+    verb: 'handed on',
+    entityType: 'approval',
+    entityId: approval.id,
+    entityLabel: approval.title,
+    summary: `${actor.displayName} handed "${approval.title}" to ${delegate.name}: ${reason}`,
+    agentRunId: approval.agentRunId,
+  })
+  await writeAudit(ctx, {
+    actorType: 'user',
+    actorId: actor.userId,
+    action: 'approval.delegated',
+    entityType: 'approval',
+    entityId: approval.id,
+    before: { delegatedTo: approval.delegatedToId },
+    after: { delegatedTo: input.toUserId, reason },
+    agentRunId: approval.agentRunId,
+  })
+
+  // The person it now sits with is told, because an approval handed to somebody who never hears
+  // about it is one that ages in a different queue.
+  await notify(ctx, {
+    userId: input.toUserId,
+    type: 'approval_delegated',
+    title: `${actor.displayName} handed you an approval`,
+    body: `“${approval.title}” — ${reason}`,
+    entityType: 'approval',
+    entityId: approval.id,
+    url: '/approvals',
+  })
+
+  return getApproval(ctx, actor, input.approvalId)
+}
+
+/**
+ * Who this card could be handed to (ADR 0082).
+ *
+ * The same rules `delegateApproval` applies, asked in advance so the panel offers exactly what
+ * the repository will accept — the idiom ADR 0065 established for confirming decisions. A picker
+ * listing somebody the server will refuse is a control that lies about what it does.
+ *
+ * Returns nothing at all when the caller could not hand it on themselves, so the button never
+ * appears for somebody who has no business moving it.
+ */
+export async function handOverCandidates(
+  ctx: TenantContext,
+  actor: Actor,
+  approval: ApprovalView,
+): Promise<{ id: string; name: string; role: Role }[]> {
+  if (approval.status !== 'pending') return []
+  if (grantedScope(actor, 'approval:decide', 'approval') === null) return []
+  if (approval.approverRole && !roleAtLeast(actor.role, approval.approverRole)) return []
+
+  const people = await ctx.sql<{ id: string; name: string; role: Role }[]>`
+    SELECT u.id, u.name, m.role
+    FROM memberships m JOIN users u ON u.id = m.user_id
+    WHERE m.organization_id = ${ctx.organizationId} AND m.deleted_at IS NULL AND m.status = 'active'
+      AND m.user_id <> ${actor.userId}
+    ORDER BY u.name`
+
+  return people.filter((person) => {
+    // Never the person who asked: that is self-approval by another route (§11.3).
+    if (
+      approval.requestedByActorType === 'user' &&
+      approval.requestedByUserId === person.id
+    ) {
+      return false
+    }
+    if (grantedScope({ ...actor, role: person.role }, 'approval:decide', 'approval') === null) return false
+    if (approval.approverRole && !roleAtLeast(person.role, approval.approverRole)) return false
+    return true
+  })
+}
+
+/**
+ * Taking it back, which is the other half of being able to hand it on.
+ *
+ * Only the person who handed it on, or somebody who could have. Clearing the attribution with it
+ * is deliberate: the row should not name a hand-off that is no longer standing.
+ */
+export async function reclaimApproval(
+  ctx: TenantContext,
+  actor: Actor,
+  approvalId: string,
+): Promise<ApprovalView> {
+  const approval = await getApproval(ctx, actor, approvalId)
+  if (!approval.delegatedToId) throw new ValidationError('This approval has not been handed to anybody.')
+  if (grantedScope(actor, 'approval:decide', 'approval') === null) {
+    throw new PermissionError('You can only take back an approval you could have decided yourself.')
+  }
+
+  await ctx.sql`
+    UPDATE approvals
+       SET delegated_to = NULL, delegated_by = NULL, delegated_at = NULL, delegation_reason = NULL
+     WHERE organization_id = ${ctx.organizationId} AND id = ${approvalId}`
+
+  await writeAudit(ctx, {
+    actorType: 'user',
+    actorId: actor.userId,
+    action: 'approval.delegation_withdrawn',
+    entityType: 'approval',
+    entityId: approval.id,
+    before: { delegatedTo: approval.delegatedToId },
+    after: { delegatedTo: null },
+    agentRunId: approval.agentRunId,
+  })
+
+  return getApproval(ctx, actor, approvalId)
 }
 
 /**

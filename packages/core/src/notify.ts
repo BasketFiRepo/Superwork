@@ -64,6 +64,7 @@ export const NOTIFICATION_TYPES: { type: string; label: string }[] = [
   { type: 'agent_needs_input', label: 'The assistant has stopped and needs a decision' },
   { type: 'disclosure', label: 'Something about me reached somebody else' },
   { type: 'agent_digest', label: 'An agent I am accountable for reports on its week' },
+  { type: 'approval_delegated', label: 'Somebody hands me an approval to decide' },
 ]
 
 export interface QuietHours {
