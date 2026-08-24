@@ -10,12 +10,64 @@ import {
   markSendFailed,
   openLaddersForDueWork,
   runIngestionJobs,
+  advanceMailboxCursor,
+  fileInbound,
+  mailboxesDueSync,
+  markMailboxTrouble,
   sweepFollowUps,
   sweepSnoozedInsights,
   writeActivity,
 } from '@superwork/core'
 import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
 import { emailProvider } from '@superwork/integrations'
+
+/**
+ * Collecting what the connected mailboxes have (ADR 0084).
+ *
+ * `EmailProvider.sync()` has been on the contract since Phase 2 and nothing called it, which is
+ * why nine columns on `email_accounts` stayed empty. This is the consumer.
+ *
+ * The failure half is the point. §5.6 divides provider failures into kinds, and the difference
+ * matters here: a token that expired needs the person to reconnect and the mailbox must say so;
+ * a rate limit is this minute's problem and the next pass will be fine. Treating them alike
+ * either nags somebody about a hiccup or leaves a dead connection showing a stale inbox — the
+ * classic integration lie the `email_accounts.status` column has been sitting there to prevent.
+ *
+ * The cursor advances only after what the provider handed over is filed. A cursor moved first
+ * and a crash second is mail nobody will be offered again.
+ */
+async function syncMailboxes(
+  ctx: Parameters<typeof mailboxesDueSync>[0],
+  orgId: string,
+): Promise<{ collected: number; deduped: number; stopped: number }> {
+  const provider = emailProvider()
+  let collected = 0
+  let deduped = 0
+  let stopped = 0
+
+  for (const mailbox of await mailboxesDueSync(ctx)) {
+    try {
+      const batch = await provider.sync(mailbox.cursor)
+      const filed = await fileInbound(ctx, mailbox.userId, batch.messages)
+      await advanceMailboxCursor(ctx, mailbox.id, batch.cursor, new Date())
+      collected += filed.collected
+      deduped += filed.deduped
+    } catch (error) {
+      const name = error instanceof Error ? error.name : ''
+      const said = error instanceof Error ? error.message : 'The provider failed in a way this does not recognise.'
+      if (name === 'TransientError') {
+        // This minute's problem. The next pass tries again, and the mailbox stays connected
+        // rather than telling somebody to reconnect a mailbox that is fine.
+        console.warn(`[mailboxes] ${orgId}: ${mailbox.address} rate limited, retrying next pass`)
+        continue
+      }
+      await markMailboxTrouble(ctx, mailbox.id, name === 'AuthError' ? 'expired' : 'error', said)
+      stopped += 1
+    }
+  }
+
+  return { collected, deduped, stopped }
+}
 
 /**
  * The background worker.
@@ -279,6 +331,16 @@ async function main(): Promise<void> {
                     `${followUps.closedByReply} closed because they replied`,
                 )
               }
+              // Collect what the connected mailboxes have (ADR 0084). `EmailProvider.sync()`
+              // has been on the contract since Phase 2 and this is the first thing to call it.
+              const mail = await syncMailboxes(ctx, org.id)
+              if (mail.collected > 0 || mail.stopped > 0) {
+                console.log(
+                  `[mailboxes] ${org.id}: ${mail.collected} collected, ${mail.deduped} already had, ` +
+                    `${mail.stopped} stopped`,
+                )
+              }
+
               // And the insights somebody put off until now come back (ADR 0083). Same pass,
               // same reason: a snooze that never ends is a dismissal that lies about itself.
               const snoozes = await sweepSnoozedInsights(ctx)

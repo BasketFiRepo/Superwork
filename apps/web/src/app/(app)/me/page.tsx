@@ -1,6 +1,8 @@
 import { Link } from '@/components/Link'
 import { requireSession, withActor } from '@/lib/session'
-import { myAuditTrail, personalRecord, sharedWith } from '@superwork/core'
+import { myAuditTrail, myMailboxes, personalRecord, sharedWith } from '@superwork/core'
+import { emailMode } from '@superwork/integrations'
+import { Mailboxes } from '@/components/Mailboxes'
 import { mfaStatus } from '@superwork/auth'
 import { PersonalExportButton } from '@/components/PersonalExportButton'
 import { SecondFactor } from '@/components/SecondFactor'
@@ -18,7 +20,7 @@ export default async function MePage() {
   const session = await requireSession()
   // Their own factor, on their own record. Nobody else's is readable from here (ADR 0043).
   const factor = await mfaStatus(session.userId)
-  const { record, shares, trail } = await withActor(session, async (ctx, actor) => ({
+  const { record, shares, trail, mailboxes } = await withActor(session, async (ctx, actor) => ({
     record: await personalRecord(ctx, actor, actor.userId),
     // The audit trail an administrator can now read is the same trail you can read about
     // yourself. §29.3 says nothing about a person reaches their manager that the person has
@@ -26,6 +28,9 @@ export default async function MePage() {
     trail: await myAuditTrail(ctx, actor, 50),
     // The other half of "what is known about you": what you were *given*, and by whom.
     shares: await sharedWith(ctx, actor, actor.userId),
+    // Your own mailboxes, on your own record — because a person connects their own and nobody
+    // else's, and this is the screen that is about you (ADR 0084).
+    mailboxes: await myMailboxes(ctx, actor),
   }))
 
   const when = (date: Date) =>
@@ -277,6 +282,18 @@ export default async function MePage() {
           </div>
         )}
       </section>
+
+      <Mailboxes
+        simulated={emailMode() === 'mock'}
+        mailboxes={mailboxes.map((mailbox) => ({
+          id: mailbox.id,
+          address: mailbox.address,
+          provider: mailbox.provider,
+          status: mailbox.status,
+          lastSyncAt: mailbox.lastSyncAt ? mailbox.lastSyncAt.toISOString() : null,
+          lastError: mailbox.lastError,
+        }))}
+      />
 
       <section className="panel" data-testid="my-trail">
         <div className="panel-header">
