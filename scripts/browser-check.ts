@@ -981,6 +981,58 @@ try {
     ok('An approval can be corrected in place', false, 'no pending approval offered an editable field')
   }
 
+  // ---- An approval somebody handed on (ADR 0082) --------------------------
+  // `approvals.delegated_to` had no writer and no reader, and `ApprovalStatus` carried a
+  // `'delegated'` value no code path could produce — while the card already showed how long it
+  // had been waiting and offered nothing to do about it.
+  await page.goto(`${BASE}/approvals`)
+  const handOn = page.locator('[data-testid="approval-handover-open"]').first()
+  await handOn.waitFor({ timeout: 20_000 })
+  await handOn.click()
+  await page.waitForSelector('[data-testid="approval-handover"]', { timeout: 15_000 })
+
+  const handoverNote = await page.locator('[data-testid="approval-handover-note"]').innerText()
+  ok('Handing an approval on says what it does and does not do',
+    /could already decide this/i.test(handoverNote) &&
+      /never who may/i.test(handoverNote),
+    handoverNote.replace(/\s+/g, ' ').slice(0, 70))
+
+  const choices = await page.locator('[data-testid="approval-handover-who"] option').count()
+  ok('And offers the people who could decide it', choices > 1, `${choices - 1} people`)
+
+  const confirmHand = page.locator('[data-testid="approval-handover-confirm"]')
+  ok('And will not move it without a reason', await confirmHand.isDisabled())
+
+  await page.selectOption('[data-testid="approval-handover-who"]', { index: 1 })
+  await page.locator('[data-testid="approval-handover-reason"]').fill('On leave until Tuesday.')
+  await confirmHand.click()
+  const handedOn = await page
+    .waitForFunction(
+      () => document.querySelector('[data-testid="approval-delegated"]') !== null,
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('An approval can be handed to somebody, and says who has it and why', handedOn)
+  if (handedOn) {
+    const banner = await page.locator('[data-testid="approval-delegated"]').first().innerText()
+    ok('And names who passed it on, and the reason they gave',
+      /Handed to/i.test(banner) && /On leave until Tuesday/i.test(banner),
+      banner.replace(/\s+/g, ' ').slice(0, 80))
+  }
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/approval-handover.png`, fullPage: true })
+
+  // Take it back, which is what puts the demo back.
+  await page.locator('[data-testid="approval-reclaim"]').first().click()
+  const handBackDone = await page
+    .waitForFunction(
+      () => document.querySelector('[data-testid="approval-delegated"]') === null,
+      undefined,
+      { timeout: 20_000 },
+    )
+    .then(() => true, () => false)
+  ok('And taken back again, which is what puts the demo back', handBackDone)
+
   // ---- Custom tools, and step-up ------------------------------------------
   await page.goto(`${BASE}/settings/tools`)
   await page.waitForSelector('[data-testid="reviewed-hosts"]', { timeout: 15_000 })

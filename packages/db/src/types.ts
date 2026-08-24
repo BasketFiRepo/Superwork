@@ -16,8 +16,15 @@ export type RunStatus =
   | 'queued' | 'planning' | 'awaiting_approval' | 'running' | 'succeeded' | 'failed'
   | 'cancelled' | 'aborted_by_admin' | 'budget_exceeded' | 'undone'
 export type StepStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'awaiting_approval'
+/**
+ * `'delegated'` was here from 0005 and no code path could produce it (ADR 0082). It sat among
+ * the states in which nothing more is waiting, but an approval somebody handed on is still
+ * **pending** — no decision has been made. This column says whether one has; `delegated_to` says
+ * who it is waiting on. Setting `'delegated'` would have made the first unreliable to record the
+ * second, which is why nothing ever set it.
+ */
 export type ApprovalStatus =
-  | 'pending' | 'approved' | 'approved_with_edits' | 'rejected' | 'delegated' | 'expired' | 'cancelled'
+  | 'pending' | 'approved' | 'approved_with_edits' | 'rejected' | 'expired' | 'cancelled'
 export type IndexStatus = 'pending' | 'processing' | 'indexed' | 'failed' | 'quarantined' | 'skipped'
 export type InsightStatus =
   | 'new' | 'acknowledged' | 'in_progress' | 'resolved' | 'dismissed' | 'snoozed' | 'expired'

@@ -67,6 +67,7 @@ const TYPE_LABEL: Record<string, string> = {
   task_unblocked: 'work you can start',
   agent_needs_input: 'the assistant needs a decision',
   'briefing.ready': 'your briefing',
+  approval_delegated: 'an approval somebody handed you',
 }
 
 export function Reminders({

@@ -1,5 +1,5 @@
 import { requireSession, withActor } from '@/lib/session'
-import { listApprovals, listOutgoing, trustLedger } from '@superwork/core'
+import { handOverCandidates, listApprovals, listOutgoing, trustLedger } from '@superwork/core'
 import { ApprovalCard } from '@/components/ApprovalCard'
 import { OutgoingMail } from '@/components/OutgoingMail'
 
@@ -8,15 +8,25 @@ export const dynamic = 'force-dynamic'
 /** Approvals (§17). Primary action: decide. */
 export default async function ApprovalsPage() {
   const session = await requireSession()
-  const { pending, decided, ledger, outgoing } = await withActor(session, async (ctx, actor) => ({
-    pending: await listApprovals(ctx, actor, { status: 'pending' }),
-    decided: (await listApprovals(ctx, actor, { limit: 20 })).filter((a) => a.status !== 'pending'),
-    ledger: await trustLedger(ctx),
+  const { pending, decided, ledger, outgoing, handOver } = await withActor(session, async (ctx, actor) => {
+    const open = await listApprovals(ctx, actor, { status: 'pending' })
+    return {
+      pending: open,
+      // Who each card could be handed to, asked of the repository rather than guessed here, so
+      // the picker offers exactly what it will accept (ADR 0082).
+      handOver: Object.fromEntries(
+        await Promise.all(
+          open.map(async (approval) => [approval.id, await handOverCandidates(ctx, actor, approval)] as const),
+        ),
+      ) as Record<string, { id: string; name: string; role: string }[]>,
+      decided: (await listApprovals(ctx, actor, { limit: 20 })).filter((a) => a.status !== 'pending'),
+      ledger: await trustLedger(ctx),
     // What a decision made here has already put in motion, and can still be stopped
     // (ADR 0054). It belongs on this screen rather than the inbox: somebody who has just
     // changed their mind about sending is still standing where they approved it.
-    outgoing: await listOutgoing(ctx, actor),
-  }))
+      outgoing: await listOutgoing(ctx, actor),
+    }
+  })
 
   const serialize = (list: typeof pending) =>
     list.map((a) => ({
@@ -24,6 +34,7 @@ export default async function ApprovalsPage() {
       createdAt: a.createdAt.toISOString(),
       preview: a.preview as never,
       evidence: a.evidence as never,
+      handOverTo: handOver[a.id] ?? [],
     }))
 
   return (
