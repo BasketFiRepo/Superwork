@@ -776,6 +776,50 @@ try {
   ok('And does not call the first one attendance',
     !/Meetings you attended/i.test(trackedText))
 
+  // ---- A mailbox somebody connected (ADR 0084) ----------------------------
+  // `EmailProvider.sync()` had been on the contract since Phase 2 with no caller, so nine columns
+  // on `email_accounts` sat empty while the inbox was fed by hand.
+  await page.waitForSelector('[data-testid="mailboxes"]', { timeout: 15_000 })
+  const mailboxText = await page.locator('[data-testid="mailboxes-explainer"]').innerText()
+  ok('The record says who may connect a mailbox, and it is only you',
+    /Only you can connect or disconnect your own/i.test(mailboxText) &&
+      /no administrator can point Superwork at somebody/i.test(mailboxText),
+    mailboxText.replace(/\s+/g, ' ').slice(0, 70))
+  ok('And that what arrives may never instruct the assistant',
+    /never allowed to instruct the assistant/i.test(mailboxText))
+
+  if ((await page.locator('[data-testid="mailbox-row"]').count()) === 0) {
+    await page.fill('[data-testid="mailbox-address"]', 'maya@northwind.example')
+    await page.locator('[data-testid="mailbox-connect"]').click()
+    const connected = await page
+      .waitForFunction(
+        () => document.querySelector('[data-testid="mailbox-row"]') !== null,
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('A mailbox can be connected, and says how it is', connected)
+    if (connected) {
+      const row = await page.locator('[data-testid="mailbox-row"]').first().innerText()
+      ok('Which names the address and that nothing has been collected yet',
+        /maya@northwind\.example/i.test(row) && /connected/i.test(row),
+        row.replace(/\s+/g, ' ').slice(0, 70))
+    }
+
+    // And disconnect it again, which is what puts the demo back.
+    await page.locator('[data-testid="mailbox-disconnect"]').first().click()
+    const gone = await page
+      .waitForFunction(
+        () => document.querySelector('[data-testid="mailbox-row"]') === null,
+        undefined,
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false)
+    ok('And disconnected again, which is what puts the demo back', gone)
+  } else {
+    ok('A mailbox can be connected, and says how it is', false, 'a row was already there')
+  }
+
   const disclosuresBefore = await page.locator('[data-testid="disclosure-row"]').count()
   await page.locator('[data-testid="export-record"]').click()
   await page.waitForTimeout(2000)
