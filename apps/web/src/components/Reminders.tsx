@@ -68,6 +68,7 @@ const TYPE_LABEL: Record<string, string> = {
   agent_needs_input: 'the assistant needs a decision',
   'briefing.ready': 'your briefing',
   approval_delegated: 'an approval somebody handed you',
+  insight_returned: 'an insight you put off',
 }
 
 export function Reminders({

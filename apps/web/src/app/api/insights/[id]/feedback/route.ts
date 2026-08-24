@@ -11,7 +11,11 @@ const Body = z.object({
   // The four sentences the card offers. They are read now — a watcher people call wrong
   // stops running, and one they call "already handled" is re-timed rather than muted (§9.2).
   reason: z.enum(['not_useful', 'wrong', 'already_handled', 'not_my_job']).optional(),
-  status: z.enum(['acknowledged', 'in_progress', 'resolved', 'dismissed', 'snoozed']).optional(),
+  // `'snoozed'` is not accepted here (ADR 0083): putting one off needs a date, and this route
+  // has no way to carry one. It goes through `/api/insights/[id]/snooze`, which is the only
+  // thing that can set the status and the date together — and the database refuses the pair
+  // coming apart, so an accepted-but-dateless snooze would be a 500 rather than a bug.
+  status: z.enum(['acknowledged', 'in_progress', 'resolved', 'dismissed']).optional(),
 })
 
 /**
