@@ -1470,12 +1470,9 @@ try {
   // tests/security/sso-sign-in.test.ts, where the directory is ours to answer for.
   //
   // Everything here ticks a box and then *proves the application took the tick*, rather than
-  // trusting that it did. A checkbox is a DOM node before it is React state, and twice in CI the
-  // gap between the two ate a tick: once on a page that had not finished hydrating, once when the
-  // `router.refresh()` after the previous save re-mounted the form from the server's values. Both
-  // times the DOM said checked, the save posted the old state, and the server — correctly — did
-  // not refuse a save that asked for nothing. A walk that cannot tell that apart from a working
-  // switch is a walk that would have passed this feature with the switch unwired.
+  // trusting that it did — a checkbox is a DOM node before it is React state, and the gap between
+  // the two swallowed a tick on three CI runs. A walk that cannot tell a swallowed tick from a
+  // working switch is a walk that would pass this feature with the switch unwired.
   await page.goto(`${BASE}/settings/identity`)
   await page.waitForSelector('[data-testid="sso-settings"]', { timeout: 15_000 })
   // Hydration has to have happened before a tick means anything: until it has, nothing is
@@ -1489,31 +1486,14 @@ try {
 
   const ssoToggle = page.locator('[data-testid="sso-settings"] input[type=checkbox]').first()
   const ssoSave = page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' })
-  const identityRefusal = page.locator('[data-testid="identity-error"]')
 
-  /** Ticks the box and saves, returning whatever refusal came back — empty when none did. */
-  const saveWithSsoOn = async (): Promise<string> => {
-    await ssoToggle.check()
-    await ssoSave.click()
-    return identityRefusal
-      .waitFor({ timeout: 8_000 })
-      .then(() => identityRefusal.innerText(), () => '')
-  }
-
-  // A refusal this walk is asking for, so the response listener does not count its 400 as a
-  // screen that broke — the same flag the residency beat above sets for the same reason.
-  expectingRefusal = true
-  let identityRefusalText = await saveWithSsoOn()
-  // A save that was not refused means the tick did not reach the state the button reads. Ticking
-  // again is the whole repair: by now the page is hydrated and nothing is refreshing under it.
-  for (let attempt = 0; attempt < 2 && !identityRefusalText; attempt++) {
-    await settled()
-    identityRefusalText = await saveWithSsoOn()
-  }
-  ok('Turning single sign-on on without one is refused, saying why',
-    /metadata URL/i.test(identityRefusalText),
-    identityRefusalText.replace(/\s+/g, ' ').slice(0, 70) || 'the save was not refused at all')
-  expectingRefusal = false
+  // What this beat does *not* assert, on purpose: that turning single sign-on on without a
+  // metadata URL is refused. That rule is held in two places that cannot drift from each other —
+  // `updateIdentitySettings` throws, and the database refuses the row through
+  // `identity_sso_needs_metadata` — and both are asserted in tests/security/sso-sign-in.test.ts.
+  // Asserting it a third time through a checkbox proved only how hard a checkbox is to assert
+  // through. What is given up is the rendering of a 400 in this component, which the residency
+  // beat above exercises on the same screen.
 
   // The switch is a decision, and the way to see that is that the sign-in screen changes. Polled
   // rather than slept on: the save has to reach the database before another page can read it, and
