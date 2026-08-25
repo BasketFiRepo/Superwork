@@ -43,6 +43,7 @@ export default async function IdentityPage() {
           settings={{
             ssoEnabled: data.settings.ssoEnabled,
             ssoProvider: data.settings.ssoProvider,
+            ssoMetadataUrl: data.settings.ssoMetadataUrl,
             verifiedDomains: data.settings.verifiedDomains,
             jitProvisioning: data.settings.jitProvisioning,
             defaultRole: data.settings.defaultRole,

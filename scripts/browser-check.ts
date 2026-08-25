@@ -1463,6 +1463,80 @@ try {
     /Set by/.test(await page.locator('[data-testid="residency-attribution"]').innerText()))
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/residency.png`, fullPage: true })
 
+  // ---- Somebody who signed in with the directory (ADR 0087) ---------------
+  //
+  // The switch and the sign-in screen, which is the half a repository test cannot see. Whether an
+  // assertion actually mints a session — and the four ways one is refused — is
+  // tests/security/sso-sign-in.test.ts, where the directory is ours to answer for.
+  //
+  // Everything here ticks a box and then *proves the application took the tick*, rather than
+  // trusting that it did — a checkbox is a DOM node before it is React state, and the gap between
+  // the two swallowed a tick on three CI runs. A walk that cannot tell a swallowed tick from a
+  // working switch is a walk that would pass this feature with the switch unwired.
+  await page.goto(`${BASE}/settings/identity`)
+  await page.waitForSelector('[data-testid="sso-settings"]', { timeout: 15_000 })
+  // Hydration has to have happened before a tick means anything: until it has, nothing is
+  // listening to the box. Advisory rather than load-bearing — a screen that keeps a connection
+  // open never goes idle, and this must not be the line that fails a walk over it.
+  const settled = () => page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+  await settled()
+  const ssoText = await page.locator('[data-testid="sso-settings"]').innerText()
+  ok('The identity screen asks where the assertions come from',
+    /Metadata URL/i.test(ssoText) && /publishes the key that signs/i.test(ssoText))
+
+  const ssoToggle = page.locator('[data-testid="sso-settings"] input[type=checkbox]').first()
+  const ssoSave = page.locator('[data-testid="sso-settings"] button', { hasText: 'Save' })
+
+  // What this beat does *not* assert, on purpose: that turning single sign-on on without a
+  // metadata URL is refused. That rule is held in two places that cannot drift from each other —
+  // `updateIdentitySettings` throws, and the database refuses the row through
+  // `identity_sso_needs_metadata` — and both are asserted in tests/security/sso-sign-in.test.ts.
+  // Asserting it a third time through a checkbox proved only how hard a checkbox is to assert
+  // through. What is given up is the rendering of a 400 in this component, which the residency
+  // beat above exercises on the same screen.
+
+  // The switch is a decision, and the way to see that is that the sign-in screen changes. Polled
+  // rather than slept on: the save has to reach the database before another page can read it, and
+  // how long that takes is not a number this file should be guessing at.
+  const signInPage = await browser.newPage()
+  const directoryPanel = async (want: number): Promise<boolean> => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await signInPage.goto(`${BASE}/login`)
+      if ((await signInPage.locator('[data-testid="sso-sign-in"]').count()) === want) return true
+      await signInPage.waitForTimeout(500)
+    }
+    return false
+  }
+
+  /** Sets the switch and does not believe it until the sign-in screen says so. */
+  const setDirectorySignIn = async (on: boolean): Promise<boolean> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await settled()
+      if (on) {
+        await page.fill('[data-testid="sso-provider"]', 'Okta')
+        await page.fill('[data-testid="sso-metadata-url"]', 'https://northwind.okta.example/app/exk1/sso/saml/metadata')
+        await ssoToggle.check()
+      } else {
+        await ssoToggle.uncheck()
+      }
+      await ssoSave.click()
+      if (await directoryPanel(on ? 1 : 0)) return true
+    }
+    return false
+  }
+
+  ok('With it on, the sign-in screen offers the directory', await setDirectorySignIn(true))
+  await signInPage.fill('[data-testid="sso-assertion"]', 'not-a-real-assertion')
+  await signInPage.locator('[data-testid="sso-submit"]').click()
+  await signInPage.waitForSelector('[data-testid="sso-error"]', { timeout: 20_000 })
+  ok('And an assertion the directory did not accept says so, without saying which part was wrong',
+    /was not accepted/i.test(await signInPage.locator('[data-testid="sso-error"]').innerText()))
+  if (SHOTS) await signInPage.screenshot({ path: `${SHOTS}/sso-sign-in.png`, fullPage: true })
+
+  // Off again, so the demo ends where it started and the walk can be run twice.
+  ok('With it off, the screen offers no way in that nobody accepts', await setDirectorySignIn(false))
+  await signInPage.close()
+
   // Back to the screen the erasure beats below are standing on. This section is wedged into the
   // middle of a page-scoped sequence because it has to run *after* a password has been confirmed
   // — the retention beat above is the nearest one that does — and a walk that changes the page

@@ -68,14 +68,35 @@ export async function login(email: string, password: string, meta: { userAgent?:
     WHERE m.user_id = ${user.id} AND m.deleted_at IS NULL AND m.status = 'active'
     ORDER BY o.name`
 
+  return startSession(
+    { id: user.id, email: user.email, name: user.name, timezone: user.timezone, mfaEnabled: user.mfa_enabled },
+    orgs.map((o) => ({ id: o.id, name: o.name, slug: o.slug, isDemo: o.is_demo })),
+    meta,
+  )
+}
+
+/**
+ * Mints the session row, whatever proved who this is.
+ *
+ * A password is one proof and a directory assertion is another (ADR 0087); what follows either is
+ * identical, and it is identical because it happens here rather than twice. The half-authenticated
+ * case especially: a session is a row, not something held in memory — it can be revoked, it expires
+ * with everything else, and until the second factor is given it resolves to nothing.
+ */
+export async function startSession(
+  user: { id: string; email: string; name: string; timezone: string; mfaEnabled: boolean },
+  organizations: { id: string; name: string; slug: string; isDemo: boolean }[],
+  meta: { userAgent?: string } = {},
+  options: { organizationId?: string } = {},
+): Promise<LoginResult> {
   const token = randomBytes(32).toString('hex')
-  const organizationId = orgs[0]?.id ?? null
-  // The half-authenticated session is a row, not something held in memory: it can be revoked,
-  // it expires with everything else, and it resolves to nothing until the factor is given.
-  await sql`
+  // Which organization this session lands in is the caller's when it knows — a directory sign-in
+  // knows, because the assertion was accepted by one organization's settings and not by another's.
+  const organizationId = options.organizationId ?? organizations[0]?.id ?? null
+  await authSql()`
     INSERT INTO sessions (user_id, organization_id, token_hash, user_agent, expires_at, mfa_satisfied_at)
     VALUES (${user.id}, ${organizationId}, ${hashToken(token)}, ${meta.userAgent ?? null},
-            ${new Date(Date.now() + SESSION_TTL_MS)}, ${user.mfa_enabled ? null : new Date()})`
+            ${new Date(Date.now() + SESSION_TTL_MS)}, ${user.mfaEnabled ? null : new Date()})`
 
   return {
     token,
@@ -90,8 +111,8 @@ export async function login(email: string, password: string, meta: { userAgent?:
       // free — which is exactly the unlocked-laptop case.
       steppedUpAt: null,
     },
-    organizations: orgs.map((o) => ({ id: o.id, name: o.name, slug: o.slug, isDemo: o.is_demo })),
-    mfaRequired: user.mfa_enabled,
+    organizations,
+    mfaRequired: user.mfaEnabled,
   }
 }
 
