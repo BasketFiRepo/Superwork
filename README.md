@@ -649,6 +649,39 @@ bug report.
 
 **Settings → Usage and cost.** See ADR 0030.
 
+## A mode that decides which provider
+
+Somebody looked at a running Superwork and said the integrations seemed like dummies rather than
+anything real. Half of that is the design working — every provider is a mock so the product runs
+with no credentials, and everything around the simulated edge is real. The other half was a bug.
+
+Six capabilities have a mode variable and **four of them switched nothing**. `emailProvider()`,
+`storageProvider()` and `billingProvider()` returned the mock whatever the environment said. Worse:
+`emailMode()` and `billingMode()` read the variable *only to print it on the integrations screen*.
+So a deployment could set `EMAIL_MODE=live`, read "live" back off its own screen, and be running on
+a provider that files every message into memory and sends nothing.
+
+That is the shape this codebase keeps finding, one layer further out than usual: not a column
+nothing writes, but a **setting nothing reads** — and worse than the inert feature flags of ADR
+0022, because that screen said "declared but inert" and this one said "live".
+
+- **A mode nothing can honour stops the process.** Not a warning and not a fallback: the
+  environment refuses to load, naming the capability, the variable, and the two things that fix it.
+  Falling back to the mock is what produced the bug.
+- **`sandbox` is refused exactly as `live` is.** It is no more implemented, and the mode that
+  sounds safer is the one somebody tries first.
+- **The refusal is not the `AI_MODE` one.** `ai` *can* be live and arrived without a credential;
+  `email` cannot be live at all. Two situations, two sentences.
+- **The screen reports what resolved**, never what was asked for — so an implementation injected by
+  a test or a sandbox reports itself honestly, and the row means "what you are running" rather than
+  "what you typed".
+- **`calendar` says the true thing out loud.** It has a contract and no resolver, mock or caller,
+  so its row says there is nothing to connect yet.
+- **Making a capability real is two visible steps**: write the live provider, then add it to
+  `LIVE_IMPLEMENTED`. Until the first, the second refuses to boot.
+
+**Settings → Integrations.** See ADR 0088.
+
 ## A plan somebody can change
 
 ADR 0030 resolved the plan into one answer and left it there. Sixteen releases later, four
@@ -2004,6 +2037,12 @@ and refuse the switch without one.
 here; the payment is a `BillingProvider`'s, and under `BILLING_MODE=mock` no card is held, nothing
 is charged, and the figures on the plan screen are locally generated and badged **Simulated**. The
 per-seat rates in the mock are not prices anybody agreed.
+
+**And the mode says which one you are running.** Two capabilities can be anything but simulated —
+`AI_MODE` and `HTTP_TOOLS_MODE`. The rest refuse to start rather than accept a mode they cannot
+honour, and the integrations screen reports the provider actually in force. That is a repair, not a
+boast: four of these variables switched nothing and two of them were printed back at the operator as
+though they had (ADR 0088).
 
 **The scale budgets are measured below the scale they target.** The harness prints the scale
 it actually reached beside the scale the target assumes, rather than rounding the difference

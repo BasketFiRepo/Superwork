@@ -1,4 +1,5 @@
 export * from './env.js'
+export * from './capabilities.js'
 export * from './task-classes.js'
 export * from './plan-limits.js'
 export * from './flags.js'

@@ -889,6 +889,19 @@ try {
   const capabilities = await page.locator('[data-testid="connection-row"]').count()
   ok('Integrations lists capabilities, not vendors', capabilities >= 5, `${capabilities} capabilities`)
 
+  // The screen that carried the false claim (ADR 0088). Four mode variables switched nothing and
+  // two of them were printed back here as though they had, so a deployment could read "live" off
+  // this row while running on a mock. Every row now reports the provider in force, and the one
+  // capability with no implementation at all says so rather than offering a mode.
+  const integrationsText = await page.locator('[data-testid="connection-row"]').allInnerTexts()
+  ok('Every capability says which implementation is in force',
+    integrationsText.every((row) => /mock|sandbox|live/.test(row)),
+    `${integrationsText.length} rows`)
+  ok('And the demo is honest that all of them are simulated',
+    integrationsText.every((row) => !/\blive\b/.test(row)))
+  ok('The capability with nothing behind it says there is nothing to connect',
+    /nothing to connect/i.test(integrationsText.find((row) => /Calendar/.test(row)) ?? ''))
+
   await page.goto(`${BASE}/settings/api`)
   await page.waitForSelector('[data-testid="issue-key"]', { timeout: 15_000 })
   ok('The API screen offers to issue a key', (await page.locator('[data-testid="issue-key"]').count()) === 1)

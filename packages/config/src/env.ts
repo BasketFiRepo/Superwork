@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { CAPABILITY_MODE_VARS, canResolve, unresolvableModeMessage, type Capability } from './capabilities.js'
 
 /**
  * Runtime mode for every external capability (spec §2.3).
@@ -105,6 +106,29 @@ const EnvSchema = z
           path: ['DATABASE_URL'],
           message:
             'DATABASE_URL is not a valid connection URL — expected postgres://user:password@host:port/database.',
+        })
+      }
+    }
+
+    /**
+     * A mode the process cannot honour stops it starting (ADR 0088).
+     *
+     * Four of these variables switched nothing: the resolver returned the mock whatever they
+     * said, and the integrations screen printed the variable back. A deployment could ask for a
+     * live mailbox, be told it had one, and send nothing. Refusing to boot is the only answer
+     * that cannot be misread — the alternative is a system that is confident and wrong about
+     * whether it is connected to anything.
+     *
+     * `AI_MODE=live` is checked separately below because it *can* be honoured and needs a key;
+     * this loop is about the modes that have nowhere to go at all.
+     */
+    for (const [capability, variable] of Object.entries(CAPABILITY_MODE_VARS) as [Capability, string][]) {
+      const mode = env[variable as keyof typeof env] as (typeof env)['AI_MODE']
+      if (!canResolve(capability, mode)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [variable],
+          message: unresolvableModeMessage(capability, variable, mode),
         })
       }
     }
