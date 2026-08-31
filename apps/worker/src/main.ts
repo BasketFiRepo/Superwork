@@ -19,7 +19,14 @@ import {
   sweepSnoozedInsights,
   writeActivity,
 } from '@superwork/core'
-import { evict, generateDueBriefings, generateDueDigests, runDueWatchers, runDueWorkflows } from '@superwork/agent'
+import {
+  dispatchEvents,
+  evict,
+  generateDueBriefings,
+  generateDueDigests,
+  runDueWatchers,
+  runDueWorkflows,
+} from '@superwork/agent'
 import { billingProvider, emailProvider } from '@superwork/integrations'
 
 /**
@@ -403,6 +410,24 @@ async function main(): Promise<void> {
           }
         } catch (error) {
           console.error(`[workflows] ${org.id} failed:`, error instanceof Error ? error.message : error)
+        }
+
+        // The other way a workflow starts (ADR 0090). It shares this sweep with the schedules
+        // because it answers the same question a minute apart — is there anything to run — and
+        // differs only in what it asks it of. Nothing is claimed: the run's idempotency key
+        // against a unique index is what stops one event running one workflow twice.
+        try {
+          const events = await dispatchEvents(session)
+          if (events.matched > 0 || events.refusedTooDeep > 0) {
+            console.log(
+              `[events] ${org.id}: ${events.events} in the window · ${events.matched} to dispatch · ` +
+                `${events.ran} ran · ${events.skipped} skipped · ${events.refusedTooDeep} too deep · ` +
+                `${events.failed} failed`,
+            )
+            for (const note of events.notes) console.log(`[events] ${org.id}: ${note}`)
+          }
+        } catch (error) {
+          console.error(`[events] ${org.id} failed:`, error instanceof Error ? error.message : error)
         }
       }
     }

@@ -2,6 +2,7 @@ import { Link } from '@/components/Link'
 import { notFound } from 'next/navigation'
 import { checkCapacity, describeCron, formatCents, getWorkflow, listWorkflowRuns } from '@superwork/core'
 import { can } from '@superwork/auth'
+import { eventDefinition } from '@superwork/config'
 import { formatDuration } from '@/lib/format'
 import { requireSession, withActor } from '@/lib/session'
 import { ScheduleEditor } from '@/components/ScheduleEditor'
@@ -38,6 +39,11 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
 
   if (!data) notFound()
   const { workflow, runs, members, capacity, change } = data
+  // What actually fires this, from the version in force. The panel used to assume a workflow with
+  // no cron runs only when somebody presses a button, which is what it told an event-triggered one
+  // (ADR 0090).
+  const trigger = workflow.graph?.trigger
+  const eventTrigger = trigger?.kind === 'event' ? eventDefinition(trigger.spec) : null
   const compiled: CompiledView | null = workflow.graph
     ? { name: workflow.name, graph: workflow.graph, readback: workflow.readback, risks: workflow.risks, unsupported: null }
     : null
@@ -88,16 +94,22 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
       {workflow.status === 'active' || workflow.scheduleCron ? (
         <section className="panel" data-testid="workflow-schedule">
           <div className="panel-header">
-            <h2>On the clock</h2>
-            <span className={workflow.scheduleEnabled ? 'chip chip-positive' : 'chip chip-attention'}>
-              {workflow.scheduleEnabled ? 'firing' : 'stopped'}
+            <h2>{eventTrigger ? 'On an event' : 'On the clock'}</h2>
+            <span
+              className={
+                eventTrigger || workflow.scheduleEnabled ? 'chip chip-positive' : 'chip chip-attention'
+              }
+            >
+              {eventTrigger ? 'listening' : workflow.scheduleEnabled ? 'firing' : 'stopped'}
             </span>
           </div>
           <div className="panel-body stack stack-5">
-            <p className="prose" style={{ margin: 0 }}>
-              {workflow.scheduleCron
-                ? `Runs ${describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')} — the company's timezone, not the server's, and the same on the morning the clocks change.`
-                : 'It runs when somebody runs it. Give it a schedule and the worker will fire it.'}
+            <p className="prose" style={{ margin: 0 }} data-testid="workflow-trigger">
+              {eventTrigger
+                ? `Runs ${eventTrigger.label} — once each time, not on a clock. The daily action cap is what bounds a busy day.`
+                : workflow.scheduleCron
+                  ? `Runs ${describeCron(workflow.scheduleCron, workflow.scheduleTimezone ?? 'UTC')} — the company's timezone, not the server's, and the same on the morning the clocks change.`
+                  : 'It runs when somebody runs it. Give it a schedule and the worker will fire it.'}
             </p>
             <div className="row wrap small secondary">
               <span>
@@ -114,7 +126,12 @@ export default async function WorkflowPage({ params }: { params: Promise<{ id: s
               </div>
             ) : null}
 
-            {workflow.status === 'active' ? (
+            {eventTrigger ? (
+              <p className="small muted" style={{ margin: 0 }}>
+                An event-triggered workflow has no clock to set. It runs when the thing happens, and stops
+                running when you pause it.
+              </p>
+            ) : workflow.status === 'active' ? (
               <ScheduleEditor
                 workflowId={workflow.id}
                 cron={workflow.scheduleCron}

@@ -3,6 +3,7 @@ import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { sanitizeMessage } from '../sanitize.js'
 import { detectInjection } from '../retrieval/classify.js'
+import { emitEvent } from '../events.js'
 import { writeAudit } from '../audit.js'
 
 /**
@@ -340,8 +341,24 @@ export async function fileInbound(
       DO NOTHING
       RETURNING id`
 
-    if (written) collected += 1
-    else deduped += 1
+    if (written) {
+      collected += 1
+      // Only for correspondence that is actually new. The ON CONFLICT above is what makes a
+      // re-sync of the same mailbox cheap, and an event raised for a message we already had
+      // would make it expensive in exactly the way that matters: a workflow run per re-sync.
+      await emitEvent(ctx, {
+        name: 'message.received',
+        entityType: 'message',
+        entityId: written.id,
+        payload: {
+          conversationId: thread.id,
+          from: fromAddress,
+          subject: mail.subject,
+          injectionFlagged: injection.length > 0,
+        },
+        actorType: 'integration',
+      })
+    } else deduped += 1
   }
 
   return { collected, deduped, threadsOpened }

@@ -1,3 +1,5 @@
+import { EVENT_NAMES, eventDefinition } from '@superwork/config'
+
 /**
  * The workflow compiler (§10.3).
  *
@@ -49,6 +51,19 @@ export interface CompiledWorkflow {
 }
 
 const SCHEDULE = /\b(every|each)\s+(weekday|day|hour|month|monday|tuesday|wednesday|thursday|friday|week|morning)\b/i
+/**
+ * "When X happens" — the other way an automation starts (ADR 0090). One pattern per event the
+ * product actually raises, because a compiler that accepted "when a contract is signed" would
+ * produce a workflow that is active, correct-looking and never fires.
+ */
+/** Asking for a trigger at all — used only to refuse, never to build. */
+const WHEN = /\b(when|whenever|as soon as|each time|every time)\b/i
+
+const EVENT_PATTERNS: { match: RegExp; name: string }[] = [
+  { match: /\bwhen\s+(an?\s+)?(email|message|mail|reply)\s+(arrives|comes in|lands|is received)\b/i, name: 'message.received' },
+  { match: /\bwhen\s+(an?\s+)?task\s+(is\s+)?(created|opened|raised|added)\b/i, name: 'task.created' },
+  { match: /\bwhen\s+(an?\s+)?(approval|request)\s+(is\s+)?(decided|approved|rejected|declined)\b/i, name: 'approval.decided' },
+]
 const TIME = /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i
 const QUIET = /\b(no reply|not replied|gone quiet|went quiet|no response|unanswered)\b/i
 const OVERDUE = /\b(overdue|past due|late|slipping)\b/i
@@ -102,9 +117,34 @@ export function compileWorkflow(description: string): CompiledWorkflow {
   const nodes: WorkflowNode[] = []
   const risks: DetectedRisk[] = []
 
+  // A schedule beats an event when a sentence somehow says both: "every morning" is a rate the
+  // author chose, and honouring the event instead would run it far more often than they asked.
+  const subscribed = EVENT_PATTERNS.find((pattern) => pattern.match.test(text))
   const trigger = SCHEDULE.test(text)
     ? { kind: 'schedule' as const, ...cron(text) }
-    : { kind: 'manual' as const, spec: 'manual', description: 'when somebody runs it' }
+    : subscribed
+      ? {
+          kind: 'event' as const,
+          spec: subscribed.name,
+          description: `when ${eventDefinition(subscribed.name)!.label}`,
+        }
+      : { kind: 'manual' as const, spec: 'manual', description: 'when somebody runs it' }
+
+  // A sentence that clearly asks to be triggered by something, naming something nothing raises.
+  // Compiling it as manual would be the worst outcome available: the author asked for an
+  // automation and would be handed a button, with nothing saying so.
+  if (trigger.kind === 'manual' && WHEN.test(text)) {
+    return {
+      name: title(text),
+      graph: { trigger, nodes },
+      readback: '',
+      risks: [],
+      unsupported:
+        'That reads like it should run when something happens, but I could not tell which ' +
+        `moment you meant. Superwork can trigger on: ${EVENT_NAMES.join(', ')}. Name one of ` +
+        'those, or give it a schedule instead.',
+    }
+  }
 
   nodes.push({ id: 'trigger', type: 'trigger', label: `Trigger — ${trigger.description}`, next: ['find'] })
 
@@ -207,6 +247,17 @@ export function compileWorkflow(description: string): CompiledWorkflow {
       severity: 'high',
       message: 'The description asked for the message to be sent, not drafted.',
       mitigation: 'Compiled as a draft plus an approval. Sending is a decision a person makes.',
+    })
+  }
+  if (trigger.kind === 'event') {
+    risks.push({
+      severity: 'medium',
+      message:
+        `This runs once every time ${eventDefinition(trigger.spec)!.label} — which on a busy day ` +
+        'is far more often than a schedule would.',
+      mitigation:
+        "The workflow's daily action cap and its limit on unfinished runs both still apply, so " +
+        'a burst is throttled rather than followed. Lower the cap if that is not what you want.',
     })
   }
   if (trigger.kind === 'schedule' && !threshold && QUIET.test(text)) {

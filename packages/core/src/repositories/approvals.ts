@@ -2,6 +2,7 @@ import { asJson, type ApprovalStatus, type RiskTier, type Role, type TenantConte
 import { can, grantedScope, type Actor } from '@superwork/auth'
 import { DEFAULT_SLA_HOURS, roleAtLeast } from '../approval-policy.js'
 import { managersOf } from '../org-chart.js'
+import { emitEvent } from '../events.js'
 import { notify } from '../notify.js'
 
 const ROLES: Role[] = ['owner', 'admin', 'manager', 'member', 'viewer', 'guest', 'service']
@@ -371,6 +372,16 @@ export async function decideApproval(ctx: TenantContext, actor: Actor, input: De
     approval.agentRunId,
     approval.id,
   )
+  // The moment a decision exists, which is the one worth automating on (ADR 0090): what happens
+  // *after* somebody says yes is the work, and until now nothing could be told that they had.
+  await emitEvent(ctx, {
+    name: 'approval.decided',
+    entityType: 'approval',
+    entityId: approval.id,
+    payload: { kind: approval.kind, decision: input.decision, status },
+    actorType: 'user',
+    actorId: actor.userId,
+  })
 
   return getApproval(ctx, actor, input.approvalId)
 }

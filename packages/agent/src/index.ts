@@ -20,10 +20,20 @@ export {
   runDueWorkflows,
   continueWorkflowAfterApproval,
   countFirings,
+  type Cause,
   type SweepOutcome,
   type WorkflowRunOutcome,
   type WorkflowStepOutcome,
 } from './workflows.js'
+export {
+  dispatchEvents,
+  replayEvent,
+  subscriptions,
+  causeDepth,
+  EVENT_WINDOW_MS,
+  MAX_EVENT_DEPTH,
+  type DispatchOutcome,
+} from './event-dispatch.js'
 export { generateDigest, generateDueDigests } from './digest.js'
 export {
   checkAutopilotCaps,
