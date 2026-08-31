@@ -1,6 +1,8 @@
 import type { TenantContext } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
+import { sanitizeMessage } from '../sanitize.js'
+import { detectInjection } from '../retrieval/classify.js'
 import { writeAudit } from '../audit.js'
 
 /**
@@ -224,6 +226,8 @@ export interface InboundMail {
   threadExternalId: string
   from: { name: string | null; address: string }
   to: string[]
+  /** Who else was on it (ADR 0089). `cc_addresses` had no source to be written from. */
+  cc: string[]
   subject: string
   body: string
   sentAt: Date
@@ -302,12 +306,36 @@ export async function fileInbound(
     }
     if (!thread) continue
 
+    /**
+     * Both scans, once, here (ADR 0089).
+     *
+     * `sanitizeMessage` and `detectInjection` have run over every inbound message since Phase 2 —
+     * on every *read*, recomputed each time, and written down nowhere. `sanitized_at`,
+     * `remote_image_count` and `link_count` had no writer at all, and `injection_flagged` had one:
+     * `ground.ts`, when an agent happened to ground on the thread. So the inbox list, which reads
+     * the column because an aggregate cannot re-scan, showed no flag on a thread the detail view
+     * flagged — and the list is the screen triage works from.
+     *
+     * The body is stored raw. What is recorded here is what the scan *found*, never what it
+     * rendered: a stored rendering would be served to the next reader instead of running the
+     * current sanitizer over it, so every later improvement to that sanitizer would stop at the
+     * messages already in the table. Rendering re-runs; the finding is history.
+     */
+    const body = mail.body.slice(0, 100_000)
+    const scan = sanitizeMessage(body)
+    const injection = detectInjection(body)
+
     const [written] = await ctx.sql<{ id: string }[]>`
       INSERT INTO messages (organization_id, conversation_id, direction, from_address, from_name,
-                            to_addresses, sent_at, body_text, trust_level, external_id, created_by)
+                            to_addresses, cc_addresses, sent_at, body_text, trust_level,
+                            external_id, sanitized_at, remote_image_count, link_count,
+                            injection_flagged, created_by)
       VALUES (${ctx.organizationId}, ${thread.id}, 'inbound', ${fromAddress},
-              ${mail.from.name?.trim() || null}, ${toAddresses}, ${mail.sentAt},
-              ${mail.body.slice(0, 100_000)}, 'untrusted_external', ${mail.externalId}, ${ownerUserId})
+              ${mail.from.name?.trim() || null}, ${toAddresses},
+              ${mail.cc.map((address: string) => address.trim().toLowerCase()).filter(Boolean)},
+              ${mail.sentAt}, ${body}, 'untrusted_external', ${mail.externalId},
+              now(), ${scan.removed.remoteImages}, ${scan.links.length},
+              ${injection.length > 0}, ${ownerUserId})
       ON CONFLICT (organization_id, external_id) WHERE external_id IS NOT NULL AND deleted_at IS NULL
       DO NOTHING
       RETURNING id`

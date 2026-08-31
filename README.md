@@ -649,6 +649,40 @@ bug report.
 
 **Settings → Usage and cost.** See ADR 0030.
 
+## A scan that was written down
+
+Two scans have run over every inbound message since Phase 2 — one strips remote images, scripts and
+embeds, the other looks for an instruction aimed at the assistant. Both ran **on every read**,
+recomputed each time, and neither was recorded when the message arrived. `sanitized_at`,
+`remote_image_count` and `link_count` had no writer at all, so *"which correspondence carried a
+script, or a tracking pixel?"* had no answer: the finding lived as long as it took to render one
+thread.
+
+`injection_flagged` had exactly one writer — `ground.ts`, when an **agent** happened to ground on
+the thread during a run. Which left two screens disagreeing about the same message: the thread view
+re-scans on read and showed the finding; the inbox list reads the column, because an aggregate over
+conversations has nothing to re-scan with. **A thread carrying an injection attempt showed no flag
+on the screen triage works from**, until some agent read it.
+
+- **Scan once, on arrival, and record what was found.** Both screens now read the same fact, and
+  the corpus can be asked a question it could not be asked before.
+- **`cc_addresses` too**, which needed `cc` on the inbound contract — the column had no source to
+  be written from. A thread that cannot say who else was on it is the mailbox-shaped hole this
+  subsystem exists to close.
+- **The rendering is deliberately not stored.** It would answer "what did we show last Tuesday" and
+  it would be a security regression: a stored rendering is served *instead of* running the
+  sanitizer, so every later improvement would stop at the messages already in the table. The
+  finding is history; the rendering is now.
+- **A message nobody scanned says so** — including the demo's own seeded history — rather than
+  reading as scanned and clean. A CHECK says the counts cannot claim otherwise.
+- **The read that notices still writes.** A detector that learns a pattern after the message landed
+  is the case that outlives arrival scanning, so the thread view writes the flag it finds: false →
+  true only, untrusted content only, only when the column disagrees.
+- **Still work per read**, and worth naming: sanitizing every render is the price of always applying
+  the current rules, and it is the right side to err on.
+
+**Inbox → a thread.** See ADR 0089.
+
 ## A mode that decides which provider
 
 Somebody looked at a running Superwork and said the integrations seemed like dummies rather than

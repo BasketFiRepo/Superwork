@@ -37,6 +37,7 @@ const mail = (n: number, thread = 'thread-1'): InboundMail => ({
   threadExternalId: thread,
   from: { name: 'Ingrid Solberg', address: 'ingrid@halden.example' },
   to: ['ops@northwind.example'],
+  cc: ['quality@halden.example'],
   subject: 'Temperature excursion 2026-014',
   body: 'Two questions before we release the consignment.',
   sentAt: new Date(),

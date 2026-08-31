@@ -6,7 +6,7 @@ import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { assertSteppedUp } from '../step-up.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { detectInjection } from '../retrieval/classify.js'
-import { sanitizeMessage, type SanitizedContent } from '../sanitize.js'
+import { describeSanitization, sanitizeMessage, type SanitizedContent } from '../sanitize.js'
 
 /**
  * The Smart Inbox (§12.3).
@@ -171,12 +171,18 @@ export interface MessageView {
   fromName: string | null
   fromAddress: string
   toAddresses: string[]
+  /** Who else was on it. Empty for a message filed before anything carried a CC (ADR 0089). */
+  ccAddresses: string[]
   sentAt: Date
   /** Already sanitized: safe to render as text, never as HTML. */
   body: string
   sanitization: SanitizedContent['removed']
   sanitizationNote: string | null
   links: SanitizedContent['links']
+  /** When this message was scanned on arrival, or null for one that never was. */
+  scannedAt: Date | null
+  /** What that scan found, or null when there was no scan to report (ADR 0089). */
+  scanFoundOnArrival: { remoteImages: number; links: number } | null
   trustLevel: string
   injectionFlagged: boolean
   injectionPatterns: string[]
@@ -207,16 +213,45 @@ export async function listMessages(
       body_text: string
       trust_level: string
       injection_flagged: boolean
+      cc_addresses: string[]
+      sanitized_at: Date | null
+      remote_image_count: number
+      link_count: number
     }[]
   >`
-    SELECT id, direction, from_name, from_address, to_addresses, sent_at, body_text,
-           trust_level, injection_flagged
+    SELECT id, direction, from_name, from_address, to_addresses, cc_addresses, sent_at, body_text,
+           trust_level, injection_flagged, sanitized_at, remote_image_count, link_count
     FROM messages
     WHERE organization_id = ${ctx.organizationId} AND conversation_id = ${conversationId}
       AND deleted_at IS NULL
     ORDER BY sent_at ASC`
 
+  /**
+   * A message the live scan flags and the table does not is the bug this increment is about, seen
+   * from the other end: the thread view catches it because it re-scans, and the inbox list cannot,
+   * because an aggregate over conversations has nothing to re-scan with. Writing it here closes
+   * that gap for everything filed before arrival scanning, and for the case that will outlive this
+   * change — a detector that learns a pattern after the message landed.
+   *
+   * Bounded on purpose: only ever false → true, only for untrusted external content, and only when
+   * the stored flag actually disagrees. A read that writes on every pass would be a different kind
+   * of bug.
+   */
+  const newlyFlagged = rows
+    .filter((row) => row.trust_level === 'untrusted_external' && !row.injection_flagged)
+    .filter((row) => detectInjection(row.body_text).length > 0)
+    .map((row) => row.id)
+  if (newlyFlagged.length > 0) {
+    await ctx.sql`
+      UPDATE messages SET injection_flagged = true
+      WHERE organization_id = ${ctx.organizationId} AND id = ANY(${newlyFlagged}::uuid[])`
+  }
+
   return rows.map((row) => {
+    // Rendered by the *current* sanitizer, every time, on the raw body (ADR 0089). What arrival
+    // recorded is a finding, not a rendering: serving a stored rendering would hand the next
+    // reader whatever the rules were the day it landed, and every later improvement would stop at
+    // the messages already in the table.
     const sanitized = sanitizeMessage(row.body_text, { knownDomains: domains })
     const findings = row.trust_level === 'untrusted_external' ? detectInjection(row.body_text) : []
     return {
@@ -225,13 +260,22 @@ export async function listMessages(
       fromName: row.from_name,
       fromAddress: row.from_address,
       toAddresses: row.to_addresses,
+      ccAddresses: row.cc_addresses,
       sentAt: row.sent_at,
       body: sanitized.text,
       sanitization: sanitized.removed,
-      sanitizationNote: sanitized.modified
-        ? `${sanitized.removed.remoteImages} remote images blocked${sanitized.removed.scripts ? `, ${sanitized.removed.scripts} scripts removed` : ''}`
-        : null,
+      sanitizationNote: describeSanitization(sanitized),
       links: sanitized.links,
+      /**
+       * When the scan behind this message ran, or null for one filed before anything recorded it.
+       * A message that was never scanned on arrival says so rather than reading as scanned and
+       * clean — the two are only the same to somebody who has not asked.
+       */
+      scannedAt: row.sanitized_at,
+      scanFoundOnArrival:
+        row.sanitized_at === null
+          ? null
+          : { remoteImages: row.remote_image_count, links: row.link_count },
       trustLevel: row.trust_level,
       injectionFlagged: row.injection_flagged || findings.length > 0,
       injectionPatterns: findings.map((f) => f.pattern),
