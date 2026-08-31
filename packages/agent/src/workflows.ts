@@ -119,16 +119,37 @@ export async function simulateWorkflow(
   return execute(session, { ...input, simulated: true, trigger: 'simulation' })
 }
 
+/**
+ * What caused a run that something other than a person started (ADR 0090).
+ *
+ * `depth` is the length of the causal chain behind it, not a retry count: a workflow whose action
+ * raises an event that triggers a workflow is one link, and a product where a task creates a task
+ * has exactly that shape available to it.
+ */
+export interface Cause {
+  eventId: string
+  idempotencyKey: string
+  payload: Record<string, unknown>
+  depth: number
+  isReplay?: boolean
+}
+
 export async function runWorkflow(
   session: RunSession,
-  input: { workflowId: string; trigger?: string },
+  input: { workflowId: string; trigger?: string; cause?: Cause },
 ): Promise<WorkflowRunOutcome> {
   return execute(session, { ...input, simulated: false })
 }
 
 async function execute(
   session: RunSession,
-  input: { workflowId: string; simulated: boolean; windowDays?: number; trigger?: string },
+  input: {
+    workflowId: string
+    simulated: boolean
+    windowDays?: number
+    trigger?: string
+    cause?: Cause
+  },
 ): Promise<WorkflowRunOutcome> {
   const traceId = randomUUID()
   const windowDays = input.windowDays ?? 30
@@ -155,7 +176,7 @@ async function execute(
     // Unattended work is bounded by numbers a person set, checked against what actually
     // happened rather than against a counter in memory (§27.6).
     const capacity = input.simulated ? { allow: true, reason: '', remaining: MAX_ITEMS_PER_RUN } : await checkCapacity(ctx, workflow)
-    const runId = await openRun(ctx, workflow, input.simulated, input.trigger ?? 'manual')
+    const runId = await openRun(ctx, workflow, input.simulated, input.trigger ?? 'manual', input.cause)
     if (!capacity.allow) {
       await ctx.sql`
         UPDATE workflow_runs SET status = 'cancelled', finished_at = now(), error = ${capacity.reason}
@@ -806,14 +827,20 @@ async function openRun(
   workflow: WorkflowView,
   simulated: boolean,
   trigger: string,
+  cause?: Cause,
 ): Promise<string> {
+  // The idempotency key is the dispatch record (ADR 0090). An event-triggered run keys itself by
+  // the event, so the unique index — not a cursor, not a lease — is what stops the same event
+  // running the same workflow twice. Everything else keys itself uniquely, as before.
+  const key = cause?.idempotencyKey ?? `${workflow.currentVersionId}:${trigger}:${randomUUID()}`
   const [row] = await ctx.sql<{ id: string }[]>`
     INSERT INTO workflow_runs (
       organization_id, workflow_id, workflow_version_id, status, trigger, simulated,
-      idempotency_key, started_at, created_by
+      trigger_payload, run_depth, is_replay, idempotency_key, started_at, created_by
     ) VALUES (
       ${ctx.organizationId}, ${workflow.id}, ${workflow.currentVersionId}, 'running', ${trigger},
-      ${simulated}, ${`${workflow.currentVersionId}:${trigger}:${randomUUID()}`}, now(), ${ctx.userId}
+      ${simulated}, ${ctx.sql.json(asJson(cause?.payload ?? {}))}, ${cause?.depth ?? 0},
+      ${cause?.isReplay ?? false}, ${key}, now(), ${ctx.userId}
     ) RETURNING id`
   await writeAudit(ctx, {
     actorType: 'user',
@@ -821,7 +848,7 @@ async function openRun(
     action: simulated ? 'workflow.simulated' : 'workflow.run',
     entityType: 'workflow',
     entityId: workflow.id,
-    after: { runId: row!.id, trigger },
+    after: { runId: row!.id, trigger, eventId: cause?.eventId ?? null, depth: cause?.depth ?? 0 },
   })
   return row!.id
 }

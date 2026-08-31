@@ -2,6 +2,7 @@ import type { TenantContext } from '@superwork/db'
 import { asJson } from '@superwork/db'
 import { can, type Actor } from '@superwork/auth'
 import type { CompiledWorkflow, DetectedRisk, WorkflowGraph } from '@superwork/ai'
+import { eventDefinition, unknownEventMessage } from '@superwork/config'
 import { NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
 import { describeCron } from '../cron.js'
@@ -238,6 +239,21 @@ export async function activateWorkflow(
   // mean a draft that fires, which is not a draft.
   const trigger = workflow.graph?.trigger
   let schedule: ScheduleView | null = null
+  if (trigger?.kind === 'event') {
+    // A trigger nothing can honour stops the activation (ADR 0090), the same way a capability
+    // mode nothing can resolve stops the process (ADR 0088). Before this, the `if` below had no
+    // `else`: a workflow triggered by an event was set active, published, audited as activated
+    // and shown as running, and nothing would ever fire it. Silence is the one failure an
+    // automation cannot report, so it has to be refused at the only moment somebody is watching.
+    if (!eventDefinition(trigger.spec)) {
+      throw new ValidationError(unknownEventMessage(trigger.spec))
+    }
+  } else if (trigger && trigger.kind !== 'schedule' && trigger.kind !== 'manual') {
+    throw new ValidationError(
+      `This workflow is triggered by "${trigger.kind}", which nothing in Superwork fires. ` +
+        'A workflow runs on a schedule, on an event, or when somebody runs it.',
+    )
+  }
   if (trigger?.kind === 'schedule') {
     schedule = await upsertSchedule(ctx, {
       kind: 'workflow',

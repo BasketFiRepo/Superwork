@@ -2,6 +2,7 @@ import type { Priority, Sensitivity, TaskStatus, TenantContext } from '@superwor
 import { can, grantedScope, readCeiling, sharedObjectIds, type Actor } from '@superwork/auth'
 import { ConflictError, NotFoundError, PermissionError, ValidationError } from '../errors.js'
 import { writeActivity, writeAudit } from '../audit.js'
+import { emitEvent } from '../events.js'
 import { link } from '../links.js'
 import { startOfDay } from '../time.js'
 import { notifyUnblocked, unfinishedPrerequisites } from './task-dependencies.js'
@@ -288,6 +289,16 @@ export async function createTask(ctx: TenantContext, actor: Actor, input: Create
     entityLabel: input.title.trim(),
     summary: `Created task "${input.title.trim()}"`,
     agentRunId: input.agentRunId ?? null,
+  })
+  // Something an automation may be waiting for (ADR 0090). Raised after the row exists and the
+  // feed has it, so a subscriber that loads the task always finds one.
+  await emitEvent(ctx, {
+    name: 'task.created',
+    entityType: 'task',
+    entityId: id,
+    payload: { title: input.title.trim(), status: input.status ?? 'todo', assigneeId: input.assigneeId ?? null },
+    actorType: actor.type,
+    actorId: actor.agent?.agentId ?? actor.userId,
   })
   await writeAudit(ctx, {
     actorType: actor.type,

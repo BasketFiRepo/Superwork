@@ -649,6 +649,46 @@ bug report.
 
 **Settings → Usage and cost.** See ADR 0030.
 
+## A workflow that runs when something happens
+
+A workflow could run on a clock, or when somebody pressed a button. That was the whole list —
+though the graph has offered three trigger kinds since Phase 3, and activation read
+`if (trigger.kind === 'schedule')` with **no `else`**. A workflow triggered by an event was set
+active, published, audited as activated and shown on the screen as running, and nothing would ever
+fire it. The detail page said so in as many words: *"It runs when somebody runs it."*
+
+It was not reachable, and that is the reason to build it. The only path to a graph is the compiler,
+and the **mock** compiler emits `schedule` or `manual` only. The day a real model sits behind it, it
+will emit `event` — it is in the interface it is filling in — and activation would have accepted it
+silently.
+
+Three dead things turned out to be one unbuilt feature: the whole `events` table (whose comment
+since migration 0005 reads *"Workflow triggers and watchers read from here"*), and
+`workflow_runs.trigger_payload`, `is_replay` and `run_depth`.
+
+- **A trigger nothing can honour stops the activation**, naming the events that exist and the two
+  ways out — because an automation that never fires produces nothing, and nothing is what a correct
+  automation with no work to do produces. Silence is the one failure an automation cannot report.
+- **The compiler refuses in the same direction.** "When a contract is signed…" is `unsupported`,
+  not quietly compiled as manual. Handing somebody a button when they asked for an automation, with
+  nothing saying so, is the worst outcome available.
+- **The event decides *when*, not *what*.** The run executes the same graph a scheduled one would;
+  the event is recorded in `trigger_payload` so "why did this run happen" is answerable from the
+  run. Scoping the query to the event needs the safe query layer to take an entity, and is named
+  rather than half-done.
+- **No cursor and no lease.** The run keys itself `version:event:<id>` against the unique index
+  that has been there since 0007, so a second run for one event is a unique violation rather than a
+  decision. Two workers racing settle it in the index.
+- **Depth is derived from the trace**, not threaded through the tool layer — a run carries its trace
+  into everything it does, so an event raised by a run already says which run raised it. The
+  ceiling is three, and the hazard is not hypothetical: `create_task@v1` is one of two actions the
+  compiler can emit and `task.created` is one of three events it can subscribe to, so **one
+  sentence can build a workflow that triggers itself**.
+- **A replay is a person's decision.** A dispatcher that reached back on its own after an outage
+  would be a product that suddenly acts on a day of history nobody re-read.
+
+**Workflows → one workflow.** See ADR 0090.
+
 ## A scan that was written down
 
 Two scans have run over every inbound message since Phase 2 — one strips remote images, scripts and

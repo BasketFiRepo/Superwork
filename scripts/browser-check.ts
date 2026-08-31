@@ -949,6 +949,35 @@ try {
   // ---- Workflow authoring -------------------------------------------------
   await page.goto(`${BASE}/workflows`)
   await page.waitForSelector('[data-testid="workflow-composer"]', { timeout: 15_000 })
+
+  // The other way an automation starts (ADR 0090). Before this, activation had no `else` for an
+  // event trigger: the workflow went active and nothing ever fired it.
+  await page.fill(
+    '#workflow-description',
+    'When an email arrives, find customer threads that have gone quiet and create a task.',
+  )
+  await page.locator('[data-testid="workflow-compile"]').click()
+  await page.waitForSelector('[data-testid="workflow-readback"]', { timeout: 20_000 })
+  const eventCompose = await page.locator('[data-testid="workflow-composer"]').innerText()
+  ok('A sentence can ask to be run when something happens, not only on a clock',
+    /correspondence arrives/i.test(eventCompose), eventCompose.split('\n').find((line) => /arrives/i.test(line)))
+  ok('And it says out loud that this runs once per event rather than on a schedule',
+    /once every time/i.test(eventCompose))
+
+  // A moment nothing raises is refused rather than quietly compiled into a button.
+  expectingRefusal = true
+  await page.fill(
+    '#workflow-description',
+    'When a contract is signed, find overdue tasks and create a task for the owner.',
+  )
+  await page.locator('[data-testid="workflow-compile"]').click()
+  const unsupported = page.locator('[data-testid="workflow-composer"] [role="alert"]')
+  await unsupported.waitFor({ timeout: 20_000 }).catch(() => undefined)
+  const unsupportedText = (await unsupported.count()) ? await unsupported.innerText() : '(no message shown)'
+  ok('A trigger nothing raises is refused, and it names the ones that exist',
+    /message\.received/.test(unsupportedText), unsupportedText.slice(0, 90))
+  expectingRefusal = false
+
   await page.fill(
     '#workflow-description',
     'Every weekday at 9, find customer threads with no reply for 3 days and draft a follow-up.',
