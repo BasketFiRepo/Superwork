@@ -88,6 +88,7 @@ export const MIGRATIONS: readonly string[] = [
   '0074_a_file_somebody_attached',
   '0075_a_plan_somebody_can_change',
   '0076_somebody_who_signed_in_with_the_directory',
+  '0077_a_scan_that_was_written_down',
 ]
 
 /** The id half of a migration's name: `0054_correspondence…` → `0054`. */

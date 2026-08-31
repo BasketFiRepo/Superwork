@@ -155,6 +155,22 @@ try {
     `${afterArchive} → ${await page.locator('[data-testid="inbox-row"]').count()}`,
   )
 
+  // What the scan on arrival found, or the plain fact that there was none (ADR 0089). The demo's
+  // correspondence is seeded rather than filed through a sync, so every message here is honestly
+  // in the second state — which is the one worth walking, because it is what every deployment's
+  // existing history looks like the day this ships.
+  // The row opens on a double click; it is not a link.
+  await page.locator('[data-testid="inbox-row"]').first().dblclick()
+  await page.waitForSelector('[data-testid="message-scan"]', { timeout: 15_000 })
+  const scanNotes = await page.locator('[data-testid="message-scan"]').allInnerTexts()
+  ok('Every message says whether it was scanned when it arrived',
+    scanNotes.length > 0 && scanNotes.every((note) => /scanned on arrival/i.test(note)),
+    scanNotes[0]?.slice(0, 60))
+  ok('And a message nobody scanned says that, rather than showing a clean scan it never ran',
+    scanNotes.every((note) => /predates the record|checked just now/i.test(note)))
+  await page.goBack()
+  await page.waitForSelector('[data-testid="inbox-row"]', { timeout: 15_000 })
+
   // ---- Correspondence the product can record (ADR 0076) -------------------
   // Every thread in this demo was put here by `seedThreads`, and the only INSERT INTO
   // conversations or messages in the repository was in the seed: fourteen columns read by the

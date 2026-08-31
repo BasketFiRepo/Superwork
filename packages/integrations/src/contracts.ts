@@ -55,6 +55,13 @@ export interface InboundMessage {
   threadExternalId: string
   from: { name: string | null; address: string }
   to: string[]
+  /**
+   * Who else was on it (ADR 0089). `messages.cc_addresses` has existed since Phase 2 and this
+   * contract had nowhere to carry the value from, so the column stayed empty and a thread could
+   * not say who else had been reading it — in a product whose whole point is that the account
+   * history stops living in one person's mailbox.
+   */
+  cc: string[]
   subject: string
   body: string
   sentAt: Date

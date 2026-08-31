@@ -181,11 +181,30 @@ export default async function ThreadPage({ params }: { params: Promise<{ id: str
                 </div>
               </div>
               <div className="panel-body stack stack-4">
+                {message.ccAddresses.length > 0 ? (
+                  <span className="small muted mono" data-testid="message-cc">
+                    cc {message.ccAddresses.join(', ')}
+                  </span>
+                ) : null}
                 {message.sanitizationNote ? (
                   <div className="banner">
                     <span className="small">{message.sanitizationNote}. Nothing loads remotely from this message.</span>
                   </div>
                 ) : null}
+                {/*
+                  What the scan found when the message arrived, or the plain fact that there was
+                  no scan (ADR 0089). A message filed before arrival scanning is not the same as
+                  one that arrived clean, and the difference is only visible if it is said.
+                */}
+                <span className="small muted" data-testid="message-scan">
+                  {message.scanFoundOnArrival === null
+                    ? 'Not scanned on arrival — this message predates the record. What you are reading was checked just now.'
+                    : `Scanned on arrival: ${message.scanFoundOnArrival.remoteImages} remote ${
+                        message.scanFoundOnArrival.remoteImages === 1 ? 'image' : 'images'
+                      }, ${message.scanFoundOnArrival.links} ${
+                        message.scanFoundOnArrival.links === 1 ? 'link' : 'links'
+                      }. Checked again on every read.`}
+                </span>
                 {message.injectionFlagged ? (
                   <div className="banner banner-critical">
                     <span className="small">
